@@ -1,0 +1,730 @@
+diff --git a/docs/public/changelog/2026-09-04.mdx b/docs/public/changelog/2026-09-04.mdx
+new file mode 100644
+index 00000000..ed1b2e02
+--- /dev/null
++++ b/docs/public/changelog/2026-09-04.mdx
+@@ -0,0 +1,20 @@
++---
++title: "GLM 5.3 and GLM 5.3 Flash"
++date: "2026-09-04"
++---
++
++## GLM 5.3
++
++Z.ai's GLM 5.3 is now available through the built-in Z.ai provider, OpenRouter, and Fireworks, and replaces GLM 5.2 as the Z.ai provider default. It reasons on every request with three effort levels (`low`, `high`, `max`), carries a 1M-token context window with 128K max output, and supports tools and prompt caching.
++
++```bash
++fabro run workflow.fabro --model glm-5.3
++```
++
++The portable `glm`, `glm5`, `glm53`, and `glm5.3` aliases now resolve to GLM 5.3 across the Z.ai, OpenRouter, and Venice offerings. GLM 5.2 remains selectable by slug or through the `glm52` and `glm5.2` aliases; on the Z.ai coding endpoint, requests for GLM 5.2 (and GLM 5.1) are routed upstream to GLM 5.3.
++
++## GLM 5.3 Flash
++
++GLM 5.3 Flash joins the same providers as the small-default Z.ai model. It is natively multimodal — image, video, and file input alongside text — with the same 1M context, 128K max output, tool use, prompt caching, and reasoning effort controls.
++
++Z.ai and OpenRouter list GLM 5.3 Flash at launch-promo rates ($0.075 input / $0.25 output per million tokens through September 9, 2026; list rates are $0.15 / $0.50). Fireworks serves it at list rates.
+diff --git a/docs/public/core-concepts/models.mdx b/docs/public/core-concepts/models.mdx
+index d04232b5..6c42b53a 100644
+--- a/docs/public/core-concepts/models.mdx
++++ b/docs/public/core-concepts/models.mdx
+@@ -65,7 +65,9 @@ Fabro performs this selection once when creating a run and persists the chosen p
+ | `grok-4.6` | venice | `grok`, `grok46`, `grok-46` | 500K | $2.27 / $6.80 | n/a |
+ | `laguna-s-2.1` | poolside | `laguna`, `laguna-s` | 1M | $0.10 / $0.20 | n/a |
+ | `laguna-xs-2.1` | poolside | `laguna-xs` | 262K | $0.10 / $0.20 | n/a |
+-| `glm-5.2` | zai | `glm`, `glm5`, `glm52`, `glm5.2` | 1M | $1.40 / $4.40 | n/a |
++| `glm-5.3` | zai | `glm`, `glm5`, `glm53`, `glm5.3` | 1M | $1.40 / $4.40 | n/a |
++| `glm-5.3-flash` | zai | | 1M | $0.075 / $0.25 | n/a |
++| `glm-5.2` | zai | `glm52`, `glm5.2` | 1M | $1.40 / $4.40 | n/a |
+ | `glm-5.3` | venice | `glm`, `glm5`, `glm53`, `glm5.3`, `glm-5-3` | 1M | $1.75 / $5.50 | n/a |
+ | `minimax-m2.5` | minimax | `minimax` | 197K | $0.30 / $1.20 | 45 tok/s |
+ | `mercury-2` | inception | `mercury` | 131K | $0.25 / $0.75 | 1000 tok/s |
+@@ -240,7 +242,7 @@ When no model or provider is specified, Fabro chooses the default offering on th
+ | `gemini` | `gemini-3.5-flash` |
+ | `moonshot` | `kimi-k3` |
+ | `poolside` | `laguna-s-2.1` |
+-| `zai` | `glm-5.2` |
++| `zai` | `glm-5.3` |
+ | `venice` | `deepseek-v4-flash` |
+ | `minimax` | `minimax-m2.5` |
+ | `inception` | `mercury-2` |
+diff --git a/docs/public/docs.json b/docs/public/docs.json
+index f76a3ec3..72a42e5e 100644
+--- a/docs/public/docs.json
++++ b/docs/public/docs.json
+@@ -305,6 +305,13 @@
+         "tab": "Changelog",
+         "icon": "clock-rotate-left",
+         "groups": [
++          {
++            "group": "September 2026",
++            "icon": "clock-rotate-left",
++            "pages": [
++              "changelog/2026-09-04"
++            ]
++          },
+           {
+             "group": "August 2026",
+             "icon": "clock-rotate-left",
+diff --git a/docs/public/integrations/fireworks.mdx b/docs/public/integrations/fireworks.mdx
+index e1819885..d6aa41bc 100644
+--- a/docs/public/integrations/fireworks.mdx
++++ b/docs/public/integrations/fireworks.mdx
+@@ -53,6 +53,7 @@ The built-in catalog gives Fireworks offerings the same human-facing model slugs
+ | `kimi-k2.7-code` | `accounts/fireworks/models/kimi-k2p7-code`; provider default |
+ | `kimi-k2.6` | `accounts/fireworks/models/kimi-k2p6` |
+ | `deepseek-v4-pro`, `deepseek-v4-flash` (`deepseek`, `deepseek-v4`, `deepseek-flash`) | `accounts/fireworks/models/deepseek-v4-...` |
++| `glm-5.3`, `glm-5.3-flash` | `accounts/fireworks/models/glm-5p3`, `accounts/fireworks/models/glm-5p3-flash` |
+ | `glm-5.2` | `accounts/fireworks/models/glm-5p2` |
+ | `minimax-m2.7` | `accounts/fireworks/models/minimax-m2p7` |
+ | `qwen3.7-plus` | `accounts/fireworks/models/qwen3p7-plus` |
+diff --git a/docs/public/integrations/openrouter.mdx b/docs/public/integrations/openrouter.mdx
+index d82dbc4e..80d0cb76 100644
+--- a/docs/public/integrations/openrouter.mdx
++++ b/docs/public/integrations/openrouter.mdx
+@@ -56,7 +56,7 @@ The built-in catalog gives OpenRouter offerings the same human-facing model slug
+ | `deepseek-v4-pro`, `deepseek-v4-flash` (`deepseek`, `deepseek-v4`, `deepseek-flash`) | `deepseek/...` API IDs; Flash uses the `deepseek-v4-flash-0731` release |
+ | `kimi-k3`, `kimi-k2.6`, `qwen3-coder`, `qwen3.6-flash` | Vendor-prefixed API IDs |
+ | `laguna-s-2.1`, `laguna-xs-2.1` | `poolside/...`; native reasoning and tool use |
+-| `glm-5.2` (`glm`, `glm5`, `glm52`, `glm5.2`), `glm-4.6` | `z-ai/...` API IDs |
++| `glm-5.3` (`glm`, `glm5`, `glm53`, `glm5.3`), `glm-5.3-flash`, `glm-5.2`, `glm-4.6` | `z-ai/...` API IDs |
+ | `minimax-m2.7`, `mimo-v2.5-pro` | Vendor-prefixed API IDs |
+ | `nemotron-3-super-120b-a12b`, `devstral-2512` | Vendor-prefixed API IDs |
+ 
+diff --git a/lib/components/fabro-llm/tests/integration.rs b/lib/components/fabro-llm/tests/integration.rs
+index c91cad13..f56afba2 100644
+--- a/lib/components/fabro-llm/tests/integration.rs
++++ b/lib/components/fabro-llm/tests/integration.rs
+@@ -554,6 +554,170 @@ enabled = true
+     assert_eq!(final_response.cost_source, Some(CostSource::Authoritative));
+ }
+ 
++#[fabro_macros::e2e_test(live("ZAI_API_KEY"))]
++async fn zai_glm_5_3_reasoning_tool_round_trip() {
++    let api_key = std::env::var(EnvVars::ZAI_API_KEY).expect("ZAI_API_KEY must be set");
++    let adapter = OpenAiCompatibleAdapter::new(api_key, "https://api.z.ai/api/coding/paas/v4")
++        .with_name("zai")
++        .with_catalog(Arc::new(Catalog::from_builtin().unwrap()));
++    let tool = ToolDefinition::function(
++        "multiply",
++        "Multiply two integers",
++        serde_json::json!({
++            "type": "object",
++            "properties": {
++                "a": {"type": "integer"},
++                "b": {"type": "integer"}
++            },
++            "required": ["a", "b"]
++        }),
++    );
++    let request = Request {
++        model: "glm-5.3".to_string(),
++        messages: vec![Message::user(
++            "Use the multiply tool to calculate 19 times 23. Do not calculate it yourself.",
++        )],
++        tools: Some(vec![tool]),
++        tool_choice: Some(ToolChoice::Required),
++        temperature: Some(0.0),
++        max_tokens: Some(4096),
++        reasoning_effort: Some(ReasoningEffort::High),
++        ..make_request("glm-5.3")
++    };
++
++    let tool_response = adapter.complete(&request).await.unwrap();
++    assert_eq!(tool_response.finish_reason, FinishReason::ToolCalls);
++    let raw_message_keys = tool_response
++        .raw
++        .as_ref()
++        .and_then(|raw| raw.pointer("/choices/0/message"))
++        .and_then(serde_json::Value::as_object)
++        .map(|message| message.keys().cloned().collect::<Vec<_>>())
++        .unwrap_or_default();
++    assert!(
++        tool_response.reasoning().is_some(),
++        "GLM 5.3 should return reasoning content before its tool call; raw message keys: \
++         {raw_message_keys:?}"
++    );
++    let tool_call = tool_response
++        .tool_calls()
++        .into_iter()
++        .next()
++        .expect("GLM 5.3 should call the required tool");
++    assert_eq!(tool_call.name, "multiply");
++
++    let mut messages = request.messages.clone();
++    messages.push(tool_response.message);
++    messages.push(Message::tool_result(
++        tool_call.id,
++        serde_json::json!({"product": 437}),
++        false,
++    ));
++    let final_request = Request {
++        model: "glm-5.3".to_string(),
++        messages,
++        temperature: Some(0.0),
++        max_tokens: Some(2048),
++        reasoning_effort: Some(ReasoningEffort::High),
++        ..make_request("glm-5.3")
++    };
++
++    let final_response = adapter.complete(&final_request).await.unwrap();
++    assert_eq!(final_response.finish_reason, FinishReason::Stop);
++    assert!(
++        final_response.text().contains("437"),
++        "GLM 5.3 should incorporate the replayed tool result"
++    );
++}
++
++#[fabro_macros::e2e_test(live("OPENROUTER_API_KEY"))]
++async fn openrouter_glm_5_3_reasoning_tool_round_trip() {
++    let api_key =
++        std::env::var(EnvVars::OPENROUTER_API_KEY).expect("OPENROUTER_API_KEY must be set");
++    let overrides: LlmCatalogSettings = toml::from_str(
++        r"
++[providers.openrouter]
++enabled = true
++",
++    )
++    .expect("OpenRouter catalog override should parse");
++    let catalog = Catalog::from_builtin_with_overrides(&overrides)
++        .expect("enabled OpenRouter catalog should build");
++    let adapter = OpenAiCompatibleAdapter::new(api_key, "https://openrouter.ai/api/v1")
++        .with_name("openrouter")
++        .with_catalog(Arc::new(catalog));
++    let tool = ToolDefinition::function(
++        "multiply",
++        "Multiply two integers",
++        serde_json::json!({
++            "type": "object",
++            "properties": {
++                "a": {"type": "integer"},
++                "b": {"type": "integer"}
++            },
++            "required": ["a", "b"]
++        }),
++    );
++    let request = Request {
++        model: "z-ai/glm-5.3".to_string(),
++        messages: vec![Message::user(
++            "Use the multiply tool to calculate 19 times 23. Do not calculate it yourself.",
++        )],
++        tools: Some(vec![tool]),
++        tool_choice: Some(ToolChoice::Required),
++        temperature: Some(0.0),
++        max_tokens: Some(4096),
++        reasoning_effort: Some(ReasoningEffort::High),
++        ..make_request("z-ai/glm-5.3")
++    };
++
++    let tool_response = adapter.complete(&request).await.unwrap();
++    assert_eq!(tool_response.finish_reason, FinishReason::ToolCalls);
++    let raw_message_keys = tool_response
++        .raw
++        .as_ref()
++        .and_then(|raw| raw.pointer("/choices/0/message"))
++        .and_then(serde_json::Value::as_object)
++        .map(|message| message.keys().cloned().collect::<Vec<_>>())
++        .unwrap_or_default();
++    assert!(
++        tool_response.reasoning().is_some(),
++        "GLM 5.3 should return reasoning content before its tool call; raw message keys: \
++         {raw_message_keys:?}"
++    );
++    assert_eq!(tool_response.cost_source, Some(CostSource::Authoritative));
++    let tool_call = tool_response
++        .tool_calls()
++        .into_iter()
++        .next()
++        .expect("GLM 5.3 should call the required tool");
++    assert_eq!(tool_call.name, "multiply");
++
++    let mut messages = request.messages.clone();
++    messages.push(tool_response.message);
++    messages.push(Message::tool_result(
++        tool_call.id,
++        serde_json::json!({"product": 437}),
++        false,
++    ));
++    let final_request = Request {
++        model: "z-ai/glm-5.3".to_string(),
++        messages,
++        temperature: Some(0.0),
++        max_tokens: Some(2048),
++        reasoning_effort: Some(ReasoningEffort::High),
++        ..make_request("z-ai/glm-5.3")
++    };
++
++    let final_response = adapter.complete(&final_request).await.unwrap();
++    assert_eq!(final_response.finish_reason, FinishReason::Stop);
++    assert!(
++        final_response.text().contains("437"),
++        "GLM 5.3 should incorporate the replayed tool result"
++    );
++    assert_eq!(final_response.cost_source, Some(CostSource::Authoritative));
++}
++
+ #[fabro_macros::e2e_test(live("OPENROUTER_API_KEY"))]
+ async fn openrouter_poolside_laguna_complete() {
+     let api_key =
+diff --git a/lib/foundation/fabro-model/src/catalog.rs b/lib/foundation/fabro-model/src/catalog.rs
+index 56c0f5b0..d4cba3aa 100644
+--- a/lib/foundation/fabro-model/src/catalog.rs
++++ b/lib/foundation/fabro-model/src/catalog.rs
+@@ -1893,6 +1893,8 @@ const LEGACY_BUILTIN_MODEL_IDENTIFIERS: &[(&str, &str, &str)] = &[
+     ("poolside/laguna-xs-2.1", "openrouter", "laguna-xs-2.1"),
+     ("qwen/qwen3-coder", "openrouter", "qwen3-coder"),
+     ("qwen/qwen3.6-flash", "openrouter", "qwen3.6-flash"),
++    ("z-ai/glm-5.3", "openrouter", "glm-5.3"),
++    ("z-ai/glm-5.3-flash", "openrouter", "glm-5.3-flash"),
+     ("z-ai/glm-5.2", "openrouter", "glm-5.2"),
+     ("z-ai/glm-4.6", "openrouter", "glm-4.6"),
+     (
+@@ -3444,7 +3446,7 @@ enabled = true
+     }
+ 
+     #[test]
+-    fn builtin_glm_5_2_aliases_are_portable() {
++    fn builtin_glm_aliases_are_portable() {
+         let catalog = Catalog::from_builtin_with_overrides(&minimal_settings(
+             r"
+ [providers.openrouter]
+@@ -3454,14 +3456,23 @@ enabled = true
+         .expect("enabled OpenRouter override should build from the built-in provider settings");
+ 
+         for provider in [ProviderId::new("zai"), ProviderId::new("openrouter")] {
+-            for alias in ["glm", "glm5", "glm52", "glm5.2"] {
++            for (alias, canonical_id) in [
++                ("glm", "glm-5.3"),
++                ("glm5", "glm-5.3"),
++                ("glm53", "glm-5.3"),
++                ("glm5.3", "glm-5.3"),
++                ("z-ai/glm-5.3", "glm-5.3"),
++                ("z-ai/glm-5.3-flash", "glm-5.3-flash"),
++                ("glm52", "glm-5.2"),
++                ("glm5.2", "glm-5.2"),
++            ] {
+                 let model = catalog
+                     .resolve_on_provider(&provider, alias)
+                     .unwrap_or_else(|error| {
+                         panic!("{alias} should resolve on {provider}: {error}")
+                     });
+                 assert_eq!(model.provider, provider, "{alias}");
+-                assert_eq!(model.id, "glm-5.2", "{alias}");
++                assert_eq!(model.id, canonical_id, "{alias}");
+             }
+         }
+     }
+@@ -3626,8 +3637,6 @@ enabled = true
+             },
+             estimated_output_tps: None,
+             aliases: [
+-                "glm",
+-                "glm5",
+                 "glm52",
+                 "glm5.2",
+             ],
+@@ -4189,6 +4198,30 @@ enabled = true
+                 0.28,
+                 0.028,
+             ),
++            (
++                "glm-5.3",
++                "accounts/fireworks/models/glm-5p3",
++                "glm-5",
++                1_048_576,
++                131_072,
++                false,
++                true,
++                1.4,
++                4.4,
++                0.26,
++            ),
++            (
++                "glm-5.3-flash",
++                "accounts/fireworks/models/glm-5p3-flash",
++                "glm-5",
++                1_048_576,
++                131_072,
++                true,
++                true,
++                0.15,
++                0.5,
++                0.03,
++            ),
+             (
+                 "glm-5.2",
+                 "accounts/fireworks/models/glm-5p2",
+@@ -4348,6 +4381,8 @@ enabled = true
+                 "kimi-k2.6",
+                 "deepseek-v4-pro",
+                 "deepseek-v4-flash",
++                "glm-5.3",
++                "glm-5.3-flash",
+                 "glm-5.2",
+                 "minimax-m2.7",
+             ] {
+@@ -7264,12 +7299,10 @@ sampling_params = false
+             },
+             estimated_output_tps: None,
+             aliases: [
+-                "glm",
+-                "glm5",
+                 "glm52",
+                 "glm5.2",
+             ],
+-            default: true,
++            default: false,
+             small_default: false,
+             configured: false,
+         }
+@@ -7283,12 +7316,151 @@ sampling_params = false
+             ReasoningEffort::High,
+             ReasoningEffort::Max
+         ]);
+-        assert_eq!(catalog.get("glm").unwrap().id, "glm-5.2");
+-        assert_eq!(catalog.get("glm5").unwrap().id, "glm-5.2");
+         assert_eq!(catalog.get("glm52").unwrap().id, "glm-5.2");
+         assert_eq!(catalog.get("glm5.2").unwrap().id, "glm-5.2");
+     }
+ 
++    #[test]
++    fn glm_5_3_in_catalog() {
++        let catalog = Catalog::builtin();
++        let model = catalog.get("glm-5.3").expect("GLM 5.3 should be present");
++        insta::assert_debug_snapshot!(model, @r#"
++        Model {
++            id: "glm-5.3",
++            provider: zai,
++            family: "glm-5",
++            display_name: "GLM 5.3",
++            limits: ModelLimits {
++                context_window: 1048576,
++                max_output: Some(
++                    131072,
++                ),
++            },
++            training: None,
++            knowledge_cutoff: None,
++            features: ModelFeatures {
++                tools: true,
++                vision: false,
++                reasoning: true,
++                reasoning_effort: Levels,
++                prompt_cache: true,
++                cache_control_breakpoints: false,
++                sampling_params: true,
++            },
++            controls: ModelControls {
++                reasoning_effort: [
++                    Low,
++                    High,
++                    Max,
++                ],
++            },
++            costs: ModelCosts {
++                input_cost_per_mtok: Some(
++                    1.4,
++                ),
++                output_cost_per_mtok: Some(
++                    4.4,
++                ),
++                cache_input_cost_per_mtok: Some(
++                    0.26,
++                ),
++            },
++            estimated_output_tps: None,
++            aliases: [
++                "glm",
++                "glm5",
++                "glm53",
++                "glm5.3",
++            ],
++            default: true,
++            small_default: false,
++            configured: false,
++        }
++        "#);
++
++        let settings = catalog
++            .model_settings("glm-5.3")
++            .expect("GLM 5.3 settings should be present");
++        assert_eq!(settings.api_id, "glm-5.3");
++        assert_eq!(settings.controls.reasoning_effort, vec![
++            ReasoningEffort::Low,
++            ReasoningEffort::High,
++            ReasoningEffort::Max
++        ]);
++        assert_eq!(catalog.get("glm").unwrap().id, "glm-5.3");
++        assert_eq!(catalog.get("glm5").unwrap().id, "glm-5.3");
++        assert_eq!(catalog.get("glm53").unwrap().id, "glm-5.3");
++        assert_eq!(catalog.get("glm5.3").unwrap().id, "glm-5.3");
++    }
++
++    #[test]
++    fn glm_5_3_flash_in_catalog() {
++        let catalog = Catalog::builtin();
++        let model = catalog
++            .get("glm-5.3-flash")
++            .expect("GLM 5.3 Flash should be present");
++        insta::assert_debug_snapshot!(model, @r#"
++        Model {
++            id: "glm-5.3-flash",
++            provider: zai,
++            family: "glm-5",
++            display_name: "GLM 5.3 Flash",
++            limits: ModelLimits {
++                context_window: 1048576,
++                max_output: Some(
++                    131072,
++                ),
++            },
++            training: None,
++            knowledge_cutoff: None,
++            features: ModelFeatures {
++                tools: true,
++                vision: true,
++                reasoning: true,
++                reasoning_effort: Levels,
++                prompt_cache: true,
++                cache_control_breakpoints: false,
++                sampling_params: true,
++            },
++            controls: ModelControls {
++                reasoning_effort: [
++                    Low,
++                    High,
++                    Max,
++                ],
++            },
++            costs: ModelCosts {
++                input_cost_per_mtok: Some(
++                    0.075,
++                ),
++                output_cost_per_mtok: Some(
++                    0.25,
++                ),
++                cache_input_cost_per_mtok: Some(
++                    0.015,
++                ),
++            },
++            estimated_output_tps: None,
++            aliases: [],
++            default: false,
++            small_default: true,
++            configured: false,
++        }
++        "#);
++
++        let settings = catalog
++            .model_settings("glm-5.3-flash")
++            .expect("GLM 5.3 Flash settings should be present");
++        assert_eq!(settings.api_id, "glm-5.3-flash");
++        assert_eq!(
++            catalog
++                .small_default_for_provider(&ProviderId::new("zai"))
++                .unwrap()
++                .id,
++            "glm-5.3-flash"
++        );
++    }
++
+     #[test]
+     fn minimax_m2_5_in_catalog() {
+         let m = Catalog::builtin().get("minimax-m2.5").unwrap();
+diff --git a/lib/foundation/fabro-model/src/catalog/providers/fireworks.toml b/lib/foundation/fabro-model/src/catalog/providers/fireworks.toml
+index 48024f3e..54dfc75f 100644
+--- a/lib/foundation/fabro-model/src/catalog/providers/fireworks.toml
++++ b/lib/foundation/fabro-model/src/catalog/providers/fireworks.toml
+@@ -178,6 +178,48 @@ input_cost_per_mtok = 0.14
+ output_cost_per_mtok = 0.28
+ cache_input_cost_per_mtok = 0.028
+ 
++# Fireworks serves GLM 5.3 at Z.ai's list rates. Verified against
++# docs.fireworks.ai/serverless/pricing on 2026-09-04.
++[providers.fireworks.models."glm-5.3"]
++api_id = "accounts/fireworks/models/glm-5p3"
++display_name = "GLM 5.3 (via Fireworks)"
++family = "glm-5"
++
++[providers.fireworks.models."glm-5.3".limits]
++context_window = 1048576
++max_output = 131072
++
++[providers.fireworks.models."glm-5.3".features]
++tools = true
++vision = false
++reasoning = true
++prompt_cache = true
++
++[providers.fireworks.models."glm-5.3".costs]
++input_cost_per_mtok = 1.4
++output_cost_per_mtok = 4.4
++cache_input_cost_per_mtok = 0.26
++
++[providers.fireworks.models."glm-5.3-flash"]
++api_id = "accounts/fireworks/models/glm-5p3-flash"
++display_name = "GLM 5.3 Flash (via Fireworks)"
++family = "glm-5"
++
++[providers.fireworks.models."glm-5.3-flash".limits]
++context_window = 1048576
++max_output = 131072
++
++[providers.fireworks.models."glm-5.3-flash".features]
++tools = true
++vision = true
++reasoning = true
++prompt_cache = true
++
++[providers.fireworks.models."glm-5.3-flash".costs]
++input_cost_per_mtok = 0.15
++output_cost_per_mtok = 0.5
++cache_input_cost_per_mtok = 0.03
++
+ [providers.fireworks.models."glm-5.2"]
+ api_id = "accounts/fireworks/models/glm-5p2"
+ display_name = "GLM 5.2 (via Fireworks)"
+diff --git a/lib/foundation/fabro-model/src/catalog/providers/openrouter.toml b/lib/foundation/fabro-model/src/catalog/providers/openrouter.toml
+index 427d178b..12a7256b 100644
+--- a/lib/foundation/fabro-model/src/catalog/providers/openrouter.toml
++++ b/lib/foundation/fabro-model/src/catalog/providers/openrouter.toml
+@@ -619,11 +619,63 @@ input_cost_per_mtok = 2.0
+ output_cost_per_mtok = 6.0
+ cache_input_cost_per_mtok = 0.25
+ 
++[providers.openrouter.models."glm-5.3"]
++api_id = "z-ai/glm-5.3"
++display_name = "GLM 5.3 (via OpenRouter)"
++family = "glm-5"
++aliases = ["glm", "glm5", "glm53", "glm5.3"]
++
++[providers.openrouter.models."glm-5.3".limits]
++context_window = 1048576
++max_output = 131072
++
++[providers.openrouter.models."glm-5.3".features]
++tools = true
++vision = false
++reasoning = true
++reasoning_effort = "levels"
++prompt_cache = true
++
++[providers.openrouter.models."glm-5.3".controls]
++reasoning_effort = ["low", "high", "max"]
++
++[providers.openrouter.models."glm-5.3".costs]
++input_cost_per_mtok = 1.4
++output_cost_per_mtok = 4.4
++cache_input_cost_per_mtok = 0.14
++
++# Native multimodal (image/video input). Matches Z.ai's launch promo through
++# 2026-09-09; OpenRouter's authoritative in-band usage.cost supersedes this
++# estimate on completed responses.
++[providers.openrouter.models."glm-5.3-flash"]
++api_id = "z-ai/glm-5.3-flash"
++display_name = "GLM 5.3 Flash (via OpenRouter)"
++family = "glm-5"
++
++[providers.openrouter.models."glm-5.3-flash".limits]
++context_window = 1048576
++max_output = 131072
++
++[providers.openrouter.models."glm-5.3-flash".features]
++tools = true
++vision = true
++reasoning = true
++reasoning_effort = "levels"
++prompt_cache = true
++
++[providers.openrouter.models."glm-5.3-flash".controls]
++reasoning_effort = ["low", "high", "max"]
++
++[providers.openrouter.models."glm-5.3-flash".costs]
++input_cost_per_mtok = 0.075
++output_cost_per_mtok = 0.25
++cache_input_cost_per_mtok = 0.015
++
+ [providers.openrouter.models."glm-5.2"]
+ api_id = "z-ai/glm-5.2"
+ display_name = "GLM 5.2 (via OpenRouter)"
+ family = "glm-5"
+-aliases = ["glm", "glm5", "glm52", "glm5.2"]
++aliases = ["glm52", "glm5.2"]
+ 
+ [providers.openrouter.models."glm-5.2".limits]
+ context_window = 1048576
+diff --git a/lib/foundation/fabro-model/src/catalog/providers/zai.toml b/lib/foundation/fabro-model/src/catalog/providers/zai.toml
+index 58fb8c38..3d877adc 100644
+--- a/lib/foundation/fabro-model/src/catalog/providers/zai.toml
++++ b/lib/foundation/fabro-model/src/catalog/providers/zai.toml
+@@ -8,11 +8,68 @@ priority = 60
+ [providers.zai.auth]
+ credentials = ["env:ZAI_API_KEY", "vault:ZAI_API_KEY"]
+ 
++# GLM 5.3 and GLM 5.3 Flash run on the same coding endpoint as GLM 5.2.
++# `thinking.type` only accepts `enabled` (reasoning cannot be disabled), so
++# requests reason at one of the three effort levels below. Requests for
++# GLM-5.2/GLM-5.1 are auto-routed upstream to GLM-5.3, and GLM-4.7 requests
++# to GLM-5.3-Flash. Prices are from docs.z.ai/guides/overview/pricing,
++# verified 2026-09-04.
++
++[providers.zai.models."glm-5.3"]
++display_name = "GLM 5.3"
++family = "glm-5"
++default = true
++aliases = ["glm", "glm5", "glm53", "glm5.3"]
++
++[providers.zai.models."glm-5.3".limits]
++context_window = 1048576
++max_output = 131072
++
++[providers.zai.models."glm-5.3".features]
++tools = true
++vision = false
++reasoning = true
++reasoning_effort = "levels"
++prompt_cache = true
++
++[providers.zai.models."glm-5.3".controls]
++reasoning_effort = ["low", "high", "max"]
++
++[providers.zai.models."glm-5.3".costs]
++input_cost_per_mtok = 1.4
++output_cost_per_mtok = 4.4
++cache_input_cost_per_mtok = 0.26
++
++# Native multimodal (image/video/file input). Launch promo prices through
++# 2026-09-09; list rates are input 0.15 / output 0.5 / cache 0.03.
++[providers.zai.models."glm-5.3-flash"]
++display_name = "GLM 5.3 Flash"
++family = "glm-5"
++small_default = true
++
++[providers.zai.models."glm-5.3-flash".limits]
++context_window = 1048576
++max_output = 131072
++
++[providers.zai.models."glm-5.3-flash".features]
++tools = true
++vision = true
++reasoning = true
++reasoning_effort = "levels"
++prompt_cache = true
++
++[providers.zai.models."glm-5.3-flash".controls]
++reasoning_effort = ["low", "high", "max"]
++
++[providers.zai.models."glm-5.3-flash".costs]
++input_cost_per_mtok = 0.075
++output_cost_per_mtok = 0.25
++cache_input_cost_per_mtok = 0.015
++
+ [providers.zai.models."glm-5.2"]
+ display_name = "GLM 5.2"
+ family = "glm-5"
+-default = true
+-aliases = ["glm", "glm5", "glm52", "glm5.2"]
++aliases = ["glm52", "glm5.2"]
+ 
+ [providers.zai.models."glm-5.2".limits]
+ context_window = 1048576
