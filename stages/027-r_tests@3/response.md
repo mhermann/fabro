@@ -1,0 +1,24 @@
+Review complete. Here is my test-coverage assessment.
+
+## What's covered (and would fail if the code were wrong)
+
+**Catalog data — z.ai** (`lib/foundation/fabro-model/src/catalog.rs`):
+- `glm_5_3_in_catalog` — full insta snapshot (1M context, 131K max output, tools, no vision, reasoning levels, costs 1.4/4.4/0.26, controls `[Low, High, Max]`), `api_id`, all four alias resolutions (`glm`/`glm5`/`glm53`/`glm5.3`), and `default_for_provider(zai) == "glm-5.3"`. Any TOML drift fails this.
+- `glm_5_3_flash_in_catalog` — snapshot asserting `vision: true`, `small_default: true`, costs 0.15/0.5/0.03, plus alias resolution and `small_default_for_provider(zai) == "glm-5.3-flash"` — the hook run-title generation uses. Correct level to test it.
+- **Default handover is pinned from both sides**: `glm_5_2_in_catalog`'s updated snapshot asserts `default: false` and trimmed aliases `["glm52","glm5.2"]`, so accidentally leaving `default = true` on 5.2 (double default) or leaving `glm`/`glm5` on it fails a test. `builtin_glm_5_3_aliases_are_portable` fails if the portable aliases still resolve to 5.2.
+
+**Catalog data — OpenRouter/Fireworks**: `builtin_openrouter_includes_glm_5_3_when_enabled` asserts snapshot + `api_id == "z-ai/glm-5.3"` + controls; the Fireworks table test asserts id, `api_id` (`glm-5p3`/`glm-5p3-flash`), family, windows, vision/reasoning flags, and all three costs per row, with an exhaustive `model_ids == expected_ids` equality so missing/extra rows fail; `builtin_deepseek_shared_slugs_are_portable_across_providers` now proves ID resolution on both fireworks and openrouter.
+
+**Live behavior**: `zai_glm_5_3_reasoning_tool_round_trip` and `openrouter_glm_5_3_reasoning_tool_round_trip` test real behavior (forced tool call, reasoning content present, tool-result incorporation, authoritative cost), are correctly `live(...)`-gated, and match the glm-5.2 precedent exactly. Docs changes have no test coupling (no docs-sync test exists in the repo — nothing required).
+
+I ran the suite: `cargo test -p fabro-model` → 178 passed (including all 4 new glm tests + fireworks table); fabro-llm tests compile; new live tests skip cleanly in twin mode.
+
+## Findings — specific untested cases
+
+**1. (Material) OpenRouter `glm-5.3-flash` row has no unit test.** Nothing asserts on the openrouter provider: `api_id == "z-ai/glm-5.3-flash"`, the costs (0.15/0.50/0.03), `vision = true`, or that `glm-flash`/`glm53-flash`/`glm5.3-flash` resolve there. The shared-slugs test only proves the model ID exists. A typo'd openrouter api_id (e.g. `z-ai/glm-5.3-flash-preview`) or a wrong OpenRouter-specific price would ship and only fail at the first live request. This contradicts the file's own precedent: every openrouter addition asserts its api_id (glm-5.2 at line ~3641, glm-5.3 at ~3718, kimi-k3 ~3791, qwen3.8-max ~3865), and flash-tier openrouter models get the same treatment (deepseek-v4-flash: lines ~3216–3227 assert api_id, limits, and all three costs on openrouter). Add a `builtin_openrouter_includes_glm_5_3_flash_when_enabled` test (or extend the shared-slugs loop with api_id/alias/cost checks).
+
+**2. (Minor) Fireworks `controls.reasoning_effort = ["low","high","max"]` is asserted nowhere.** The Fireworks table test checks no controls at all, and there is no glm equivalent of `builtin_deepseek_reasoning_controls_match_provider_dialects` (line ~3103), which exists precisely to pin cross-provider control dialects. A copy-paste of `["low","medium","high"]` into `fireworks.toml` passes the whole suite. Pre-existing for glm-5.2, but this change introduces the new `low` level on fireworks, so the dialect-agreement test pattern is in scope.
+
+**3. (Minor, behavioral) The `low` effort level is never sent to a real API, and glm-5.3-flash has no live test on any provider.** Both live round trips use `ReasoningEffort::High` and the flagship model. `low` is new to the glm family (5.2 supported only high/max), flash becomes z.ai's auto-selected small_default, and precedent exists for live-testing flash-tier models (`deepseek_v4_flash_deep_tool_round_trip`, integration.rs ~789). If z.ai/OpenRouter rejects `reasoning_effort: "low"` for glm-5.3 or flash's tool calling is broken, no test anywhere catches it — the catalog unit tests only assert the *declared* list, not acceptance. One zai flash round trip with `ReasoningEffort::Low` would close both.
+
+Everything else — the alias move, the default demotion, the fireworks/zai cost rows, live flagship behavior on two providers — is adequately and idiomatically tested; the tests assert externally visible catalog state through the public API and would survive a refactor of catalog internals.
