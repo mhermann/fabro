@@ -1,0 +1,6 @@
+{
+  "mode": "prompt",
+  "provider": "zai",
+  "model": "glm-5.2",
+  "reasoning_effort": "high"
+}
