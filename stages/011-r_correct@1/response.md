@@ -1,0 +1,19 @@
+Review complete. I examined the full diff (catalog TOMLs, catalog tests, integration tests, docs), the catalog build/resolution machinery, and ran the relevant test suites.
+
+## Verdict: correct — no findings
+
+### What the change does
+Adds GLM 5.3 (becomes the zai default, takes over portable `glm`/`glm5`/`glm53`/`glm5.3` aliases) and GLM 5.3 Flash (zai `small_default`, vision-capable, `glm-flash`/`glm53-flash`/`glm5.3-flash`) across `zai.toml`, `openrouter.toml` (`z-ai/glm-5.3[-flash]`), and `fireworks.toml` (`glm-5p3[-flash]`). GLM 5.2 is demoted to `glm52`/`glm5.2` selectors only. Docs and tests updated to match.
+
+### What I verified
+- **Catalog integrity**: no duplicate per-provider selectors (`DuplicateProviderModelSelector` would fail the build); zai has exactly one `default` and one `small_default` (`MultipleProviderDefaults`/`MultipleProviderSmallDefaults` guards). All 178 `fabro-model` tests pass, including the new snapshot tests.
+- **Alias/default semantics**: `glm`/`glm5` correctly move from glm-5.2 → glm-5.3 on both zai and openrouter. The cross-provider alias overlap with venice's pre-existing glm-5.3 (venice is enabled by default and already claimed `glm`/`glm5`/`glm53`/`glm5.3`) resolves by provider priority (zai 60 > venice 35 > openrouter 25) — same resolution order as before the change, where `glm` resolved to zai glm-5.2.
+- **Fireworks test tuples**: field order is `(id, api_id, family, context, max_output, vision, reasoning, input, output, cache_read)`; the new entries set vision=false for glm-5.3 and vision=true for flash, matching both TOMLs.
+- **Docs ↔ data parity**: `models.mdx` prices/windows/aliases, `openrouter.mdx` and `fireworks.mdx` API IDs, changelog claims ("$0.15/M input, $0.50/M output", "low, high, max on both models") all match the TOMLs exactly. `docs.json` adds "September 2026" newest-first, consistent with the existing nav ordering, and the page file exists.
+- **No stale references**: repo-wide grep shows no other code or config defaulting to glm-5.2 (the `z-ai/glm-5.2` entry in `LEGACY_BUILTIN_MODEL_IDENTIFIERS` is a historical compat map and correctly stays; current api_ids are registered as live selectors at build time, so no new legacy entries are needed).
+- **Follow-on behavior is intended**: zai-configured setups now use the $0.15/M flash for `small_default` consumers (e.g. run-title generation in `fabro-server`), which is the point of adding a small default.
+- **Tests**: `fabro-workflow` fallback tests (28+3) pass. The single `fabro-llm` failure (`providers::openai::tests::count_input_tokens_logs_operation_on_provider_error`) is in untouched code and passes in isolation — flaky under parallel load, unrelated to this diff. The new live e2e tests compile and are faithful clones of the passing glm-5.2 pattern.
+
+### Observations (labeled guesses, not defects)
+1. **Fireworks cache pricing** — `fireworks.toml` glm-5.3 `cache_input_cost_per_mtok = 0.26` equals z.ai's cache price, but Fireworks' glm-5.2 entry uses $0.14 (10% of input, Fireworks' usual discount). If Fireworks discounts cached input for glm-5.3 as it did for glm-5.2, $0.26 overstates cache cost. This is externally sourced pricing I cannot verify from the repo; the value is at least internally consistent with the zai/openrouter entries.
+2. **`Catalog::closest` tie** (catalog.rs:1481) — falling back from zai glm-5.3 to Fireworks picks fireworks glm-5.2 (identical features, identical $1.40 input cost, sorts first) rather than glm-5.3. This is the pre-existing cost-based selection design, deterministic, and not a regression introduced here.

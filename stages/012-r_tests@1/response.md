@@ -1,0 +1,19 @@
+## Review: test coverage
+
+**Overall: strong.** The change follows the codebase's established per-model test pattern, and the tests are behavior-driven (resolve/select through the public catalog API, snapshot the built catalog) rather than implementation-coupled. I ran them: `cargo test -p fabro-model glm|fireworks|shared_slugs` — all pass; the new live tests compile.
+
+What's covered well:
+
+- **zai `glm-5.3`** (`glm_5_3_in_catalog`, catalog.rs:7391): full snapshot pinning limits, features, costs (1.4/4.4/0.26), the new `Low/High/Max` effort controls, aliases, and `default: true`; plus alias resolution and `default_for_provider(zai)`. Any wrong value in `zai.toml` fails this.
+- **zai `glm-5.3-flash`** (`glm_5_3_flash_in_catalog`, :7471): pins `vision: true`, `small_default: true`, costs 0.15/0.50/0.03, flash aliases, and `small_default_for_provider(zai)`.
+- **Default-model handover regression** — `glm_5_2_in_catalog` (:7324) was correctly updated: `default: false` and the stripped alias set (`glm52`/`glm5.2` retained). `builtin_glm_5_3_aliases_are_portable` (:3447) proves `glm`/`glm5` now resolve to glm-5.3 on **both** zai and OpenRouter. Same for the updated OpenRouter glm-5.2 snapshot.
+- **Fireworks** — `builtin_fireworks_models_when_enabled` (:4183) is a *complete* enumeration ("expected rows must cover every Fireworks model") with new rows for both models pinning api_id, family, limits, vision, reasoning, prompt_cache, and all three costs; `builtin_deepseek_shared_slugs_are_portable_across_providers` (:4433) adds cross-provider id resolution.
+- **Live round-trips** (credential-gated, mirroring the glm-5.2 precedent exactly, including which cost assertions each variant carries) for zai and OpenRouter glm-5.3 with tool calls, reasoning presence, and replayed tool results.
+
+Two specific untested cases:
+
+1. **OpenRouter `glm-5.3-flash` has no dedicated assertions** (catalog.rs:647–670 in `openrouter.toml`). Its api_id `z-ai/glm-5.3-flash`, costs, and `vision = true` are never checked on that provider — the only OpenRouter-flash coverage is id/provider resolution in the shared-slugs test. A typo in the OpenRouter flash `api_id` or a wrong cost in that block passes the entire suite and only fails against the live API. This deviates from the change's own precedent: the non-flash sibling got `builtin_openrouter_includes_glm_5_3_when_enabled` (snapshot + `api_id` assert), and `builtin_glm_5_3_aliases_are_portable` covers only the four non-flash aliases on OpenRouter — the `glm-flash`/`glm53-flash`/`glm5.3-flash` aliases are asserted on zai only. Minimal fix: add the flash aliases to the portability loop and one `model_settings_on_provider(openrouter, "glm-5.3-flash").api_id` assert.
+
+2. **Fireworks reasoning-effort controls for the new models are untested.** `builtin_fireworks_models_when_enabled` asserts `settings.controls.reasoning_effort` only for kimi-k3/kimi-k3-fast (:4405–4429); the new `["low","high","max"]` rows in `fireworks.toml` (the `low` level is new for this family — glm-5.2 is High/Max only) are pinned on zai and OpenRouter but not on Fireworks. A typo like `"mxx"` there passes. Minor, since it's catalog data not code, but it's new behavior in this diff.
+
+Not a gap: the `Low` effort level's wire mapping needs no per-model test — it flows through the generic `openai_compatible` codec, which has its own `encode_serializes_reasoning_effort_at_top_level` unit test. And the absence of a glm-5.3-flash live test is defensible (live tests are opt-in and there was no flash precedent), though it compounds finding 1 — the flash OpenRouter api_id is the one new string in this change that nothing verifies.
