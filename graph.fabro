@@ -1,0 +1,94 @@
+digraph Sdlc {
+    graph [
+        goal="No goal supplied. Pass --goal or --goal-file.",
+        model_stylesheet="
+            *      { model: glm-5.2; reasoning_effort: high; }
+            .deep  { reasoning_effort: max; }
+        ",
+        on_failure="exit",
+        max_node_visits=24
+    ]
+    rankdir=LR
+
+    start [shape=Mdiamond, label="Start"]
+    exit  [shape=Msquare, label="Exit"]
+
+    understand [label="Understand", thread_id="build", fidelity="full", prompt="@prompts/understand.md"]
+    ask        [label="Draft Questions", thread_id="build", fidelity="full", prompt="@prompts/ask.md"]
+    interview  [shape=hexagon, label="Answer the open questions", max_visits=5]
+    triage     [label="Triage Answers", shape=tab, prompt="@prompts/triage-answers.md"]
+
+    plan   [label="Plan", class="deep", thread_id="build", fidelity="full", prompt="@prompts/plan.md", max_visits=8]
+    devils [label="Devil's Advocate", class="deep", thread_id="build", fidelity="full", prompt="@prompts/devils.md"]
+
+    implement [label="Implement", thread_id="build", fidelity="full", prompt="@prompts/implement.md", max_visits=8]
+
+
+    fork [label="Fan Out Reviews", shape=component, max_parallel=4]
+
+    r_correct  [label="Correctness", prompt="@prompts/review-correctness.md"]
+    r_security [label="Security", prompt="@prompts/review-security.md"]
+    r_tests    [label="Tests", prompt="@prompts/review-tests.md"]
+    r_simple   [label="Simplicity", prompt="@prompts/review-simplicity.md"]
+
+    synth [label="Synthesize Reviews", shape=tripleoctagon, prompt="@prompts/synthesize.md"]
+
+    draft_pr [label="Draft PR Description", prompt="@prompts/draft-pr.md"]
+
+    create_pr [label="Create PR", shape=parallelogram,
+               script="set -eu
+BRANCH=$(git branch --show-current)
+if [ ! -s /tmp/pr-title.txt ]; then echo missing-or-empty-pr-title >&2; exit 1; fi
+if [ ! -s /tmp/pr-body.md ]; then echo missing-or-empty-pr-body >&2; exit 1; fi
+TITLE=$(head -n 1 /tmp/pr-title.txt | tr -d '\`\"' | sed -e 's/^[[:space:]]*#*[[:space:]]*//' -e 's/[[:space:]]*$//' | cut -c1-70)
+if [ -z \"$TITLE\" ]; then echo pr-title-empty-after-sanitising >&2; exit 1; fi
+git push -u origin $BRANCH
+gh pr create --base main --head $BRANCH --title \"$TITLE\" --body-file /tmp/pr-body.md
+gh pr view --json url --jq .url"]
+
+    deep_review [label="Deep Review", class="deep", prompt="@prompts/deep-review.md", max_visits=6]
+
+    human_report [shape=hexagon, label="Review flagged something needing your decision"]
+
+    merge [label="Merge PR", shape=parallelogram,
+           script="set -eu
+BRANCH=$(git branch --show-current)
+git push origin $BRANCH
+gh pr merge $BRANCH --squash"]
+
+    start -> understand -> ask -> interview
+    interview -> triage [freeform=true]
+
+    triage -> ask  [label="more"]
+    triage -> plan [label="enough", weight=10]
+
+    plan -> devils
+    devils -> ask [condition="internal.node_visit_count >= 4"]
+    devils -> plan [label="revise"]
+    devils -> implement [label="approve"]
+
+    implement -> fork
+    fork -> r_correct
+    fork -> r_security
+    fork -> r_tests
+    fork -> r_simple
+    r_correct  -> synth
+    r_security -> synth
+    r_tests    -> synth
+    r_simple   -> synth
+
+    synth -> deep_review
+
+    deep_review -> ask [condition="internal.node_visit_count >= 4", weight=20]
+    deep_review -> implement    [label="fix"]
+    deep_review -> human_report [label="escalate", weight=10]
+    deep_review -> draft_pr     [label="approve"]
+
+    human_report -> exit      [label="[S] Stop here"]
+    human_report -> implement [label="[F] Send back for fixes"]
+    human_report -> draft_pr  [label="[M] Approve and open the PR"]
+
+    draft_pr -> create_pr
+    create_pr -> merge
+    merge -> exit
+}
