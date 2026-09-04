@@ -870,7 +870,7 @@
     "kind": "running"
   },
   "status_updated_at": "2026-09-04T08:48:53.405675Z",
-  "last_event_at": "2026-09-04T08:57:38.913807Z",
+  "last_event_at": "2026-09-04T08:59:11.769406Z",
   "pending_control": null,
   "checkpoints": [
     {
@@ -913,9 +913,9 @@
       "diff": {}
     },
     {
-      "seq": 0,
+      "seq": 378,
       "checkpoint": {
-        "timestamp": "2026-09-04T08:57:38.925550Z",
+        "timestamp": "2026-09-04T08:57:42.764689Z",
         "current_node": "understand",
         "completed_nodes": [
           "start",
@@ -924,25 +924,25 @@
         "node_retries": {},
         "context_values": {
           "internal.fidelity": "full",
-          "thread.build.current_node": "understand",
-          "graph.goal": "Add z.ai GLM5.3 and GLM5.3 Flash support. Understand the provider model for the models\n\nNotes:\n- Use precedent for changing default model\n- Implement in openrouter and others as well\n- Research the pricing yourself",
-          "graph.max_node_visits": "24",
-          "graph.rankdir": "LR",
-          "internal.retry_count.start": 0,
-          "last_response": "Exploration complete. Here is the understanding report.\n\n---\n\n## 1. Repository structure and where the change lands\n\n**Fabro** is an AI workflow orchestration platform: a Rust workspace (`lib/apps`, `",
-          "outcome": "succeeded",
+          "internal.run_id": "01M1NSPB70PZK5VG2ZPH6Q2ZYF",
           "last_stage": "understand",
-          "current_node": "understand",
+          "graph.rankdir": "LR",
           "internal.retry_count.understand": 0,
+          "internal.work_dir": "/workspace/fabro",
+          "graph.max_node_visits": "24",
+          "internal.node_visit_count": 1,
+          "current_node": "understand",
           "failure_class": "",
           "graph.on_failure": "exit",
-          "internal.node_visit_count": 1,
-          "internal.work_dir": "/workspace/fabro",
-          "failure_signature": "",
-          "internal.thread_id": "build",
-          "internal.run_id": "01M1NSPB70PZK5VG2ZPH6Q2ZYF",
           "graph.model_stylesheet": "\n            *      { model: glm-5.2; reasoning_effort: high; }\n            .deep  { reasoning_effort: max; }\n        ",
-          "response.understand": "Exploration complete. Here is the understanding report.\n\n---\n\n## 1. Repository structure and where the change lands\n\n**Fabro** is an AI workflow orchestration platform: a Rust workspace (`lib/apps`, `lib/components`, `lib/foundation`), a React 19 web app (`apps/fabro-web`), Mintlify docs (`docs/public`), with `cargo nextest` for tests and insta snapshots.\n\nThe provider/model system lives in **`lib/foundation/fabro-model`**:\n\n- `src/catalog/providers/*.toml` — one TOML per provider, embedded into the binary via `rust_embed`. Each model row declares `api_id`, `display_name`, `family`, `default`/`small_default`, `aliases`, `estimated_output_tps`, `limits` (context/max output), `features` (tools/vision/reasoning/reasoning_effort kind/prompt_cache), `controls.reasoning_effort` (allowed levels), and `costs` (input/output/cache per Mtok).\n- `src/catalog.rs` — parses/validates/merges the catalog (enforces one `default` per provider, alias uniqueness per provider, reasoning-controls consistency), indexes selectors, and holds extensive tests including insta snapshots of model rows.\n- `src/reasoning.rs` — `ReasoningEffort` enum: `low | medium | high | xhigh | max`.\n- `src/types.rs` — `Model`, `ModelFeatures` with `ReasoningEffortFeature::{Levels, AlwaysAdaptive, None}`.\n\nThe `zai` provider (`zai.toml`) is an `openai_compatible` adapter pointed at `https://api.z.ai/api/coding/paas/v4`, credentials `ZAI_API_KEY`, priority 60. It currently serves `glm-5.2` (`default = true`, aliases `glm, glm5, glm52, glm5.2`, 1,048,576 ctx / 131,072 out, efforts `high|max`, costs 1.4/4.4/0.26) and `glm-4.7`.\n\nEverything downstream (server `GET /models`, CLI, web UI, agent profiles) reads the catalog dynamically — no hardcoded model lists anywhere else. Docs (`docs/public/core-concepts/models.mdx` table, `integrations/*.mdx`, dated changelog files) are maintained by hand.\n\n## 2. Goal restated in this codebase's terms\n\nAdd **`glm-5.3`** and **`glm-5.3-flash`** as model offerings in the built-in catalog:\n\n1. **`zai.toml`**: add `glm-5.3` (text-only flagship) and `glm-5.3-flash` (multimodal, vision-capable). Following the GLM 5.2 precedent (commit `c67cfef1`): the new flagship gets `default = true`, `glm-5.2` loses `default`, and the portable aliases `glm`/`glm5` move from `glm-5.2` to `glm-5.3` (which keeps `glm52`, `glm5.2`), mirroring how `glm-4.7` was demoted and kept only `glm4`.\n2. **`openrouter.toml`**: add both models with `api_id = \"z-ai/glm-5.3\"` / `\"z-ai/glm-5.3-flash\"`, OpenRouter pricing, and portable aliases matching the zai rows (the `builtin_glm_5_2_aliases_are_portable` test asserts zai/openrouter alias parity).\n3. **\"Others\"**: `fireworks.toml` already serves `glm-5.2` (`accounts/fireworks/models/glm-5p2`), so `glm-5p3` / `glm-5p3-flash` rows are the natural extension; `venice.toml` already has `glm-5.3` but not Flash; `bedrock.toml` has an older distinct `glm-5`.\n4. **Catalog tests** in `catalog.rs`: update the `glm_5_2_in_catalog` snapshot (its `default` flips to `false`), extend/replace `builtin_glm_5_2_aliases_are_portable`, add `glm_5_3_*` tests following the existing pattern, possibly extend the Fireworks tuple-table test.\n5. **Docs**: update the `models.mdx` table (which currently lists `glm-5.3` under *venice* only), `openrouter.mdx` (and `fireworks.mdx` if touched), plus a changelog bullet in a dated `docs/public/changelog/2026-09-*.mdx`.\n6. Optionally, live e2e round-trip tests in `lib/components/fabro-llm/tests/integration.rs` mirroring `zai_glm_5_2_reasoning_tool_round_trip` / `openrouter_glm_5_2_...`.\n\nNo codec/adapter work appears needed: zai already rides the `openai_compatible` codec, which sends `reasoning_effort` top-level and reads `reasoning_content`/`reasoning` — the `fabro-llm` adapter registry test (`every_builtin_catalog_offering_resolves`) iterates the catalog automatically.\n\n## 3. What I know for certain\n\n**From the repo:**\n- The default-change precedent is exactly `c67cfef1` (GLM 5.2 over 4.7) and `18d46282` (GPT-5.6 Sol became OpenAI default): new flagship gets `default = true`, old default loses it, generic aliases migrate, docs + snapshots updated. Exactly one `default` per provider is enforced at build time (`MultipleProviderDefaults`).\n- Aliases are per-provider; unqualified selectors pick the highest-priority ready provider. zai (60) > venice (35) > fireworks (30) > openrouter (25), so `glm` resolves to zai when both keys exist.\n- Venice already ships `glm-5.3`: 1,000,000 ctx / 131,072 out, `levels` + `reasoning_by_default = true`, efforts `low|high|max`, prompt_cache, costs 1.75/5.50/0.325 — a same-model precedent inside this very catalog.\n- `ReasoningEffort` already includes `low` and `max`; `AlwaysAdaptive` is only behaviorally consumed by the Anthropic adapter, so for OpenAI-compatible routes `levels` vs `always_adaptive` is descriptive.\n- `small_default = true` is the convention for cheap/fast tier models on their home provider (haiku, gpt-5.4-mini, deepseek-v4-flash, gemini-flash-lite).\n- No GLM/zai hardcoding exists in fabro-server, fabro-web, evals, or the OpenAPI spec — catalog data flows through automatically.\n\n**From external research (z.ai docs + OpenRouter, fetched today):**\n- **GLM-5.3** (`glm-5.3`, released 2026-08-18): text-only, 1M context, **128K max output**, reasoning always-on with efforts **`low|high|max`** (default `max`; disabling fails), function calling + streaming + context caching + structured output supported. z.ai list price **$1.40 / $4.40 / $0.26 cache** per Mtok — identical to GLM-5.2. Served via the same coding endpoint (`/api/coding/paas/v4`).\n- **GLM-5.3-Flash** (`glm-5.3-flash`, released 2026-08-26): native multimodal (**image/video/file input → text**), 1M context, **128K max output**, text parameters identical to GLM-5.3 (same effort levels, thinking cannot be disabled), function calling/caching/structured output supported. z.ai list price **$0.15 / $0.50 / $0.03 cache**, currently 50% off (**$0.075 / $0.25 / $0.015**) until Sep 9, 2026.\n- **OpenRouter**: `z-ai/glm-5.3` headline **$1.15 / $3.50**, cache $0.10 (Z.ai first-party row is 1.40/4.40/0.26); `z-ai/glm-5.3-flash` headline **$0.075 / $0.25 / $0.015** (the 50%-off price; list 0.15/0.50/0.03). Both also served by Fireworks (5.3 at 1.40/4.40/0.26; Flash at 0.15/0.50/0.03) and Venice (Flash at 0.15/0.50/0.03).\n\n## 4. What is genuinely ambiguous\n\n1. **Which \"others\" beyond OpenRouter.** Fireworks and Venice both demonstrably serve these models, but is the intent \"every provider that already carries GLM 5.2\" (zai + openrouter + fireworks), \"plus Venice Flash,\" or \"anywhere it's fetchable\"? Bedrock carries only an older `glm-5` and probably shouldn't grow a row unless AWS lists it. Two engineers would reasonably ship different provider coverage.\n2. **Which price to record.** z.ai rows: list (1.40/4.40/0.26 and 0.15/0.50/0.03) vs current promo (Flash at half price until Sep 9 — a price that goes stale in days). OpenRouter rows: the existing `glm-5.2` entry (0.784/2.464/0.1456) proves the convention is \"OpenRouter's displayed headline at update time\" — which is currently a *discounted/cheapest-provider* figure (1.15/3.50/0.10 for 5.3), not Z.ai list. Whether to use headline vs Z.ai-row pricing for OpenRouter is a judgment call with a stale-by-September-9 wrinkle.\n3. **`reasoning_effort` feature kind.** z.ai says reasoning is always-on and cannot be disabled — textbook `always_adaptive`. But Venice's existing `glm-5.3` row uses `levels` + `reasoning_by_default = true`. Behaviorally near-identical on this adapter today, but the rows will disagree across providers for the same model if zai/openrouter pick one and Venice keeps the other.\n4. **Flash's role on zai.** Should `glm-5.3-flash` be `small_default = true` (haiku/deepseek-flash/mini precedent), and does it inherit the `glm-flash`-style aliases? What exactly the alias set should be for each new model (`glm53`, `glm5.3`, `glm-flash`, `glm53-flash`, …) is convention, not fact — though the 5.2 → 5.3 alias migration pattern is clear for the flagship.\n5. **Limits numbers.** Repo's glm-5.2 uses 1,048,576/131,072 while z.ai documents 5.3/Flash as \"1M context, 128K max output\" (OpenRouter FAQ says 1,310,720/262,144, which looks like input+output combined). Whether `context_window = 1048576, max_output = 131072` or `1000000/131072` (Venice's choice) — and 128K = 131072 vs 128000 — needs a deliberate convention pick.\n6. **Scope of test/docs work.** Whether to add live `e2e_test` round-trips for 5.3 (they cost real API calls and the 5.2 ones exist), update the Venice `models.mdx` row's provider attribution, whether the Flash tier needs an `estimated_output_tps` figure, and whether a fresh dated changelog file is created vs. appending to an existing one.\n7. **`glm-4.7`'s fate.** It stays regardless, but with 5.3 at identical list pricing and better benchmarks, some would also prune `glm-4.6`-aged rows; nothing in the instruction demands removal, so leaving them is the conservative read."
+          "outcome": "succeeded",
+          "failure_signature": "",
+          "last_response": "Exploration complete. Here is the understanding report.\n\n---\n\n## 1. Repository structure and where the change lands\n\n**Fabro** is an AI workflow orchestration platform: a Rust workspace (`lib/apps`, `",
+          "internal.retry_count.start": 0,
+          "response.understand": "Exploration complete. Here is the understanding report.\n\n---\n\n## 1. Repository structure and where the change lands\n\n**Fabro** is an AI workflow orchestration platform: a Rust workspace (`lib/apps`, `lib/components`, `lib/foundation`), a React 19 web app (`apps/fabro-web`), Mintlify docs (`docs/public`), with `cargo nextest` for tests and insta snapshots.\n\nThe provider/model system lives in **`lib/foundation/fabro-model`**:\n\n- `src/catalog/providers/*.toml` — one TOML per provider, embedded into the binary via `rust_embed`. Each model row declares `api_id`, `display_name`, `family`, `default`/`small_default`, `aliases`, `estimated_output_tps`, `limits` (context/max output), `features` (tools/vision/reasoning/reasoning_effort kind/prompt_cache), `controls.reasoning_effort` (allowed levels), and `costs` (input/output/cache per Mtok).\n- `src/catalog.rs` — parses/validates/merges the catalog (enforces one `default` per provider, alias uniqueness per provider, reasoning-controls consistency), indexes selectors, and holds extensive tests including insta snapshots of model rows.\n- `src/reasoning.rs` — `ReasoningEffort` enum: `low | medium | high | xhigh | max`.\n- `src/types.rs` — `Model`, `ModelFeatures` with `ReasoningEffortFeature::{Levels, AlwaysAdaptive, None}`.\n\nThe `zai` provider (`zai.toml`) is an `openai_compatible` adapter pointed at `https://api.z.ai/api/coding/paas/v4`, credentials `ZAI_API_KEY`, priority 60. It currently serves `glm-5.2` (`default = true`, aliases `glm, glm5, glm52, glm5.2`, 1,048,576 ctx / 131,072 out, efforts `high|max`, costs 1.4/4.4/0.26) and `glm-4.7`.\n\nEverything downstream (server `GET /models`, CLI, web UI, agent profiles) reads the catalog dynamically — no hardcoded model lists anywhere else. Docs (`docs/public/core-concepts/models.mdx` table, `integrations/*.mdx`, dated changelog files) are maintained by hand.\n\n## 2. Goal restated in this codebase's terms\n\nAdd **`glm-5.3`** and **`glm-5.3-flash`** as model offerings in the built-in catalog:\n\n1. **`zai.toml`**: add `glm-5.3` (text-only flagship) and `glm-5.3-flash` (multimodal, vision-capable). Following the GLM 5.2 precedent (commit `c67cfef1`): the new flagship gets `default = true`, `glm-5.2` loses `default`, and the portable aliases `glm`/`glm5` move from `glm-5.2` to `glm-5.3` (which keeps `glm52`, `glm5.2`), mirroring how `glm-4.7` was demoted and kept only `glm4`.\n2. **`openrouter.toml`**: add both models with `api_id = \"z-ai/glm-5.3\"` / `\"z-ai/glm-5.3-flash\"`, OpenRouter pricing, and portable aliases matching the zai rows (the `builtin_glm_5_2_aliases_are_portable` test asserts zai/openrouter alias parity).\n3. **\"Others\"**: `fireworks.toml` already serves `glm-5.2` (`accounts/fireworks/models/glm-5p2`), so `glm-5p3` / `glm-5p3-flash` rows are the natural extension; `venice.toml` already has `glm-5.3` but not Flash; `bedrock.toml` has an older distinct `glm-5`.\n4. **Catalog tests** in `catalog.rs`: update the `glm_5_2_in_catalog` snapshot (its `default` flips to `false`), extend/replace `builtin_glm_5_2_aliases_are_portable`, add `glm_5_3_*` tests following the existing pattern, possibly extend the Fireworks tuple-table test.\n5. **Docs**: update the `models.mdx` table (which currently lists `glm-5.3` under *venice* only), `openrouter.mdx` (and `fireworks.mdx` if touched), plus a changelog bullet in a dated `docs/public/changelog/2026-09-*.mdx`.\n6. Optionally, live e2e round-trip tests in `lib/components/fabro-llm/tests/integration.rs` mirroring `zai_glm_5_2_reasoning_tool_round_trip` / `openrouter_glm_5_2_...`.\n\nNo codec/adapter work appears needed: zai already rides the `openai_compatible` codec, which sends `reasoning_effort` top-level and reads `reasoning_content`/`reasoning` — the `fabro-llm` adapter registry test (`every_builtin_catalog_offering_resolves`) iterates the catalog automatically.\n\n## 3. What I know for certain\n\n**From the repo:**\n- The default-change precedent is exactly `c67cfef1` (GLM 5.2 over 4.7) and `18d46282` (GPT-5.6 Sol became OpenAI default): new flagship gets `default = true`, old default loses it, generic aliases migrate, docs + snapshots updated. Exactly one `default` per provider is enforced at build time (`MultipleProviderDefaults`).\n- Aliases are per-provider; unqualified selectors pick the highest-priority ready provider. zai (60) > venice (35) > fireworks (30) > openrouter (25), so `glm` resolves to zai when both keys exist.\n- Venice already ships `glm-5.3`: 1,000,000 ctx / 131,072 out, `levels` + `reasoning_by_default = true`, efforts `low|high|max`, prompt_cache, costs 1.75/5.50/0.325 — a same-model precedent inside this very catalog.\n- `ReasoningEffort` already includes `low` and `max`; `AlwaysAdaptive` is only behaviorally consumed by the Anthropic adapter, so for OpenAI-compatible routes `levels` vs `always_adaptive` is descriptive.\n- `small_default = true` is the convention for cheap/fast tier models on their home provider (haiku, gpt-5.4-mini, deepseek-v4-flash, gemini-flash-lite).\n- No GLM/zai hardcoding exists in fabro-server, fabro-web, evals, or the OpenAPI spec — catalog data flows through automatically.\n\n**From external research (z.ai docs + OpenRouter, fetched today):**\n- **GLM-5.3** (`glm-5.3`, released 2026-08-18): text-only, 1M context, **128K max output**, reasoning always-on with efforts **`low|high|max`** (default `max`; disabling fails), function calling + streaming + context caching + structured output supported. z.ai list price **$1.40 / $4.40 / $0.26 cache** per Mtok — identical to GLM-5.2. Served via the same coding endpoint (`/api/coding/paas/v4`).\n- **GLM-5.3-Flash** (`glm-5.3-flash`, released 2026-08-26): native multimodal (**image/video/file input → text**), 1M context, **128K max output**, text parameters identical to GLM-5.3 (same effort levels, thinking cannot be disabled), function calling/caching/structured output supported. z.ai list price **$0.15 / $0.50 / $0.03 cache**, currently 50% off (**$0.075 / $0.25 / $0.015**) until Sep 9, 2026.\n- **OpenRouter**: `z-ai/glm-5.3` headline **$1.15 / $3.50**, cache $0.10 (Z.ai first-party row is 1.40/4.40/0.26); `z-ai/glm-5.3-flash` headline **$0.075 / $0.25 / $0.015** (the 50%-off price; list 0.15/0.50/0.03). Both also served by Fireworks (5.3 at 1.40/4.40/0.26; Flash at 0.15/0.50/0.03) and Venice (Flash at 0.15/0.50/0.03).\n\n## 4. What is genuinely ambiguous\n\n1. **Which \"others\" beyond OpenRouter.** Fireworks and Venice both demonstrably serve these models, but is the intent \"every provider that already carries GLM 5.2\" (zai + openrouter + fireworks), \"plus Venice Flash,\" or \"anywhere it's fetchable\"? Bedrock carries only an older `glm-5` and probably shouldn't grow a row unless AWS lists it. Two engineers would reasonably ship different provider coverage.\n2. **Which price to record.** z.ai rows: list (1.40/4.40/0.26 and 0.15/0.50/0.03) vs current promo (Flash at half price until Sep 9 — a price that goes stale in days). OpenRouter rows: the existing `glm-5.2` entry (0.784/2.464/0.1456) proves the convention is \"OpenRouter's displayed headline at update time\" — which is currently a *discounted/cheapest-provider* figure (1.15/3.50/0.10 for 5.3), not Z.ai list. Whether to use headline vs Z.ai-row pricing for OpenRouter is a judgment call with a stale-by-September-9 wrinkle.\n3. **`reasoning_effort` feature kind.** z.ai says reasoning is always-on and cannot be disabled — textbook `always_adaptive`. But Venice's existing `glm-5.3` row uses `levels` + `reasoning_by_default = true`. Behaviorally near-identical on this adapter today, but the rows will disagree across providers for the same model if zai/openrouter pick one and Venice keeps the other.\n4. **Flash's role on zai.** Should `glm-5.3-flash` be `small_default = true` (haiku/deepseek-flash/mini precedent), and does it inherit the `glm-flash`-style aliases? What exactly the alias set should be for each new model (`glm53`, `glm5.3`, `glm-flash`, `glm53-flash`, …) is convention, not fact — though the 5.2 → 5.3 alias migration pattern is clear for the flagship.\n5. **Limits numbers.** Repo's glm-5.2 uses 1,048,576/131,072 while z.ai documents 5.3/Flash as \"1M context, 128K max output\" (OpenRouter FAQ says 1,310,720/262,144, which looks like input+output combined). Whether `context_window = 1048576, max_output = 131072` or `1000000/131072` (Venice's choice) — and 128K = 131072 vs 128000 — needs a deliberate convention pick.\n6. **Scope of test/docs work.** Whether to add live `e2e_test` round-trips for 5.3 (they cost real API calls and the 5.2 ones exist), update the Venice `models.mdx` row's provider attribution, whether the Flash tier needs an `estimated_output_tps` figure, and whether a fresh dated changelog file is created vs. appending to an existing one.\n7. **`glm-4.7`'s fate.** It stays regardless, but with 5.3 at identical list pricing and better benchmarks, some would also prune `glm-4.6`-aged rows; nothing in the instruction demands removal, so leaving them is the conservative read.",
+          "thread.build.current_node": "understand",
+          "graph.goal": "Add z.ai GLM5.3 and GLM5.3 Flash support. Understand the provider model for the models\n\nNotes:\n- Use precedent for changing default model\n- Implement in openrouter and others as well\n- Research the pricing yourself",
+          "internal.thread_id": "build"
         },
         "node_outcomes": {
           "start": {
@@ -987,7 +987,136 @@
           }
         },
         "next_node_id": "ask",
+        "git_commit_sha": "03d66d616fad1efe15a34aa9c05ea4ade307b9ca",
         "node_visits": {
+          "start": 1,
+          "understand": 1
+        }
+      },
+      "diff": {
+        "summary": {
+          "files_changed": 0,
+          "additions": 0,
+          "deletions": 0
+        }
+      }
+    },
+    {
+      "seq": 0,
+      "checkpoint": {
+        "timestamp": "2026-09-04T08:59:11.778988Z",
+        "current_node": "ask",
+        "completed_nodes": [
+          "start",
+          "understand",
+          "ask"
+        ],
+        "node_retries": {},
+        "context_values": {
+          "internal.fidelity": "full",
+          "thread.build.current_node": "ask",
+          "graph.goal": "Add z.ai GLM5.3 and GLM5.3 Flash support. Understand the provider model for the models\n\nNotes:\n- Use precedent for changing default model\n- Implement in openrouter and others as well\n- Research the pricing yourself",
+          "graph.max_node_visits": "24",
+          "graph.rankdir": "LR",
+          "internal.retry_count.start": 0,
+          "last_response": "This is the first time asking — no plan has gone back and forth yet. Based on my exploration, most of the ambiguity resolves itself through clear repo precedent, so I'll state those calls and ask on",
+          "outcome": "succeeded",
+          "last_stage": "ask",
+          "internal.retry_count.ask": 0,
+          "current_node": "ask",
+          "internal.retry_count.understand": 0,
+          "failure_class": "",
+          "graph.on_failure": "exit",
+          "internal.node_visit_count": 1,
+          "internal.work_dir": "/workspace/fabro",
+          "failure_signature": "",
+          "internal.thread_id": "build",
+          "response.ask": "This is the first time asking — no plan has gone back and forth yet. Based on my exploration, most of the ambiguity resolves itself through clear repo precedent, so I'll state those calls and ask only the two things that genuinely change what gets built.\n\n**Decisions I'll make myself (say so if you disagree):**\n\n- `glm-5.3` becomes the zai default; `glm-5.2` loses `default` and keeps only `glm52`/`glm5.2`; portable aliases `glm`/`glm5` move to 5.3; `glm-4.7` stays (mirrors the 5.2-over-4.7 and GPT-5.6-Sol precedents).\n- Efforts `[\"low\", \"high\", \"max\"]` with `reasoning_effort = \"levels\"` + `reasoning_by_default = true`, matching Venice's existing `glm-5.3` row (z.ai's \"always-on, can't disable\" would spell `always_adaptive`, but that's behaviorally identical on the OpenAI-compatible adapter and the same model already shipped as `levels`).\n- `glm-5.3-flash`: `vision = true` (multimodal per z.ai docs), `small_default = true` on zai with a `glm-flash`-style alias (haiku/deepseek-flash precedent).\n- Limits `1,048,576` context / `131,072` max output for both (glm-5.2 row convention; z.ai says \"1M / 128K\").\n- Update catalog snapshots/alias-portability tests, `models.mdx` + `openrouter.mdx` (+ `fireworks.mdx` if in scope), add a dated changelog bullet, and add live e2e round-trip tests mirroring the glm-5.2 pair (only run with credentials).\n- No new `LEGACY_BUILTIN_MODEL_IDENTIFIERS` entries (post-migration models like GPT-5.6 didn't add them).\n\n**Questions:**\n\n1. **Provider coverage** — which providers get `glm-5.3` and `glm-5.3-flash`?\n   - (a) zai + openrouter only\n   - (b) zai, openrouter, and fireworks (`glm-5p3` / `glm-5p3-flash` account-scoped ids) — matches the existing GLM footprint, since every provider currently serving glm-5.2 verifiably serves both new models\n   - (c) option (b) plus `glm-5.3-flash` on venice (venice already carries `glm-5.3` and demonstrably serves Flash; I'd verify its api id, presumably `z-ai-glm-5-3-flash`)\n   - Bedrock stays out in all cases — it only carries the older `zai.glm-5`.\n\n2. **Which prices go in the cost tables for the new rows?**\n   - (a) Stable list prices everywhere: zai rows 1.40/4.40/0.26 (GLM-5.3) and 0.15/0.50/0.03 (Flash); OpenRouter rows priced at Z.ai's list rates as well\n   - (b) Currently displayed prices: zai Flash at the 50%-off promo (0.075/0.25/0.015 — promo ends Sep 9), OpenRouter rows at their headline (5.3: 1.15/3.50/0.10; Flash: 0.075/0.25/0.015)\n   - Note: the existing glm-5.2 OpenRouter row (0.784/2.464/0.1456) is already stale (headline is now 0.4875/1.56/0.091). If you pick (b) I'll refresh it; if (a) I'll leave it untouched.",
+          "internal.run_id": "01M1NSPB70PZK5VG2ZPH6Q2ZYF",
+          "graph.model_stylesheet": "\n            *      { model: glm-5.2; reasoning_effort: high; }\n            .deep  { reasoning_effort: max; }\n        ",
+          "response.understand": "Exploration complete. Here is the understanding report.\n\n---\n\n## 1. Repository structure and where the change lands\n\n**Fabro** is an AI workflow orchestration platform: a Rust workspace (`lib/apps`, `lib/components`, `lib/foundation`), a React 19 web app (`apps/fabro-web`), Mintlify docs (`docs/public`), with `cargo nextest` for tests and insta snapshots.\n\nThe provider/model system lives in **`lib/foundation/fabro-model`**:\n\n- `src/catalog/providers/*.toml` — one TOML per provider, embedded into the binary via `rust_embed`. Each model row declares `api_id`, `display_name`, `family`, `default`/`small_default`, `aliases`, `estimated_output_tps`, `limits` (context/max output), `features` (tools/vision/reasoning/reasoning_effort kind/prompt_cache), `controls.reasoning_effort` (allowed levels), and `costs` (input/output/cache per Mtok).\n- `src/catalog.rs` — parses/validates/merges the catalog (enforces one `default` per provider, alias uniqueness per provider, reasoning-controls consistency), indexes selectors, and holds extensive tests including insta snapshots of model rows.\n- `src/reasoning.rs` — `ReasoningEffort` enum: `low | medium | high | xhigh | max`.\n- `src/types.rs` — `Model`, `ModelFeatures` with `ReasoningEffortFeature::{Levels, AlwaysAdaptive, None}`.\n\nThe `zai` provider (`zai.toml`) is an `openai_compatible` adapter pointed at `https://api.z.ai/api/coding/paas/v4`, credentials `ZAI_API_KEY`, priority 60. It currently serves `glm-5.2` (`default = true`, aliases `glm, glm5, glm52, glm5.2`, 1,048,576 ctx / 131,072 out, efforts `high|max`, costs 1.4/4.4/0.26) and `glm-4.7`.\n\nEverything downstream (server `GET /models`, CLI, web UI, agent profiles) reads the catalog dynamically — no hardcoded model lists anywhere else. Docs (`docs/public/core-concepts/models.mdx` table, `integrations/*.mdx`, dated changelog files) are maintained by hand.\n\n## 2. Goal restated in this codebase's terms\n\nAdd **`glm-5.3`** and **`glm-5.3-flash`** as model offerings in the built-in catalog:\n\n1. **`zai.toml`**: add `glm-5.3` (text-only flagship) and `glm-5.3-flash` (multimodal, vision-capable). Following the GLM 5.2 precedent (commit `c67cfef1`): the new flagship gets `default = true`, `glm-5.2` loses `default`, and the portable aliases `glm`/`glm5` move from `glm-5.2` to `glm-5.3` (which keeps `glm52`, `glm5.2`), mirroring how `glm-4.7` was demoted and kept only `glm4`.\n2. **`openrouter.toml`**: add both models with `api_id = \"z-ai/glm-5.3\"` / `\"z-ai/glm-5.3-flash\"`, OpenRouter pricing, and portable aliases matching the zai rows (the `builtin_glm_5_2_aliases_are_portable` test asserts zai/openrouter alias parity).\n3. **\"Others\"**: `fireworks.toml` already serves `glm-5.2` (`accounts/fireworks/models/glm-5p2`), so `glm-5p3` / `glm-5p3-flash` rows are the natural extension; `venice.toml` already has `glm-5.3` but not Flash; `bedrock.toml` has an older distinct `glm-5`.\n4. **Catalog tests** in `catalog.rs`: update the `glm_5_2_in_catalog` snapshot (its `default` flips to `false`), extend/replace `builtin_glm_5_2_aliases_are_portable`, add `glm_5_3_*` tests following the existing pattern, possibly extend the Fireworks tuple-table test.\n5. **Docs**: update the `models.mdx` table (which currently lists `glm-5.3` under *venice* only), `openrouter.mdx` (and `fireworks.mdx` if touched), plus a changelog bullet in a dated `docs/public/changelog/2026-09-*.mdx`.\n6. Optionally, live e2e round-trip tests in `lib/components/fabro-llm/tests/integration.rs` mirroring `zai_glm_5_2_reasoning_tool_round_trip` / `openrouter_glm_5_2_...`.\n\nNo codec/adapter work appears needed: zai already rides the `openai_compatible` codec, which sends `reasoning_effort` top-level and reads `reasoning_content`/`reasoning` — the `fabro-llm` adapter registry test (`every_builtin_catalog_offering_resolves`) iterates the catalog automatically.\n\n## 3. What I know for certain\n\n**From the repo:**\n- The default-change precedent is exactly `c67cfef1` (GLM 5.2 over 4.7) and `18d46282` (GPT-5.6 Sol became OpenAI default): new flagship gets `default = true`, old default loses it, generic aliases migrate, docs + snapshots updated. Exactly one `default` per provider is enforced at build time (`MultipleProviderDefaults`).\n- Aliases are per-provider; unqualified selectors pick the highest-priority ready provider. zai (60) > venice (35) > fireworks (30) > openrouter (25), so `glm` resolves to zai when both keys exist.\n- Venice already ships `glm-5.3`: 1,000,000 ctx / 131,072 out, `levels` + `reasoning_by_default = true`, efforts `low|high|max`, prompt_cache, costs 1.75/5.50/0.325 — a same-model precedent inside this very catalog.\n- `ReasoningEffort` already includes `low` and `max`; `AlwaysAdaptive` is only behaviorally consumed by the Anthropic adapter, so for OpenAI-compatible routes `levels` vs `always_adaptive` is descriptive.\n- `small_default = true` is the convention for cheap/fast tier models on their home provider (haiku, gpt-5.4-mini, deepseek-v4-flash, gemini-flash-lite).\n- No GLM/zai hardcoding exists in fabro-server, fabro-web, evals, or the OpenAPI spec — catalog data flows through automatically.\n\n**From external research (z.ai docs + OpenRouter, fetched today):**\n- **GLM-5.3** (`glm-5.3`, released 2026-08-18): text-only, 1M context, **128K max output**, reasoning always-on with efforts **`low|high|max`** (default `max`; disabling fails), function calling + streaming + context caching + structured output supported. z.ai list price **$1.40 / $4.40 / $0.26 cache** per Mtok — identical to GLM-5.2. Served via the same coding endpoint (`/api/coding/paas/v4`).\n- **GLM-5.3-Flash** (`glm-5.3-flash`, released 2026-08-26): native multimodal (**image/video/file input → text**), 1M context, **128K max output**, text parameters identical to GLM-5.3 (same effort levels, thinking cannot be disabled), function calling/caching/structured output supported. z.ai list price **$0.15 / $0.50 / $0.03 cache**, currently 50% off (**$0.075 / $0.25 / $0.015**) until Sep 9, 2026.\n- **OpenRouter**: `z-ai/glm-5.3` headline **$1.15 / $3.50**, cache $0.10 (Z.ai first-party row is 1.40/4.40/0.26); `z-ai/glm-5.3-flash` headline **$0.075 / $0.25 / $0.015** (the 50%-off price; list 0.15/0.50/0.03). Both also served by Fireworks (5.3 at 1.40/4.40/0.26; Flash at 0.15/0.50/0.03) and Venice (Flash at 0.15/0.50/0.03).\n\n## 4. What is genuinely ambiguous\n\n1. **Which \"others\" beyond OpenRouter.** Fireworks and Venice both demonstrably serve these models, but is the intent \"every provider that already carries GLM 5.2\" (zai + openrouter + fireworks), \"plus Venice Flash,\" or \"anywhere it's fetchable\"? Bedrock carries only an older `glm-5` and probably shouldn't grow a row unless AWS lists it. Two engineers would reasonably ship different provider coverage.\n2. **Which price to record.** z.ai rows: list (1.40/4.40/0.26 and 0.15/0.50/0.03) vs current promo (Flash at half price until Sep 9 — a price that goes stale in days). OpenRouter rows: the existing `glm-5.2` entry (0.784/2.464/0.1456) proves the convention is \"OpenRouter's displayed headline at update time\" — which is currently a *discounted/cheapest-provider* figure (1.15/3.50/0.10 for 5.3), not Z.ai list. Whether to use headline vs Z.ai-row pricing for OpenRouter is a judgment call with a stale-by-September-9 wrinkle.\n3. **`reasoning_effort` feature kind.** z.ai says reasoning is always-on and cannot be disabled — textbook `always_adaptive`. But Venice's existing `glm-5.3` row uses `levels` + `reasoning_by_default = true`. Behaviorally near-identical on this adapter today, but the rows will disagree across providers for the same model if zai/openrouter pick one and Venice keeps the other.\n4. **Flash's role on zai.** Should `glm-5.3-flash` be `small_default = true` (haiku/deepseek-flash/mini precedent), and does it inherit the `glm-flash`-style aliases? What exactly the alias set should be for each new model (`glm53`, `glm5.3`, `glm-flash`, `glm53-flash`, …) is convention, not fact — though the 5.2 → 5.3 alias migration pattern is clear for the flagship.\n5. **Limits numbers.** Repo's glm-5.2 uses 1,048,576/131,072 while z.ai documents 5.3/Flash as \"1M context, 128K max output\" (OpenRouter FAQ says 1,310,720/262,144, which looks like input+output combined). Whether `context_window = 1048576, max_output = 131072` or `1000000/131072` (Venice's choice) — and 128K = 131072 vs 128000 — needs a deliberate convention pick.\n6. **Scope of test/docs work.** Whether to add live `e2e_test` round-trips for 5.3 (they cost real API calls and the 5.2 ones exist), update the Venice `models.mdx` row's provider attribution, whether the Flash tier needs an `estimated_output_tps` figure, and whether a fresh dated changelog file is created vs. appending to an existing one.\n7. **`glm-4.7`'s fate.** It stays regardless, but with 5.3 at identical list pricing and better benchmarks, some would also prune `glm-4.6`-aged rows; nothing in the instruction demands removal, so leaving them is the conservative read."
+        },
+        "node_outcomes": {
+          "ask": {
+            "status": "succeeded",
+            "context_updates": {
+              "response.ask": "This is the first time asking — no plan has gone back and forth yet. Based on my exploration, most of the ambiguity resolves itself through clear repo precedent, so I'll state those calls and ask only the two things that genuinely change what gets built.\n\n**Decisions I'll make myself (say so if you disagree):**\n\n- `glm-5.3` becomes the zai default; `glm-5.2` loses `default` and keeps only `glm52`/`glm5.2`; portable aliases `glm`/`glm5` move to 5.3; `glm-4.7` stays (mirrors the 5.2-over-4.7 and GPT-5.6-Sol precedents).\n- Efforts `[\"low\", \"high\", \"max\"]` with `reasoning_effort = \"levels\"` + `reasoning_by_default = true`, matching Venice's existing `glm-5.3` row (z.ai's \"always-on, can't disable\" would spell `always_adaptive`, but that's behaviorally identical on the OpenAI-compatible adapter and the same model already shipped as `levels`).\n- `glm-5.3-flash`: `vision = true` (multimodal per z.ai docs), `small_default = true` on zai with a `glm-flash`-style alias (haiku/deepseek-flash precedent).\n- Limits `1,048,576` context / `131,072` max output for both (glm-5.2 row convention; z.ai says \"1M / 128K\").\n- Update catalog snapshots/alias-portability tests, `models.mdx` + `openrouter.mdx` (+ `fireworks.mdx` if in scope), add a dated changelog bullet, and add live e2e round-trip tests mirroring the glm-5.2 pair (only run with credentials).\n- No new `LEGACY_BUILTIN_MODEL_IDENTIFIERS` entries (post-migration models like GPT-5.6 didn't add them).\n\n**Questions:**\n\n1. **Provider coverage** — which providers get `glm-5.3` and `glm-5.3-flash`?\n   - (a) zai + openrouter only\n   - (b) zai, openrouter, and fireworks (`glm-5p3` / `glm-5p3-flash` account-scoped ids) — matches the existing GLM footprint, since every provider currently serving glm-5.2 verifiably serves both new models\n   - (c) option (b) plus `glm-5.3-flash` on venice (venice already carries `glm-5.3` and demonstrably serves Flash; I'd verify its api id, presumably `z-ai-glm-5-3-flash`)\n   - Bedrock stays out in all cases — it only carries the older `zai.glm-5`.\n\n2. **Which prices go in the cost tables for the new rows?**\n   - (a) Stable list prices everywhere: zai rows 1.40/4.40/0.26 (GLM-5.3) and 0.15/0.50/0.03 (Flash); OpenRouter rows priced at Z.ai's list rates as well\n   - (b) Currently displayed prices: zai Flash at the 50%-off promo (0.075/0.25/0.015 — promo ends Sep 9), OpenRouter rows at their headline (5.3: 1.15/3.50/0.10; Flash: 0.075/0.25/0.015)\n   - Note: the existing glm-5.2 OpenRouter row (0.784/2.464/0.1456) is already stale (headline is now 0.4875/1.56/0.091). If you pick (b) I'll refresh it; if (a) I'll leave it untouched.",
+              "last_response": "This is the first time asking — no plan has gone back and forth yet. Based on my exploration, most of the ambiguity resolves itself through clear repo precedent, so I'll state those calls and ask on",
+              "last_stage": "ask"
+            },
+            "notes": "Stage completed: ask",
+            "usage": {
+              "input": {
+                "usage": {
+                  "model": {
+                    "provider": "zai",
+                    "model_id": "glm-5.2"
+                  },
+                  "tokens": {
+                    "input_tokens": 3235,
+                    "output_tokens": 851,
+                    "reasoning_tokens": 4916,
+                    "cache_read_tokens": 98880,
+                    "cache_write_tokens": 0
+                  }
+                },
+                "facts": {
+                  "algorithm": "openai"
+                }
+              },
+              "total_usd_micros": 55611
+            },
+            "timing": {
+              "wall_time_ms": 0,
+              "inference_time_ms": 89000,
+              "tool_time_ms": 0,
+              "active_time_ms": 89000
+            }
+          },
+          "start": {
+            "status": "succeeded",
+            "usage": null
+          },
+          "understand": {
+            "status": "succeeded",
+            "context_updates": {
+              "last_response": "Exploration complete. Here is the understanding report.\n\n---\n\n## 1. Repository structure and where the change lands\n\n**Fabro** is an AI workflow orchestration platform: a Rust workspace (`lib/apps`, `",
+              "last_stage": "understand",
+              "response.understand": "Exploration complete. Here is the understanding report.\n\n---\n\n## 1. Repository structure and where the change lands\n\n**Fabro** is an AI workflow orchestration platform: a Rust workspace (`lib/apps`, `lib/components`, `lib/foundation`), a React 19 web app (`apps/fabro-web`), Mintlify docs (`docs/public`), with `cargo nextest` for tests and insta snapshots.\n\nThe provider/model system lives in **`lib/foundation/fabro-model`**:\n\n- `src/catalog/providers/*.toml` — one TOML per provider, embedded into the binary via `rust_embed`. Each model row declares `api_id`, `display_name`, `family`, `default`/`small_default`, `aliases`, `estimated_output_tps`, `limits` (context/max output), `features` (tools/vision/reasoning/reasoning_effort kind/prompt_cache), `controls.reasoning_effort` (allowed levels), and `costs` (input/output/cache per Mtok).\n- `src/catalog.rs` — parses/validates/merges the catalog (enforces one `default` per provider, alias uniqueness per provider, reasoning-controls consistency), indexes selectors, and holds extensive tests including insta snapshots of model rows.\n- `src/reasoning.rs` — `ReasoningEffort` enum: `low | medium | high | xhigh | max`.\n- `src/types.rs` — `Model`, `ModelFeatures` with `ReasoningEffortFeature::{Levels, AlwaysAdaptive, None}`.\n\nThe `zai` provider (`zai.toml`) is an `openai_compatible` adapter pointed at `https://api.z.ai/api/coding/paas/v4`, credentials `ZAI_API_KEY`, priority 60. It currently serves `glm-5.2` (`default = true`, aliases `glm, glm5, glm52, glm5.2`, 1,048,576 ctx / 131,072 out, efforts `high|max`, costs 1.4/4.4/0.26) and `glm-4.7`.\n\nEverything downstream (server `GET /models`, CLI, web UI, agent profiles) reads the catalog dynamically — no hardcoded model lists anywhere else. Docs (`docs/public/core-concepts/models.mdx` table, `integrations/*.mdx`, dated changelog files) are maintained by hand.\n\n## 2. Goal restated in this codebase's terms\n\nAdd **`glm-5.3`** and **`glm-5.3-flash`** as model offerings in the built-in catalog:\n\n1. **`zai.toml`**: add `glm-5.3` (text-only flagship) and `glm-5.3-flash` (multimodal, vision-capable). Following the GLM 5.2 precedent (commit `c67cfef1`): the new flagship gets `default = true`, `glm-5.2` loses `default`, and the portable aliases `glm`/`glm5` move from `glm-5.2` to `glm-5.3` (which keeps `glm52`, `glm5.2`), mirroring how `glm-4.7` was demoted and kept only `glm4`.\n2. **`openrouter.toml`**: add both models with `api_id = \"z-ai/glm-5.3\"` / `\"z-ai/glm-5.3-flash\"`, OpenRouter pricing, and portable aliases matching the zai rows (the `builtin_glm_5_2_aliases_are_portable` test asserts zai/openrouter alias parity).\n3. **\"Others\"**: `fireworks.toml` already serves `glm-5.2` (`accounts/fireworks/models/glm-5p2`), so `glm-5p3` / `glm-5p3-flash` rows are the natural extension; `venice.toml` already has `glm-5.3` but not Flash; `bedrock.toml` has an older distinct `glm-5`.\n4. **Catalog tests** in `catalog.rs`: update the `glm_5_2_in_catalog` snapshot (its `default` flips to `false`), extend/replace `builtin_glm_5_2_aliases_are_portable`, add `glm_5_3_*` tests following the existing pattern, possibly extend the Fireworks tuple-table test.\n5. **Docs**: update the `models.mdx` table (which currently lists `glm-5.3` under *venice* only), `openrouter.mdx` (and `fireworks.mdx` if touched), plus a changelog bullet in a dated `docs/public/changelog/2026-09-*.mdx`.\n6. Optionally, live e2e round-trip tests in `lib/components/fabro-llm/tests/integration.rs` mirroring `zai_glm_5_2_reasoning_tool_round_trip` / `openrouter_glm_5_2_...`.\n\nNo codec/adapter work appears needed: zai already rides the `openai_compatible` codec, which sends `reasoning_effort` top-level and reads `reasoning_content`/`reasoning` — the `fabro-llm` adapter registry test (`every_builtin_catalog_offering_resolves`) iterates the catalog automatically.\n\n## 3. What I know for certain\n\n**From the repo:**\n- The default-change precedent is exactly `c67cfef1` (GLM 5.2 over 4.7) and `18d46282` (GPT-5.6 Sol became OpenAI default): new flagship gets `default = true`, old default loses it, generic aliases migrate, docs + snapshots updated. Exactly one `default` per provider is enforced at build time (`MultipleProviderDefaults`).\n- Aliases are per-provider; unqualified selectors pick the highest-priority ready provider. zai (60) > venice (35) > fireworks (30) > openrouter (25), so `glm` resolves to zai when both keys exist.\n- Venice already ships `glm-5.3`: 1,000,000 ctx / 131,072 out, `levels` + `reasoning_by_default = true`, efforts `low|high|max`, prompt_cache, costs 1.75/5.50/0.325 — a same-model precedent inside this very catalog.\n- `ReasoningEffort` already includes `low` and `max`; `AlwaysAdaptive` is only behaviorally consumed by the Anthropic adapter, so for OpenAI-compatible routes `levels` vs `always_adaptive` is descriptive.\n- `small_default = true` is the convention for cheap/fast tier models on their home provider (haiku, gpt-5.4-mini, deepseek-v4-flash, gemini-flash-lite).\n- No GLM/zai hardcoding exists in fabro-server, fabro-web, evals, or the OpenAPI spec — catalog data flows through automatically.\n\n**From external research (z.ai docs + OpenRouter, fetched today):**\n- **GLM-5.3** (`glm-5.3`, released 2026-08-18): text-only, 1M context, **128K max output**, reasoning always-on with efforts **`low|high|max`** (default `max`; disabling fails), function calling + streaming + context caching + structured output supported. z.ai list price **$1.40 / $4.40 / $0.26 cache** per Mtok — identical to GLM-5.2. Served via the same coding endpoint (`/api/coding/paas/v4`).\n- **GLM-5.3-Flash** (`glm-5.3-flash`, released 2026-08-26): native multimodal (**image/video/file input → text**), 1M context, **128K max output**, text parameters identical to GLM-5.3 (same effort levels, thinking cannot be disabled), function calling/caching/structured output supported. z.ai list price **$0.15 / $0.50 / $0.03 cache**, currently 50% off (**$0.075 / $0.25 / $0.015**) until Sep 9, 2026.\n- **OpenRouter**: `z-ai/glm-5.3` headline **$1.15 / $3.50**, cache $0.10 (Z.ai first-party row is 1.40/4.40/0.26); `z-ai/glm-5.3-flash` headline **$0.075 / $0.25 / $0.015** (the 50%-off price; list 0.15/0.50/0.03). Both also served by Fireworks (5.3 at 1.40/4.40/0.26; Flash at 0.15/0.50/0.03) and Venice (Flash at 0.15/0.50/0.03).\n\n## 4. What is genuinely ambiguous\n\n1. **Which \"others\" beyond OpenRouter.** Fireworks and Venice both demonstrably serve these models, but is the intent \"every provider that already carries GLM 5.2\" (zai + openrouter + fireworks), \"plus Venice Flash,\" or \"anywhere it's fetchable\"? Bedrock carries only an older `glm-5` and probably shouldn't grow a row unless AWS lists it. Two engineers would reasonably ship different provider coverage.\n2. **Which price to record.** z.ai rows: list (1.40/4.40/0.26 and 0.15/0.50/0.03) vs current promo (Flash at half price until Sep 9 — a price that goes stale in days). OpenRouter rows: the existing `glm-5.2` entry (0.784/2.464/0.1456) proves the convention is \"OpenRouter's displayed headline at update time\" — which is currently a *discounted/cheapest-provider* figure (1.15/3.50/0.10 for 5.3), not Z.ai list. Whether to use headline vs Z.ai-row pricing for OpenRouter is a judgment call with a stale-by-September-9 wrinkle.\n3. **`reasoning_effort` feature kind.** z.ai says reasoning is always-on and cannot be disabled — textbook `always_adaptive`. But Venice's existing `glm-5.3` row uses `levels` + `reasoning_by_default = true`. Behaviorally near-identical on this adapter today, but the rows will disagree across providers for the same model if zai/openrouter pick one and Venice keeps the other.\n4. **Flash's role on zai.** Should `glm-5.3-flash` be `small_default = true` (haiku/deepseek-flash/mini precedent), and does it inherit the `glm-flash`-style aliases? What exactly the alias set should be for each new model (`glm53`, `glm5.3`, `glm-flash`, `glm53-flash`, …) is convention, not fact — though the 5.2 → 5.3 alias migration pattern is clear for the flagship.\n5. **Limits numbers.** Repo's glm-5.2 uses 1,048,576/131,072 while z.ai documents 5.3/Flash as \"1M context, 128K max output\" (OpenRouter FAQ says 1,310,720/262,144, which looks like input+output combined). Whether `context_window = 1048576, max_output = 131072` or `1000000/131072` (Venice's choice) — and 128K = 131072 vs 128000 — needs a deliberate convention pick.\n6. **Scope of test/docs work.** Whether to add live `e2e_test` round-trips for 5.3 (they cost real API calls and the 5.2 ones exist), update the Venice `models.mdx` row's provider attribution, whether the Flash tier needs an `estimated_output_tps` figure, and whether a fresh dated changelog file is created vs. appending to an existing one.\n7. **`glm-4.7`'s fate.** It stays regardless, but with 5.3 at identical list pricing and better benchmarks, some would also prune `glm-4.6`-aged rows; nothing in the instruction demands removal, so leaving them is the conservative read."
+            },
+            "notes": "Stage completed: understand",
+            "usage": {
+              "input": {
+                "usage": {
+                  "model": {
+                    "provider": "zai",
+                    "model_id": "glm-5.2"
+                  },
+                  "tokens": {
+                    "input_tokens": 100304,
+                    "output_tokens": 7899,
+                    "reasoning_tokens": 11325,
+                    "cache_read_tokens": 2216640,
+                    "cache_write_tokens": 0
+                  }
+                },
+                "facts": {
+                  "algorithm": "openai"
+                }
+              },
+              "total_usd_micros": 801278
+            },
+            "timing": {
+              "wall_time_ms": 0,
+              "inference_time_ms": 512142,
+              "tool_time_ms": 10922,
+              "active_time_ms": 523064
+            }
+          }
+        },
+        "next_node_id": "interview",
+        "node_visits": {
+          "ask": 1,
           "start": 1,
           "understand": 1
         }
@@ -1026,7 +1155,12 @@
       "first_event_seq": 25,
       "prompt": null,
       "response": null,
-      "completion": null,
+      "completion": {
+        "outcome": "succeeded",
+        "notes": "Stage completed: understand",
+        "failure_reason": null,
+        "timestamp": "2026-09-04T08:57:38.925397Z"
+      },
       "provider_used": {
         "mode": "agent",
         "provider": "zai",
@@ -1041,8 +1175,12 @@
       "started_at": "2026-09-04T08:48:55.619766Z",
       "handler": "agent",
       "graph_visit": 1,
-      "live_inference_ms": 512051,
-      "live_tool_ms": 10897,
+      "timing": {
+        "wall_time_ms": 523374,
+        "inference_time_ms": 512142,
+        "tool_time_ms": 10922,
+        "active_time_ms": 523064
+      },
       "usage": {
         "input_tokens": 100304,
         "output_tokens": 7899,
@@ -1239,7 +1377,7 @@
         "warnings": []
       },
       "agent_control": "running",
-      "state": "running"
+      "state": "succeeded"
     },
     "start@1": {
       "first_event_seq": 21,
@@ -1276,6 +1414,87 @@
       },
       "agent_control": "running",
       "state": "succeeded"
+    },
+    "ask@1": {
+      "first_event_seq": 381,
+      "prompt": null,
+      "response": null,
+      "completion": null,
+      "provider_used": {
+        "mode": "agent",
+        "provider": "zai",
+        "model": "glm-5.2",
+        "reasoning_effort": "high"
+      },
+      "diff": null,
+      "script_invocation": null,
+      "script_timing": null,
+      "parallel_results": null,
+      "output": null,
+      "started_at": "2026-09-04T08:57:42.766659Z",
+      "handler": "agent",
+      "graph_visit": 1,
+      "live_inference_ms": 88998,
+      "usage": {
+        "input_tokens": 3235,
+        "output_tokens": 851,
+        "total_tokens": 107882,
+        "reasoning_tokens": 4916,
+        "cache_read_tokens": 98880,
+        "cache_write_tokens": 0,
+        "total_usd_micros": 55611
+      },
+      "model": {
+        "provider": "zai",
+        "model_id": "glm-5.2"
+      },
+      "permission_level": "full",
+      "context_window": {
+        "provider": "zai",
+        "model": "glm-5.2",
+        "context_window_tokens": 1048576,
+        "input_tokens": 102115,
+        "usage_percent": 9.738445281982422,
+        "count_method": "response_usage_scaled_breakdown",
+        "staleness": "live",
+        "generated_at": "2026-09-04T08:59:11.767933Z",
+        "event_seq": 388,
+        "breakdown": [
+          {
+            "category": "system_prompt",
+            "tokens": 1148,
+            "usage_percent": 0.1094818115234375
+          },
+          {
+            "category": "tools",
+            "tokens": 1579,
+            "usage_percent": 0.15058517456054688
+          },
+          {
+            "category": "skills",
+            "tokens": 226,
+            "usage_percent": 0.02155303955078125
+          },
+          {
+            "category": "memory",
+            "tokens": 4460,
+            "usage_percent": 0.4253387451171875
+          },
+          {
+            "category": "conversation",
+            "tokens": 94695,
+            "usage_percent": 9.030818939208984
+          },
+          {
+            "category": "other",
+            "tokens": 7,
+            "usage_percent": 0.000667572021484375
+          }
+        ],
+        "warnings": []
+      },
+      "agent_control": "running",
+      "state": "running"
     }
   }
 }
