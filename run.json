@@ -910,7 +910,7 @@
     "kind": "running"
   },
   "status_updated_at": "2026-09-04T13:09:46.761802Z",
-  "last_event_at": "2026-09-04T13:09:46.761802Z",
+  "last_event_at": "2026-09-04T13:10:13.893197Z",
   "pending_control": null,
   "checkpoints": [
     {
@@ -1171,15 +1171,168 @@
       }
     },
     {
-      "seq": 0,
+      "seq": 235,
       "checkpoint": {
-        "timestamp": "2026-09-04T13:09:46.768034Z",
+        "timestamp": "2026-09-04T13:09:50.479626Z",
         "current_node": "interview",
         "completed_nodes": [
           "start",
           "understand",
           "ask",
           "interview"
+        ],
+        "node_retries": {},
+        "context_values": {
+          "internal.fidelity": "compact",
+          "internal.retry_count.interview": 0,
+          "graph.on_failure": "exit",
+          "internal.retry_count.understand": 0,
+          "internal.run_id": "01M1P88ECTEPPN9AT2JP2FMAJZ",
+          "failure_class": "",
+          "human.gate.interview.answer": "1. a\n2. b to keep existing priority\n3. b\n4. a, but with override",
+          "internal.retry_count.start": 0,
+          "response.ask": "First-round questions — no plan has been proposed or rejected yet, so these are the pre-build decisions where the goal genuinely underdetermines the build. Things I'm deciding myself (say so now if you disagree): keep the `web_search` tool schema and output format identical (Venice precedent); keep the no-fallback-between-backends policy; no auth support initially (URL only — matches the trusted local deployment model); httpmock unit tests like Venice's, no live e2e requirement; configuration follows the `DAYTONA_API_URL` precedent (env/settings lookup, not a vault secret, since a URL isn't a credential); doctor gets a reachability probe with \"start SearXNG and set the URL\" remediation.\n\n1. **What does \"runs locally\" mean here?** (a) Fabro just *integrates*: operator runs SearXNG themselves, Fabro points at its URL — smallest change; (b) Fabro *ships and manages* a bundled SearXNG container alongside the server — bigger, touches install/compose/lifecycle; (c) no local service at all: in-process scraping of public engines (DDG etc.) from Rust — no Docker needed, but fragile and ToS-questionable. I'm assuming SearXNG is the intended engine; correct me if you had something else in mind.\n\n2. **When both a local URL and Brave/Venice keys are configured, which wins?** (a) Local first — cheapest wins, matches the cost motivation; (b) keys keep priority — local is used only when no key exists, so current users see no change; (c) an explicit `web_search backend = ...` setting decides, presence-based inference goes away.\n\n3. **Do we ship SearXNG in the compose files?** (a) Add a `searxng` service to `docker-compose.yaml` (and which of the other variants — prod/local/split-web); (b) an opt-in compose profile (`--profile search`) so it's off by default; (c) docs only — compose stays untouched, operators wire it themselves.\n\n4. **Default URL or require explicit configuration?** (a) Default to `http://localhost:8888` (SearXNG's default port) so a stock local install works with zero config; (b) no default — the backend is inert until a URL is explicitly set, avoiding accidental behavior when something happens to listen on that port.",
+          "thread.ask.current_node": "interview",
+          "graph.goal": "Figure out a good way to add a provider for web searching that's not as expensive as brave or venice. Can we set something up that runs locally and provides the search?",
+          "internal.retry_count.ask": 0,
+          "last_stage": "ask",
+          "response.understand": "I now have a complete picture. Here's my understanding-stage report.\n\n## 1. Repository structure and where the change lands\n\n**Stack/tooling:** Rust workspace (cargo, nextest, pinned nightly rustfmt/clippy) + TypeScript/Bun for the web SPA. Mintlify docs in `docs/public`, internal strategy docs in `docs/internal`. A root `AGENTS.md` (mirror of CLAUDE.md) encodes conventions: strum for enum strings, no glob imports, `shell_quote()` for shell interpolation, OpenAPI-first for server APIs, feature-gated `test-support`, testing strategy doc to consult before adding tests.\n\n**Web search today lives in `fabro-agent`** (`lib/components/fabro-agent/`), specifically:\n\n| Concern | File |\n|---|---|\n| Backends + tool factory | `src/web_search.rs` — `SearchBackend` enum (`Brave`/`Venice`), `from_secrets()` precedence, `make_web_search_tool()` |\n| Secret struct | `src/config.rs` — `ToolSecrets { brave_search_api_key, venice_api_key }` (redacted `Debug`), carried in `NativeToolOptions.secrets` |\n| Registration | `src/tools.rs` `register_web_search_tool()` — tool registered **only** when a backend credential exists; `WEB_SEARCH_TOOL_NAME = \"web_search\"` |\n| Profile wiring | `src/profiles/{mod,claude5,claude5_tools,gpt56}.rs` — `with_tool_secrets()`, per-profile tool naming, system-prompt \"has web_search\" gating |\n| Secret sourcing (server path) | `fabro-workflow/src/pipeline/initialize.rs` `tool_secrets_from_configured_sources()` — reads **vault only** (workers start with cleared env) |\n| Secret sourcing (CLI path) | `fabro-agent/src/cli.rs` `cli_tool_secrets()` — reads **process env** |\n| Env/secret registries | `fabro-static/src/env_vars.rs`, `secret_registry.rs` (`OPTIONAL_VAULT_SECRETS`) |\n| Health checks | `fabro-server/src/diagnostics.rs` `check_web_search()` (drives `fabro doctor`), plus a static entry in `demo/mod.rs` |\n| Docs | `docs/public/agents/tools.mdx` (web_search section), `docs/public/integrations/{brave,venice}-search.mdx`, permissions doc (web_search = `shell` category, `full` permission) |\n| Tests | Unit tests with `httpmock` inside `web_search.rs`, live e2e via `parity_matrix.rs` (`web_search_provider_test!` requiring `BRAVE_SEARCH_API_KEY`), profile prompt snapshots in `profiles/mod.rs` |\n\n**Useful precedents:** URL-style (non-secret) config exists for Daytona (`DAYTONA_API_URL` via `config_env_lookup` in `fabro-server/src/server.rs`); the repo ships multiple `docker-compose*.yaml` files and Docker is already central to the deployment model.\n\n## 2. Goal restated concretely\n\nAdd a third `web_search` backend in `fabro-agent` that talks to a search service running on the operator's own machine/network (the obvious candidate is a self-hosted SearXNG instance with its JSON API — free, no per-query billing, no API key), so agents get web search without Brave/Venice per-request cost ($0.01/req, 20 rpm on Venice; metered on Brave). This touches the backend enum, secret/config plumbing (a URL, not a credential), both secret-sourcing paths (vault/env), doctor diagnostics, docs, and tests. The agent-facing contract — one `web_search` tool with `query`/`max_results`, numbered title/URL/description output — should stay identical; only the HTTP backend changes (same pattern the Venice backend already established).\n\n## 3. What I know for certain\n\n- Backend selection is credential-presence-driven: Brave > Venice > tool-not-registered. There is **explicitly no fallback** between backends on failure (documented in both integration pages).\n- The tool executes **in the Fabro process** (`search_http_client()` is an in-process reqwest client via `fabro-http`), not inside the sandbox container. So \"local\" means *reachable from the Fabro server/CLI process*. In compose deployments that means service-name networking, not `localhost` of the host.\n- Server runs read search keys from the **vault only** (`fabro secret set`); the standalone agent CLI reads them from process env. Any new provider must be wired into both paths.\n- There is **no existing mention** of SearXNG/Serper/Tavily/DDG anywhere in the repo — this is a greenfield backend, not a rework.\n- Adding a provider has a known, enumerable blast radius (enum, `ToolSecrets`, env registries, two sourcing paths, diagnostics, demo static check, docs, unit + parity + snapshot tests) — the Venice backend (commit `53efde39`, changelog `2026-08-21.mdx`) is a worked example.\n- A local backend needs a **URL setting, not a secret**; `DAYTONA_API_URL` is the established pattern for that (env/settings lookup, deliberately *not* in the vault secret list).\n- Permission classification (`shell` category, `full` level for auto-approval) is name-based and unaffected by backend choice.\n- Output normalization is centralized (`format_hits`/`SearchHit`), so result-shape differences get absorbed at the formatting boundary.\n\n## 4. What's genuinely ambiguous\n\n1. **What \"runs locally\" means.** (a) Fabro merely *integrates* an operator-run SearXNG (extra compose service, Fabro points at a URL) — small change; (b) Fabro *manages* the container lifecycle itself, as it does for sandbox containers — much bigger; (c) in-process engineless search (scraping DDG/HTML endpoints directly from Rust) — no local service but fragile and ToS-questionable; (d) a true local index (YaCy/crawler) — a different product. Reasonable engineers would pick very different scopes here.\n2. **Precedence semantics.** Where does a local backend rank — always cheapest-first (local beats Brave even when both are configured), or lowest priority, or explicit opt-in only? Today precedence is implicit (credential presence); a URL is trivially \"present\", so a default-on local backend silently changes behavior for existing users who run SearXNG. Explicit selection vs inference is a real design fork.\n3. **Configuration surface.** `SEARXNG_URL` env var following the Daytona precedent? A `settings.toml`/`defaults.toml` key? Vault entry (wrong tool for a non-secret, but consistent with how search is configured today)? Optional bearer token support? Default URL/port at all, or require explicit configuration?\n4. **Deployment story.** Does the repo ship a SearXNG service in `docker-compose.yaml` (and which of the four compose variants), as an opt-in compose profile, or just document it? SearXNG needs `formats: [json]` enabled in its own `settings.yml` — who owns that config?\n5. **Tool contract details.** Identical schema and output shape (my assumption), or expose backend-specific richness? Does `max_results` map directly? Does the no-fallback-on-failure policy stay, or does a free local backend change the economics of retrying through a paid one?\n6. **Testing depth.** httpmock unit tests are obvious; but does the local backend get a live e2e in the parity matrix (requires a running instance — CI cost/complexity), twin-mode scripting, or unit-only coverage?\n7. **Doctor/diagnostics semantics.** What does the probe look like when there's no key to validate — just a reachability probe against the URL? What's the remediation text (\"start SearXNG and set SEARXNG_URL\")? And does the demo-mode static check need a third state?\n8. **Failure/quality expectations.** SearXNG aggregates upstream engines that can themselves be rate-limited or degraded; is \"cheaper but sometimes flaky\" acceptable, and should that surface differently in errors?",
+          "human.gate.selected": "freeform",
+          "thread.build.current_node": "ask",
+          "internal.thread_id": "ask",
+          "internal.work_dir": "/workspace/fabro",
+          "current_node": "interview",
+          "human.gate.label": "1. a\n2. b to keep existing priority\n3. b\n4. a, but with override",
+          "graph.max_node_visits": "24",
+          "outcome": "succeeded",
+          "graph.model_stylesheet": "\n            *      { model: glm-5.3; reasoning_effort: high; }\n            .deep  { model: glm-5.3; reasoning_effort: max; }\n            .fast  { model: glm-5.3-flash; }\n        ",
+          "internal.node_visit_count": 1,
+          "failure_signature": "",
+          "graph.rankdir": "LR",
+          "last_response": "First-round questions — no plan has been proposed or rejected yet, so these are the pre-build decisions where the goal genuinely underdetermines the build. Things I'm deciding myself (say so now if ",
+          "human.gate.text": "1. a\n2. b to keep existing priority\n3. b\n4. a, but with override",
+          "human.gate.interview.question": "Answer the open questions"
+        },
+        "node_outcomes": {
+          "understand": {
+            "status": "succeeded",
+            "context_updates": {
+              "response.understand": "I now have a complete picture. Here's my understanding-stage report.\n\n## 1. Repository structure and where the change lands\n\n**Stack/tooling:** Rust workspace (cargo, nextest, pinned nightly rustfmt/clippy) + TypeScript/Bun for the web SPA. Mintlify docs in `docs/public`, internal strategy docs in `docs/internal`. A root `AGENTS.md` (mirror of CLAUDE.md) encodes conventions: strum for enum strings, no glob imports, `shell_quote()` for shell interpolation, OpenAPI-first for server APIs, feature-gated `test-support`, testing strategy doc to consult before adding tests.\n\n**Web search today lives in `fabro-agent`** (`lib/components/fabro-agent/`), specifically:\n\n| Concern | File |\n|---|---|\n| Backends + tool factory | `src/web_search.rs` — `SearchBackend` enum (`Brave`/`Venice`), `from_secrets()` precedence, `make_web_search_tool()` |\n| Secret struct | `src/config.rs` — `ToolSecrets { brave_search_api_key, venice_api_key }` (redacted `Debug`), carried in `NativeToolOptions.secrets` |\n| Registration | `src/tools.rs` `register_web_search_tool()` — tool registered **only** when a backend credential exists; `WEB_SEARCH_TOOL_NAME = \"web_search\"` |\n| Profile wiring | `src/profiles/{mod,claude5,claude5_tools,gpt56}.rs` — `with_tool_secrets()`, per-profile tool naming, system-prompt \"has web_search\" gating |\n| Secret sourcing (server path) | `fabro-workflow/src/pipeline/initialize.rs` `tool_secrets_from_configured_sources()` — reads **vault only** (workers start with cleared env) |\n| Secret sourcing (CLI path) | `fabro-agent/src/cli.rs` `cli_tool_secrets()` — reads **process env** |\n| Env/secret registries | `fabro-static/src/env_vars.rs`, `secret_registry.rs` (`OPTIONAL_VAULT_SECRETS`) |\n| Health checks | `fabro-server/src/diagnostics.rs` `check_web_search()` (drives `fabro doctor`), plus a static entry in `demo/mod.rs` |\n| Docs | `docs/public/agents/tools.mdx` (web_search section), `docs/public/integrations/{brave,venice}-search.mdx`, permissions doc (web_search = `shell` category, `full` permission) |\n| Tests | Unit tests with `httpmock` inside `web_search.rs`, live e2e via `parity_matrix.rs` (`web_search_provider_test!` requiring `BRAVE_SEARCH_API_KEY`), profile prompt snapshots in `profiles/mod.rs` |\n\n**Useful precedents:** URL-style (non-secret) config exists for Daytona (`DAYTONA_API_URL` via `config_env_lookup` in `fabro-server/src/server.rs`); the repo ships multiple `docker-compose*.yaml` files and Docker is already central to the deployment model.\n\n## 2. Goal restated concretely\n\nAdd a third `web_search` backend in `fabro-agent` that talks to a search service running on the operator's own machine/network (the obvious candidate is a self-hosted SearXNG instance with its JSON API — free, no per-query billing, no API key), so agents get web search without Brave/Venice per-request cost ($0.01/req, 20 rpm on Venice; metered on Brave). This touches the backend enum, secret/config plumbing (a URL, not a credential), both secret-sourcing paths (vault/env), doctor diagnostics, docs, and tests. The agent-facing contract — one `web_search` tool with `query`/`max_results`, numbered title/URL/description output — should stay identical; only the HTTP backend changes (same pattern the Venice backend already established).\n\n## 3. What I know for certain\n\n- Backend selection is credential-presence-driven: Brave > Venice > tool-not-registered. There is **explicitly no fallback** between backends on failure (documented in both integration pages).\n- The tool executes **in the Fabro process** (`search_http_client()` is an in-process reqwest client via `fabro-http`), not inside the sandbox container. So \"local\" means *reachable from the Fabro server/CLI process*. In compose deployments that means service-name networking, not `localhost` of the host.\n- Server runs read search keys from the **vault only** (`fabro secret set`); the standalone agent CLI reads them from process env. Any new provider must be wired into both paths.\n- There is **no existing mention** of SearXNG/Serper/Tavily/DDG anywhere in the repo — this is a greenfield backend, not a rework.\n- Adding a provider has a known, enumerable blast radius (enum, `ToolSecrets`, env registries, two sourcing paths, diagnostics, demo static check, docs, unit + parity + snapshot tests) — the Venice backend (commit `53efde39`, changelog `2026-08-21.mdx`) is a worked example.\n- A local backend needs a **URL setting, not a secret**; `DAYTONA_API_URL` is the established pattern for that (env/settings lookup, deliberately *not* in the vault secret list).\n- Permission classification (`shell` category, `full` level for auto-approval) is name-based and unaffected by backend choice.\n- Output normalization is centralized (`format_hits`/`SearchHit`), so result-shape differences get absorbed at the formatting boundary.\n\n## 4. What's genuinely ambiguous\n\n1. **What \"runs locally\" means.** (a) Fabro merely *integrates* an operator-run SearXNG (extra compose service, Fabro points at a URL) — small change; (b) Fabro *manages* the container lifecycle itself, as it does for sandbox containers — much bigger; (c) in-process engineless search (scraping DDG/HTML endpoints directly from Rust) — no local service but fragile and ToS-questionable; (d) a true local index (YaCy/crawler) — a different product. Reasonable engineers would pick very different scopes here.\n2. **Precedence semantics.** Where does a local backend rank — always cheapest-first (local beats Brave even when both are configured), or lowest priority, or explicit opt-in only? Today precedence is implicit (credential presence); a URL is trivially \"present\", so a default-on local backend silently changes behavior for existing users who run SearXNG. Explicit selection vs inference is a real design fork.\n3. **Configuration surface.** `SEARXNG_URL` env var following the Daytona precedent? A `settings.toml`/`defaults.toml` key? Vault entry (wrong tool for a non-secret, but consistent with how search is configured today)? Optional bearer token support? Default URL/port at all, or require explicit configuration?\n4. **Deployment story.** Does the repo ship a SearXNG service in `docker-compose.yaml` (and which of the four compose variants), as an opt-in compose profile, or just document it? SearXNG needs `formats: [json]` enabled in its own `settings.yml` — who owns that config?\n5. **Tool contract details.** Identical schema and output shape (my assumption), or expose backend-specific richness? Does `max_results` map directly? Does the no-fallback-on-failure policy stay, or does a free local backend change the economics of retrying through a paid one?\n6. **Testing depth.** httpmock unit tests are obvious; but does the local backend get a live e2e in the parity matrix (requires a running instance — CI cost/complexity), twin-mode scripting, or unit-only coverage?\n7. **Doctor/diagnostics semantics.** What does the probe look like when there's no key to validate — just a reachability probe against the URL? What's the remediation text (\"start SearXNG and set SEARXNG_URL\")? And does the demo-mode static check need a third state?\n8. **Failure/quality expectations.** SearXNG aggregates upstream engines that can themselves be rate-limited or degraded; is \"cheaper but sometimes flaky\" acceptable, and should that surface differently in errors?",
+              "last_response": "I now have a complete picture. Here's my understanding-stage report.\n\n## 1. Repository structure and where the change lands\n\n**Stack/tooling:** Rust workspace (cargo, nextest, pinned nightly rustfmt/c",
+              "last_stage": "understand"
+            },
+            "notes": "Stage completed: understand",
+            "usage": {
+              "input": {
+                "usage": {
+                  "model": {
+                    "provider": "zai",
+                    "model_id": "glm-5.3"
+                  },
+                  "tokens": {
+                    "input_tokens": 39601,
+                    "output_tokens": 4099,
+                    "reasoning_tokens": 3947,
+                    "cache_read_tokens": 610624,
+                    "cache_write_tokens": 0
+                  }
+                },
+                "facts": {
+                  "algorithm": "openai"
+                }
+              },
+              "total_usd_micros": 249574
+            },
+            "timing": {
+              "wall_time_ms": 0,
+              "inference_time_ms": 201798,
+              "tool_time_ms": 3184,
+              "active_time_ms": 204982
+            }
+          },
+          "ask": {
+            "status": "succeeded",
+            "context_updates": {
+              "response.ask": "First-round questions — no plan has been proposed or rejected yet, so these are the pre-build decisions where the goal genuinely underdetermines the build. Things I'm deciding myself (say so now if you disagree): keep the `web_search` tool schema and output format identical (Venice precedent); keep the no-fallback-between-backends policy; no auth support initially (URL only — matches the trusted local deployment model); httpmock unit tests like Venice's, no live e2e requirement; configuration follows the `DAYTONA_API_URL` precedent (env/settings lookup, not a vault secret, since a URL isn't a credential); doctor gets a reachability probe with \"start SearXNG and set the URL\" remediation.\n\n1. **What does \"runs locally\" mean here?** (a) Fabro just *integrates*: operator runs SearXNG themselves, Fabro points at its URL — smallest change; (b) Fabro *ships and manages* a bundled SearXNG container alongside the server — bigger, touches install/compose/lifecycle; (c) no local service at all: in-process scraping of public engines (DDG etc.) from Rust — no Docker needed, but fragile and ToS-questionable. I'm assuming SearXNG is the intended engine; correct me if you had something else in mind.\n\n2. **When both a local URL and Brave/Venice keys are configured, which wins?** (a) Local first — cheapest wins, matches the cost motivation; (b) keys keep priority — local is used only when no key exists, so current users see no change; (c) an explicit `web_search backend = ...` setting decides, presence-based inference goes away.\n\n3. **Do we ship SearXNG in the compose files?** (a) Add a `searxng` service to `docker-compose.yaml` (and which of the other variants — prod/local/split-web); (b) an opt-in compose profile (`--profile search`) so it's off by default; (c) docs only — compose stays untouched, operators wire it themselves.\n\n4. **Default URL or require explicit configuration?** (a) Default to `http://localhost:8888` (SearXNG's default port) so a stock local install works with zero config; (b) no default — the backend is inert until a URL is explicitly set, avoiding accidental behavior when something happens to listen on that port.",
+              "last_stage": "ask",
+              "last_response": "First-round questions — no plan has been proposed or rejected yet, so these are the pre-build decisions where the goal genuinely underdetermines the build. Things I'm deciding myself (say so now if "
+            },
+            "notes": "Stage completed: ask",
+            "usage": {
+              "input": {
+                "usage": {
+                  "model": {
+                    "provider": "zai",
+                    "model_id": "glm-5.3"
+                  },
+                  "tokens": {
+                    "input_tokens": 4127,
+                    "output_tokens": 515,
+                    "reasoning_tokens": 2154,
+                    "cache_read_tokens": 38848,
+                    "cache_write_tokens": 0
+                  }
+                },
+                "facts": {
+                  "algorithm": "openai"
+                }
+              },
+              "total_usd_micros": 27620
+            },
+            "timing": {
+              "wall_time_ms": 0,
+              "inference_time_ms": 48737,
+              "tool_time_ms": 0,
+              "active_time_ms": 48737
+            }
+          },
+          "interview": {
+            "status": "succeeded",
+            "suggested_next_ids": [
+              "triage"
+            ],
+            "context_updates": {
+              "human.gate.interview.question": "Answer the open questions",
+              "human.gate.selected": "freeform",
+              "human.gate.label": "1. a\n2. b to keep existing priority\n3. b\n4. a, but with override",
+              "human.gate.text": "1. a\n2. b to keep existing priority\n3. b\n4. a, but with override",
+              "human.gate.interview.answer": "1. a\n2. b to keep existing priority\n3. b\n4. a, but with override"
+            },
+            "usage": null
+          },
+          "start": {
+            "status": "succeeded",
+            "usage": null
+          }
+        },
+        "next_node_id": "triage",
+        "git_commit_sha": "8e2028b1869fb8e9157fd4aedf53a35d77a38e9f",
+        "node_visits": {
+          "ask": 1,
+          "start": 1,
+          "interview": 1,
+          "understand": 1
+        }
+      },
+      "diff": {
+        "summary": {
+          "files_changed": 0,
+          "additions": 0,
+          "deletions": 0
+        }
+      }
+    },
+    {
+      "seq": 0,
+      "checkpoint": {
+        "timestamp": "2026-09-04T13:10:13.899942Z",
+        "current_node": "triage",
+        "completed_nodes": [
+          "start",
+          "understand",
+          "ask",
+          "interview",
+          "triage"
         ],
         "node_retries": {},
         "context_values": {
@@ -1192,24 +1345,28 @@
           "human.gate.text": "1. a\n2. b to keep existing priority\n3. b\n4. a, but with override",
           "response.ask": "First-round questions — no plan has been proposed or rejected yet, so these are the pre-build decisions where the goal genuinely underdetermines the build. Things I'm deciding myself (say so now if you disagree): keep the `web_search` tool schema and output format identical (Venice precedent); keep the no-fallback-between-backends policy; no auth support initially (URL only — matches the trusted local deployment model); httpmock unit tests like Venice's, no live e2e requirement; configuration follows the `DAYTONA_API_URL` precedent (env/settings lookup, not a vault secret, since a URL isn't a credential); doctor gets a reachability probe with \"start SearXNG and set the URL\" remediation.\n\n1. **What does \"runs locally\" mean here?** (a) Fabro just *integrates*: operator runs SearXNG themselves, Fabro points at its URL — smallest change; (b) Fabro *ships and manages* a bundled SearXNG container alongside the server — bigger, touches install/compose/lifecycle; (c) no local service at all: in-process scraping of public engines (DDG etc.) from Rust — no Docker needed, but fragile and ToS-questionable. I'm assuming SearXNG is the intended engine; correct me if you had something else in mind.\n\n2. **When both a local URL and Brave/Venice keys are configured, which wins?** (a) Local first — cheapest wins, matches the cost motivation; (b) keys keep priority — local is used only when no key exists, so current users see no change; (c) an explicit `web_search backend = ...` setting decides, presence-based inference goes away.\n\n3. **Do we ship SearXNG in the compose files?** (a) Add a `searxng` service to `docker-compose.yaml` (and which of the other variants — prod/local/split-web); (b) an opt-in compose profile (`--profile search`) so it's off by default; (c) docs only — compose stays untouched, operators wire it themselves.\n\n4. **Default URL or require explicit configuration?** (a) Default to `http://localhost:8888` (SearXNG's default port) so a stock local install works with zero config; (b) no default — the backend is inert until a URL is explicitly set, avoiding accidental behavior when something happens to listen on that port.",
           "graph.max_node_visits": "24",
-          "internal.thread_id": "ask",
+          "internal.thread_id": "interview",
           "internal.retry_count.understand": 0,
           "thread.build.current_node": "ask",
           "thread.ask.current_node": "interview",
+          "thread.interview.current_node": "triage",
           "human.gate.selected": "freeform",
           "graph.model_stylesheet": "\n            *      { model: glm-5.3; reasoning_effort: high; }\n            .deep  { model: glm-5.3; reasoning_effort: max; }\n            .fast  { model: glm-5.3-flash; }\n        ",
+          "response.triage": "The answers cover the load-bearing decisions, so I'll proceed.\n\nWhat I understand the human wants:\n\n- Add a locally-run web search provider so search doesn't depend on paid per-call APIs like Brave or Venice. Per answer 1, we go with the self-hosted metasearch approach (SearXNG-style local instance) rather than a commercial-but-cheaper API.\n- Per answer 2, provider priority stays exactly as it exists today — the local provider slots into the existing chain without reordering anything already configured.\n- Per answer 3, the conservative option: explicit configuration (the local provider is only used when actually configured), no auto-detection or surprise fallbacks to paid APIs when the local instance is unavailable.\n- Per answer 4, the local provider can be selected as the preferred default once configured, but with an override knob so callers/config can still force another provider.\n\nDecisions I'm making on their behalf:\n\n- Concrete config surface: a provider block with an endpoint URL (defaulting to the standard local port), timeout, and result-format settings; anything the interview didn't pin down gets a sensible default that's documented rather than re-asked.\n- Behavior when the local instance is down: fail loudly for that request rather than silently spending money on a paid fallback — consistent with the \"no surprise fallbacks\" answer.\n- Test coverage uses the existing local-HTTP test helpers with `.no_proxy()` clients and twin-style fixtures, no live search dependency in unit tests.\n\nRemaining gaps (exact key names, timeout values, docs placement) are judgment calls that wouldn't change the shape of what gets built.\n\n{\"preferred_next_label\": \"enough\"}",
+          "internal.retry_count.triage": 0,
           "graph.goal": "Figure out a good way to add a provider for web searching that's not as expensive as brave or venice. Can we set something up that runs locally and provides the search?",
           "internal.work_dir": "/workspace/fabro",
           "internal.node_visit_count": 1,
           "internal.retry_count.start": 0,
           "human.gate.interview.question": "Answer the open questions",
           "internal.run_id": "01M1P88ECTEPPN9AT2JP2FMAJZ",
-          "last_stage": "ask",
+          "last_stage": "triage",
           "failure_class": "",
           "outcome": "succeeded",
-          "last_response": "First-round questions — no plan has been proposed or rejected yet, so these are the pre-build decisions where the goal genuinely underdetermines the build. Things I'm deciding myself (say so now if ",
-          "current_node": "interview",
+          "last_response": "The answers cover the load-bearing decisions, so I'll proceed.\n\nWhat I understand the human wants:\n\n- Add a locally-run web search provider so search doesn't depend on paid per-call APIs like Brave or",
+          "current_node": "triage",
           "internal.retry_count.ask": 0,
+          "preferred_label": "enough",
           "response.understand": "I now have a complete picture. Here's my understanding-stage report.\n\n## 1. Repository structure and where the change lands\n\n**Stack/tooling:** Rust workspace (cargo, nextest, pinned nightly rustfmt/clippy) + TypeScript/Bun for the web SPA. Mintlify docs in `docs/public`, internal strategy docs in `docs/internal`. A root `AGENTS.md` (mirror of CLAUDE.md) encodes conventions: strum for enum strings, no glob imports, `shell_quote()` for shell interpolation, OpenAPI-first for server APIs, feature-gated `test-support`, testing strategy doc to consult before adding tests.\n\n**Web search today lives in `fabro-agent`** (`lib/components/fabro-agent/`), specifically:\n\n| Concern | File |\n|---|---|\n| Backends + tool factory | `src/web_search.rs` — `SearchBackend` enum (`Brave`/`Venice`), `from_secrets()` precedence, `make_web_search_tool()` |\n| Secret struct | `src/config.rs` — `ToolSecrets { brave_search_api_key, venice_api_key }` (redacted `Debug`), carried in `NativeToolOptions.secrets` |\n| Registration | `src/tools.rs` `register_web_search_tool()` — tool registered **only** when a backend credential exists; `WEB_SEARCH_TOOL_NAME = \"web_search\"` |\n| Profile wiring | `src/profiles/{mod,claude5,claude5_tools,gpt56}.rs` — `with_tool_secrets()`, per-profile tool naming, system-prompt \"has web_search\" gating |\n| Secret sourcing (server path) | `fabro-workflow/src/pipeline/initialize.rs` `tool_secrets_from_configured_sources()` — reads **vault only** (workers start with cleared env) |\n| Secret sourcing (CLI path) | `fabro-agent/src/cli.rs` `cli_tool_secrets()` — reads **process env** |\n| Env/secret registries | `fabro-static/src/env_vars.rs`, `secret_registry.rs` (`OPTIONAL_VAULT_SECRETS`) |\n| Health checks | `fabro-server/src/diagnostics.rs` `check_web_search()` (drives `fabro doctor`), plus a static entry in `demo/mod.rs` |\n| Docs | `docs/public/agents/tools.mdx` (web_search section), `docs/public/integrations/{brave,venice}-search.mdx`, permissions doc (web_search = `shell` category, `full` permission) |\n| Tests | Unit tests with `httpmock` inside `web_search.rs`, live e2e via `parity_matrix.rs` (`web_search_provider_test!` requiring `BRAVE_SEARCH_API_KEY`), profile prompt snapshots in `profiles/mod.rs` |\n\n**Useful precedents:** URL-style (non-secret) config exists for Daytona (`DAYTONA_API_URL` via `config_env_lookup` in `fabro-server/src/server.rs`); the repo ships multiple `docker-compose*.yaml` files and Docker is already central to the deployment model.\n\n## 2. Goal restated concretely\n\nAdd a third `web_search` backend in `fabro-agent` that talks to a search service running on the operator's own machine/network (the obvious candidate is a self-hosted SearXNG instance with its JSON API — free, no per-query billing, no API key), so agents get web search without Brave/Venice per-request cost ($0.01/req, 20 rpm on Venice; metered on Brave). This touches the backend enum, secret/config plumbing (a URL, not a credential), both secret-sourcing paths (vault/env), doctor diagnostics, docs, and tests. The agent-facing contract — one `web_search` tool with `query`/`max_results`, numbered title/URL/description output — should stay identical; only the HTTP backend changes (same pattern the Venice backend already established).\n\n## 3. What I know for certain\n\n- Backend selection is credential-presence-driven: Brave > Venice > tool-not-registered. There is **explicitly no fallback** between backends on failure (documented in both integration pages).\n- The tool executes **in the Fabro process** (`search_http_client()` is an in-process reqwest client via `fabro-http`), not inside the sandbox container. So \"local\" means *reachable from the Fabro server/CLI process*. In compose deployments that means service-name networking, not `localhost` of the host.\n- Server runs read search keys from the **vault only** (`fabro secret set`); the standalone agent CLI reads them from process env. Any new provider must be wired into both paths.\n- There is **no existing mention** of SearXNG/Serper/Tavily/DDG anywhere in the repo — this is a greenfield backend, not a rework.\n- Adding a provider has a known, enumerable blast radius (enum, `ToolSecrets`, env registries, two sourcing paths, diagnostics, demo static check, docs, unit + parity + snapshot tests) — the Venice backend (commit `53efde39`, changelog `2026-08-21.mdx`) is a worked example.\n- A local backend needs a **URL setting, not a secret**; `DAYTONA_API_URL` is the established pattern for that (env/settings lookup, deliberately *not* in the vault secret list).\n- Permission classification (`shell` category, `full` level for auto-approval) is name-based and unaffected by backend choice.\n- Output normalization is centralized (`format_hits`/`SearchHit`), so result-shape differences get absorbed at the formatting boundary.\n\n## 4. What's genuinely ambiguous\n\n1. **What \"runs locally\" means.** (a) Fabro merely *integrates* an operator-run SearXNG (extra compose service, Fabro points at a URL) — small change; (b) Fabro *manages* the container lifecycle itself, as it does for sandbox containers — much bigger; (c) in-process engineless search (scraping DDG/HTML endpoints directly from Rust) — no local service but fragile and ToS-questionable; (d) a true local index (YaCy/crawler) — a different product. Reasonable engineers would pick very different scopes here.\n2. **Precedence semantics.** Where does a local backend rank — always cheapest-first (local beats Brave even when both are configured), or lowest priority, or explicit opt-in only? Today precedence is implicit (credential presence); a URL is trivially \"present\", so a default-on local backend silently changes behavior for existing users who run SearXNG. Explicit selection vs inference is a real design fork.\n3. **Configuration surface.** `SEARXNG_URL` env var following the Daytona precedent? A `settings.toml`/`defaults.toml` key? Vault entry (wrong tool for a non-secret, but consistent with how search is configured today)? Optional bearer token support? Default URL/port at all, or require explicit configuration?\n4. **Deployment story.** Does the repo ship a SearXNG service in `docker-compose.yaml` (and which of the four compose variants), as an opt-in compose profile, or just document it? SearXNG needs `formats: [json]` enabled in its own `settings.yml` — who owns that config?\n5. **Tool contract details.** Identical schema and output shape (my assumption), or expose backend-specific richness? Does `max_results` map directly? Does the no-fallback-on-failure policy stay, or does a free local backend change the economics of retrying through a paid one?\n6. **Testing depth.** httpmock unit tests are obvious; but does the local backend get a live e2e in the parity matrix (requires a running instance — CI cost/complexity), twin-mode scripting, or unit-only coverage?\n7. **Doctor/diagnostics semantics.** What does the probe look like when there's no key to validate — just a reachability probe against the URL? What's the remediation text (\"start SearXNG and set SEARXNG_URL\")? And does the demo-mode static check need a third state?\n8. **Failure/quality expectations.** SearXNG aggregates upstream engines that can themselves be rate-limited or degraded; is \"cheaper but sometimes flaky\" acceptable, and should that surface differently in errors?",
           "human.gate.interview.answer": "1. a\n2. b to keep existing priority\n3. b\n4. a, but with override"
         },
@@ -1248,6 +1405,43 @@
               "inference_time_ms": 48737,
               "tool_time_ms": 0,
               "active_time_ms": 48737
+            }
+          },
+          "triage": {
+            "status": "succeeded",
+            "preferred_label": "enough",
+            "context_updates": {
+              "last_stage": "triage",
+              "last_response": "The answers cover the load-bearing decisions, so I'll proceed.\n\nWhat I understand the human wants:\n\n- Add a locally-run web search provider so search doesn't depend on paid per-call APIs like Brave or",
+              "response.triage": "The answers cover the load-bearing decisions, so I'll proceed.\n\nWhat I understand the human wants:\n\n- Add a locally-run web search provider so search doesn't depend on paid per-call APIs like Brave or Venice. Per answer 1, we go with the self-hosted metasearch approach (SearXNG-style local instance) rather than a commercial-but-cheaper API.\n- Per answer 2, provider priority stays exactly as it exists today — the local provider slots into the existing chain without reordering anything already configured.\n- Per answer 3, the conservative option: explicit configuration (the local provider is only used when actually configured), no auto-detection or surprise fallbacks to paid APIs when the local instance is unavailable.\n- Per answer 4, the local provider can be selected as the preferred default once configured, but with an override knob so callers/config can still force another provider.\n\nDecisions I'm making on their behalf:\n\n- Concrete config surface: a provider block with an endpoint URL (defaulting to the standard local port), timeout, and result-format settings; anything the interview didn't pin down gets a sensible default that's documented rather than re-asked.\n- Behavior when the local instance is down: fail loudly for that request rather than silently spending money on a paid fallback — consistent with the \"no surprise fallbacks\" answer.\n- Test coverage uses the existing local-HTTP test helpers with `.no_proxy()` clients and twin-style fixtures, no live search dependency in unit tests.\n\nRemaining gaps (exact key names, timeout values, docs placement) are judgment calls that wouldn't change the shape of what gets built.\n\n{\"preferred_next_label\": \"enough\"}"
+            },
+            "notes": "Stage completed: triage",
+            "usage": {
+              "input": {
+                "usage": {
+                  "model": {
+                    "provider": "zai",
+                    "model_id": "glm-5.3"
+                  },
+                  "tokens": {
+                    "input_tokens": 4813,
+                    "output_tokens": 342,
+                    "reasoning_tokens": 951,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 0
+                  }
+                },
+                "facts": {
+                  "algorithm": "openai"
+                }
+              },
+              "total_usd_micros": 12427
+            },
+            "timing": {
+              "wall_time_ms": 0,
+              "inference_time_ms": 23404,
+              "tool_time_ms": 0,
+              "active_time_ms": 23404
             }
           },
           "understand": {
@@ -1305,8 +1499,9 @@
             "usage": null
           }
         },
-        "next_node_id": "triage",
+        "next_node_id": "plan",
         "node_visits": {
+          "triage": 1,
           "understand": 1,
           "interview": 1,
           "ask": 1,
@@ -1666,7 +1861,12 @@
       "first_event_seq": 226,
       "prompt": null,
       "response": null,
-      "completion": null,
+      "completion": {
+        "outcome": "succeeded",
+        "notes": null,
+        "failure_reason": null,
+        "timestamp": "2026-09-04T13:09:46.767882Z"
+      },
       "provider_used": null,
       "diff": null,
       "script_invocation": null,
@@ -1676,6 +1876,12 @@
       "started_at": "2026-09-04T13:07:48.591891Z",
       "handler": "human",
       "graph_visit": 1,
+      "timing": {
+        "wall_time_ms": 118141,
+        "inference_time_ms": 0,
+        "tool_time_ms": 0,
+        "active_time_ms": 0
+      },
       "usage": {
         "input_tokens": 0,
         "output_tokens": 0,
@@ -1683,6 +1889,41 @@
         "reasoning_tokens": 0,
         "cache_read_tokens": 0,
         "cache_write_tokens": 0
+      },
+      "agent_control": "running",
+      "state": "succeeded"
+    },
+    "triage@1": {
+      "first_event_seq": 238,
+      "prompt": null,
+      "response": null,
+      "completion": null,
+      "provider_used": {
+        "mode": "prompt",
+        "provider": "zai",
+        "model": "glm-5.3",
+        "reasoning_effort": "high"
+      },
+      "diff": null,
+      "script_invocation": null,
+      "script_timing": null,
+      "parallel_results": null,
+      "output": null,
+      "started_at": "2026-09-04T13:09:50.481633Z",
+      "handler": "prompt",
+      "graph_visit": 1,
+      "usage": {
+        "input_tokens": 4813,
+        "output_tokens": 342,
+        "total_tokens": 6106,
+        "reasoning_tokens": 951,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "total_usd_micros": 12427
+      },
+      "model": {
+        "provider": "zai",
+        "model_id": "glm-5.3"
       },
       "agent_control": "running",
       "state": "running"
