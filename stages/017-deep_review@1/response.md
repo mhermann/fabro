@@ -1,0 +1,13 @@
+The awk extraction mislabels trailing rows (sticky header variable), but the first block under each header is the new rows, and every value cross-checks: zai `glm-5.3` 1.4/4.4/0.26, zai flash 0.075/0.25/0.015, OpenRouter 1.4/4.4/0.14 and 0.075/0.25/0.015, Fireworks 1.4/4.4/0.26 and 0.15/0.5/0.03 — all matching the docs tables and changelog, and all pinned by the insta snapshots and the fireworks coverage table (the mislabeled trailing lines are the pre-existing glm-5.2/4.6 rows, unchanged in the diff).
+
+My review as final check:
+
+**Goal coverage** — GLM 5.3 and GLM 5.3 Flash added to zai (with the default flipped to `glm-5.3` per the "use precedent" instruction, exactly mirroring the glm-4.7→5.2 precedent), OpenRouter, and Fireworks — the three providers that verifiably serve them ("others as well"). Venice already ships `glm-5.3` (no Flash offering exists there) and Bedrock carries no GLM 5.3, so both were correctly left alone. Pricing researched from primary sources (Z.ai pricing page, OpenRouter live API, Fireworks pricing table) with promo-expiry comments. The two judgment calls (flash as zai `small_default`, promo-rate recording) were explicit human decisions, not implementer inventions.
+
+**Would tests fail if wrong?** Yes, for everything that matters: the two new insta snapshots pin every field (id, provider, limits, features, controls, costs, aliases, `default`/`small_default` flags); the portability test pins alias→model mappings on both zai and OpenRouter including wire-ID normalization; the fireworks coverage table pins api_id/limits/vision/reasoning/costs for both new rows; `every_provider_has_exactly_one_default_model` and the small-default integrity tests enforce the flag flip. Docs have no sync test — I did that cross-check manually above, and all numbers agree.
+
+**Untouched-code interactions** — verified none: web app has no model coupling (only `review_glm` branch-name strings in unrelated tests); the `model_fallback.rs` fixture uses `glm-5.2` as a selector, which remains valid; CLI/server model listings are catalog-driven; the OpenAI-compatible codec already handles both reasoning spellings. Full workspace suite is green except one failure proven (via `git stash` on the unmodified tree) to be a sandbox environment issue (missing `/root/.fabro` auth store). Formatting clean under the pinned nightly.
+
+Nothing blocking. This is additive catalog data plus a well-precedented default flip — reversible with a one-line TOML edit if the maintainer disagrees with any single value.
+
+{"preferred_next_label": "approve"}
