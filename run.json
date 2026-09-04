@@ -1,0 +1,910 @@
+{
+  "title": "Figure out a good way to add a provider for web searching that's not as expensive as brave or ven...",
+  "spec": {
+    "run_id": "01M1PF4XHVHC0NAXT6ENVV37VH",
+    "settings": {
+      "project": {
+        "name": null,
+        "description": null,
+        "metadata": {}
+      },
+      "workflow": {
+        "name": null,
+        "description": null,
+        "graph": "workflow.fabro",
+        "metadata": {}
+      },
+      "run": {
+        "goal": {
+          "type": "inline",
+          "value": "Figure out a good way to add a provider for web searching that's not as expensive as brave or venice. Can we set something up that runs locally and provides the search?"
+        },
+        "working_dir": null,
+        "metadata": {},
+        "inputs": {},
+        "model": {
+          "provider": "zai",
+          "name": "glm-5.3",
+          "fallbacks": {},
+          "controls": {
+            "reasoning_effort": null,
+            "speed": null
+          }
+        },
+        "git": {
+          "author": null
+        },
+        "prepare": {
+          "steps": [],
+          "timeout_ms": 300000
+        },
+        "execution": {
+          "mode": "normal",
+          "approval": "prompt"
+        },
+        "checkpoint": {
+          "exclude_globs": [],
+          "skip_git_hooks": false,
+          "commit_timeout_ms": 30000
+        },
+        "clone": {
+          "enabled": true,
+          "depth": 100
+        },
+        "run_branch": {
+          "enabled": true,
+          "push": true
+        },
+        "meta_branch": {
+          "enabled": true,
+          "push": true
+        },
+        "environment": {
+          "id": "default",
+          "provider": "docker",
+          "image": {
+            "docker": "buildpack-deps:noble",
+            "dockerfile": null
+          },
+          "resources": {
+            "cpu": 2,
+            "memory": "4GB",
+            "disk": null
+          },
+          "network": {
+            "mode": "allow_all",
+            "allow": []
+          },
+          "lifecycle": {
+            "preserve": false,
+            "stop_on_terminal": true,
+            "auto_stop": null
+          },
+          "labels": {},
+          "env": {}
+        },
+        "notifications": {},
+        "interviews": {
+          "provider": null,
+          "slack": null
+        },
+        "agent": {
+          "fabro_tools": false,
+          "mcps": {}
+        },
+        "hooks": [],
+        "scm": {
+          "provider": null,
+          "owner": null,
+          "repository": null,
+          "github": null
+        },
+        "pull_request": null,
+        "artifacts": {
+          "include": []
+        },
+        "integrations": {
+          "github": {
+            "permissions": {}
+          }
+        }
+      }
+    },
+    "graph": {
+      "name": "Sdlc",
+      "nodes": {
+        "devils": {
+          "id": "devils",
+          "attrs": {
+            "thread_id": {
+              "String": "build"
+            },
+            "model": {
+              "String": "glm-5.3"
+            },
+            "reasoning_effort": {
+              "String": "high"
+            },
+            "provider": {
+              "String": "zai"
+            },
+            "label": {
+              "String": "Devil's Advocate"
+            },
+            "fidelity": {
+              "String": "full"
+            },
+            "prompt": {
+              "String": "Attack the plan above. Your job is to find what is wrong with it, not to\napprove it out of politeness.\n\nLook specifically for:\n\n- Steps that will not work in this repository as it actually is.\n- Missing cases the goal implies but the plan ignores.\n- Hidden coupling — things the change breaks that the plan does not mention.\n- Verification that would pass even if the change were wrong.\n- Scope the plan quietly added that nobody asked for.\n\nBe specific. \"Consider edge cases\" is not a criticism; name the case.\n\n## The bar for sending it back\n\nRevising costs a full planning round. Apply a bar, and raise it each time you\nsee the plan again.\n\nSend it back only for defects that would make the *implementation wrong* — work\nthat would have to be redone, or a decision that is expensive to reverse once\ncode exists. Do not send it back for things that would merely make the plan\nbetter, more thorough, or more to your taste. A plan does not have to be\ncomplete to be a sound basis for work; the implementer can make ordinary\njudgment calls, and later review stages will catch ordinary mistakes.\n\n**If you have critiqued this plan before**, look at what you are about to object\nto and ask honestly: is this the same class of concern I already raised, or a\ngenuinely new blocking defect? If the plan addressed your earlier points and\nwhat remains is refinement, approve it. Repeatedly rejecting a plan that keeps\nimproving is a failure mode, not diligence — it burns the budget and produces\nnothing.\n\n**If you find yourself objecting for a third time**, that is strong evidence the\ndisagreement is not something more planning will settle. Either the remaining\nconcerns are not actually blocking — in which case approve — or the goal itself\nis underdetermined and needs a human decision, which the workflow will arrange.\nDo not simply restate your objections more forcefully.\n\n## Your decision\n\nIf the plan has blocking problems that must be fixed before any code is written,\nend your response with exactly:\n\n{\"preferred_next_label\": \"revise\"}\n\nIf the plan is sound enough to build from — it does not have to be perfect —\nend your response with exactly:\n\n{\"preferred_next_label\": \"approve\"}\n\nEmit exactly one of those two JSON objects, as the last thing in your response.\n"
+            }
+          }
+        },
+        "exit": {
+          "id": "exit",
+          "attrs": {
+            "reasoning_effort": {
+              "String": "high"
+            },
+            "model": {
+              "String": "glm-5.3"
+            },
+            "label": {
+              "String": "Exit"
+            },
+            "shape": {
+              "String": "Msquare"
+            },
+            "provider": {
+              "String": "zai"
+            }
+          }
+        },
+        "r_security": {
+          "id": "r_security",
+          "attrs": {
+            "reasoning_effort": {
+              "String": "high"
+            },
+            "class": {
+              "String": "fast"
+            },
+            "label": {
+              "String": "Security"
+            },
+            "model": {
+              "String": "glm-5.3-flash"
+            },
+            "fidelity": {
+              "String": "summary:high"
+            },
+            "provider": {
+              "String": "zai"
+            },
+            "prompt": {
+              "String": "**First, get the change in front of you.** Nothing has been handed to you, so\nfind it yourself:\n\n    git --no-pager diff origin/main...HEAD\n\nIf `origin/main` does not resolve, use `main` instead. Read whole files with\n`git show` or by opening them whenever the diff alone is not enough to judge —\na diff hides the context a line sits in, and most real defects live in that\ncontext.\n\nYou are reviewing only. Do not edit, create, or delete any file, and do not\ncommit. Three other reviewers are working in this same checkout at the same\ntime, and a write from you would corrupt what they are reading.\n\nReview the change for security problems only.\n\nLook for: injection of any kind, secrets or credentials committed in the diff,\nunvalidated input reaching a dangerous sink, authorization checks that are\nmissing or bypassable, unsafe deserialization, path traversal, and dependencies\nadded with known problems.\n\nFor each finding give the file, what an attacker does, and what they get.\nImpact matters more than category — say what actually goes wrong.\n\nIf the diff introduces no security problems, say so plainly. Do not pad.\n"
+            }
+          },
+          "classes": [
+            "fast"
+          ]
+        },
+        "start": {
+          "id": "start",
+          "attrs": {
+            "reasoning_effort": {
+              "String": "high"
+            },
+            "label": {
+              "String": "Start"
+            },
+            "model": {
+              "String": "glm-5.3"
+            },
+            "shape": {
+              "String": "Mdiamond"
+            },
+            "provider": {
+              "String": "zai"
+            }
+          }
+        },
+        "r_tests": {
+          "id": "r_tests",
+          "attrs": {
+            "prompt": {
+              "String": "**First, get the change in front of you.** Nothing has been handed to you, so\nfind it yourself:\n\n    git --no-pager diff origin/main...HEAD\n\nIf `origin/main` does not resolve, use `main` instead. Read whole files with\n`git show` or by opening them whenever the diff alone is not enough to judge —\na diff hides the context a line sits in, and most real defects live in that\ncontext.\n\nYou are reviewing only. Do not edit, create, or delete any file, and do not\ncommit. Three other reviewers are working in this same checkout at the same\ntime, and a write from you would corrupt what they are reading.\n\nReview the change for test coverage only.\n\nAsk: does this change have tests, do they test behaviour rather than\nimplementation detail, and would they actually fail if the code were wrong?\n\nLook for: new behaviour with no test, tests asserting what the code does rather\nthan what it should do, tests that pass regardless of the implementation,\nmissing failure and boundary cases, and tests coupled to internals in a way\nthat will break on any refactor.\n\nName the specific untested case. \"Add more tests\" is not a finding.\n\nIf coverage is adequate, say so plainly.\n"
+            },
+            "provider": {
+              "String": "zai"
+            },
+            "fidelity": {
+              "String": "summary:high"
+            },
+            "class": {
+              "String": "fast"
+            },
+            "model": {
+              "String": "glm-5.3-flash"
+            },
+            "reasoning_effort": {
+              "String": "high"
+            },
+            "label": {
+              "String": "Tests"
+            }
+          },
+          "classes": [
+            "fast"
+          ]
+        },
+        "r_correct": {
+          "id": "r_correct",
+          "attrs": {
+            "model": {
+              "String": "glm-5.3-flash"
+            },
+            "provider": {
+              "String": "zai"
+            },
+            "reasoning_effort": {
+              "String": "high"
+            },
+            "fidelity": {
+              "String": "summary:high"
+            },
+            "class": {
+              "String": "fast"
+            },
+            "prompt": {
+              "String": "**First, get the change in front of you.** Nothing has been handed to you, so\nfind it yourself:\n\n    git --no-pager diff origin/main...HEAD\n\nIf `origin/main` does not resolve, use `main` instead. Read whole files with\n`git show` or by opening them whenever the diff alone is not enough to judge —\na diff hides the context a line sits in, and most real defects live in that\ncontext.\n\nYou are reviewing only. Do not edit, create, or delete any file, and do not\ncommit. Three other reviewers are working in this same checkout at the same\ntime, and a write from you would corrupt what they are reading.\n\nReview the change for correctness only.\n\nLook for logic that produces a wrong result: off-by-one errors, inverted\nconditions, unhandled nil or empty cases, incorrect operator precedence, wrong\nvariable used, race conditions, resource leaks.\n\nFor each finding give the file, the line if you can identify it, what is wrong,\nand the concrete input or state that triggers it. A finding you cannot make\nfail is a guess — label it as such or drop it.\n\nIf the diff is correct, say so plainly. Do not invent findings to seem useful.\n"
+            },
+            "label": {
+              "String": "Correctness"
+            }
+          },
+          "classes": [
+            "fast"
+          ]
+        },
+        "triage": {
+          "id": "triage",
+          "attrs": {
+            "provider": {
+              "String": "zai"
+            },
+            "shape": {
+              "String": "tab"
+            },
+            "model": {
+              "String": "glm-5.3"
+            },
+            "label": {
+              "String": "Triage Answers"
+            },
+            "prompt": {
+              "String": "The human has just answered your questions. Decide whether you can now build\nthe right thing, or whether their answers opened up something new that is worth\none more short round.\n\nJudge only this: is there still an ambiguity where two reasonable engineers\nwould build materially different software from what you now know?\n\nGo back for another round only when all of these hold:\n\n- The remaining ambiguity would change what you build, not merely how you\n  phrase it.\n- It came out of their answers, rather than being something you failed to ask\n  the first time and could reasonably decide yourself.\n- You can state it as one or two concrete questions.\n\nOtherwise proceed. A second round costs the human real time, and most answers\nare good enough to build from even when they leave small gaps. Prefer deciding\nyourself and saying what you decided.\n\nIf you need another round, briefly say what is still unresolved and end your\nresponse with exactly:\n\n{\"preferred_next_label\": \"more\"}\n\nIf you have enough to plan, briefly restate what you now understand the human\nto want, including any decision you are making on their behalf, and end your\nresponse with exactly:\n\n{\"preferred_next_label\": \"enough\"}\n\nEmit exactly one of those two JSON objects, as the last thing in your response.\n"
+            },
+            "reasoning_effort": {
+              "String": "high"
+            }
+          }
+        },
+        "understand": {
+          "id": "understand",
+          "attrs": {
+            "prompt": {
+              "String": "Read the repository and understand what is being asked.\n\nThe goal for this run is:\n\nFigure out a good way to add a provider for web searching that's not as expensive as brave or venice. Can we set something up that runs locally and provides the search?\n\nDo this:\n\n1. Explore the repository enough to know how it is structured, what language\n   and tooling it uses, and where the change would land.\n2. Restate the goal in your own words, concretely, in terms of this codebase.\n3. List what you now know for certain.\n4. List what is genuinely ambiguous — things where two reasonable engineers\n   would build different software from the same instruction.\n\nDo not write any code. Do not modify any file. This stage is for understanding\nonly."
+            },
+            "thread_id": {
+              "String": "build"
+            },
+            "fidelity": {
+              "String": "full"
+            },
+            "model": {
+              "String": "glm-5.3"
+            },
+            "provider": {
+              "String": "zai"
+            },
+            "reasoning_effort": {
+              "String": "high"
+            },
+            "label": {
+              "String": "Understand"
+            }
+          }
+        },
+        "ask": {
+          "id": "ask",
+          "attrs": {
+            "provider": {
+              "String": "zai"
+            },
+            "max_visits": {
+              "Integer": 5
+            },
+            "fidelity": {
+              "String": "full"
+            },
+            "model": {
+              "String": "glm-5.3"
+            },
+            "thread_id": {
+              "String": "build"
+            },
+            "label": {
+              "String": "Ask the human"
+            },
+            "prompt": {
+              "String": "You are preparing questions for the human who requested this work.\n\n**Ask them with your question tool** — `AskUserQuestion` on Anthropic-style\nmodels, `request_user_input` on OpenAI-style ones. Do not merely print the\nquestions and end your turn: the tool is what pauses the run and returns the\nhuman's answers into this conversation, where the planning and implementation\nstages can see them. A numbered list in your prose reaches no one.\n\n**First, work out which situation you are in.**\n\n**If this is the first time you are asking** — write the questions worth asking\nbefore any code is written, based on the previous stage's analysis.\n\nRules:\n\n- Ask only about things that would change what you build. Skip anything you can\n  reasonably decide yourself, and say what you decided instead.\n- Prefer concrete either/or questions over open-ended ones. Give each question\n  the two or three real options, with what each one costs.\n- At most five questions. Fewer is better.\n- If nothing is genuinely uncertain, say so plainly and ask nothing. In that\n  case do not call the tool at all.\n\n**If you can see from the context above that planning or implementation has\nbeen going back and forth** — a plan repeatedly revised and rejected, or a\nchange repeatedly reviewed and sent back — then you are here to break a\ndeadlock, and that changes what you should ask.\n\nA deadlock that survives several rounds is almost never a failure of effort. It\nusually means a decision is genuinely underdetermined: the goal does not say\nwhich way to go, and each round picks a different answer and gets rejected for\nit. More rounds will not settle it. Only the human can.\n\nSo:\n\n- Say plainly what the disagreement is about, in one or two sentences.\n- State the specific options that have been argued for, and what each costs.\n- Ask the human to pick. Make it a concrete choice, not \"how should we proceed?\"\n- If several rounds disagreed about several things, ask only about the ones\n  actually blocking progress. Decide the rest yourself and say what you decided.\n\nDo not re-litigate the disagreement or take a side at length. Your job is to put\nthe decision in front of the human cleanly enough that one short answer unblocks\nthe work.\n\n**After the answers come back**, end your turn with a short restatement: each\nquestion, the answer you got, and what you now take it to mean. The next stage\nreads that restatement, so an answer you do not write down is an answer the\nplan will not have.\n"
+            },
+            "reasoning_effort": {
+              "String": "high"
+            }
+          }
+        },
+        "create_pr": {
+          "id": "create_pr",
+          "attrs": {
+            "script": {
+              "String": "set -eu\nBRANCH=$(git branch --show-current)\nif [ ! -s /tmp/pr-title.txt ]; then echo missing-or-empty-pr-title >&2; exit 1; fi\nif [ ! -s /tmp/pr-body.md ]; then echo missing-or-empty-pr-body >&2; exit 1; fi\nTITLE=$(head -n 1 /tmp/pr-title.txt | tr -d '\\`\"' | sed -e 's/^[[:space:]]*#*[[:space:]]*//' -e 's/[[:space:]]*$//' | cut -c1-70)\nif [ -z \"$TITLE\" ]; then echo pr-title-empty-after-sanitising >&2; exit 1; fi\ngit push -u origin $BRANCH\ngh pr create --base main --head $BRANCH --title \"$TITLE\" --body-file /tmp/pr-body.md\ngh pr view --json url --jq .url"
+            },
+            "model": {
+              "String": "glm-5.3"
+            },
+            "shape": {
+              "String": "parallelogram"
+            },
+            "reasoning_effort": {
+              "String": "high"
+            },
+            "label": {
+              "String": "Create PR"
+            },
+            "provider": {
+              "String": "zai"
+            }
+          }
+        },
+        "draft_pr": {
+          "id": "draft_pr",
+          "attrs": {
+            "label": {
+              "String": "Draft PR Description"
+            },
+            "provider": {
+              "String": "zai"
+            },
+            "prompt": {
+              "String": "Write the pull request description for the change you just made.\n\nWrite exactly two files:\n\n1. `/tmp/pr-title.txt` — a single line. Imperative mood, no trailing period, no\n   more than 70 characters. Describe what the change does, not that it is a\n   change.\n2. `/tmp/pr-body.md` — the description. Cover what changed and why, anything a\n   reviewer should look at closely, and how it was verified. If review findings\n   were fixed along the way, say what they were.\n\nDo not write these files anywhere inside the repository — only under `/tmp`.\n\nDo not use the shell to create the PR. A later stage does that.\n"
+            },
+            "class": {
+              "String": "fast"
+            },
+            "reasoning_effort": {
+              "String": "high"
+            },
+            "model": {
+              "String": "glm-5.3-flash"
+            }
+          },
+          "classes": [
+            "fast"
+          ]
+        },
+        "human_report": {
+          "id": "human_report",
+          "attrs": {
+            "label": {
+              "String": "Review flagged something needing your decision"
+            },
+            "model": {
+              "String": "glm-5.3"
+            },
+            "shape": {
+              "String": "hexagon"
+            },
+            "reasoning_effort": {
+              "String": "high"
+            },
+            "provider": {
+              "String": "zai"
+            }
+          }
+        },
+        "synth": {
+          "id": "synth",
+          "attrs": {
+            "reasoning_effort": {
+              "String": "high"
+            },
+            "model": {
+              "String": "glm-5.3"
+            },
+            "label": {
+              "String": "Synthesize Reviews"
+            },
+            "prompt": {
+              "String": "Four reviewers looked at this change from different angles — correctness,\nsecurity, tests, and simplicity. Their findings are in the branch results above.\n\nProduce one consolidated report for the deep reviewer who comes next:\n\n1. Merge findings that are the same problem seen from two angles.\n2. Discard findings that are plainly wrong, speculative, or mere preference.\n3. Order what remains by how much it actually matters.\n4. Note explicitly where the reviewers disagreed, or where only one of them saw\n   something. Those are the places a second pair of eyes is most valuable, so\n   flag them rather than quietly resolving them yourself.\n\nFor each surviving finding give the file, what is wrong, and why it matters.\n\nDo not decide whether the change should ship — that is the next stage's job.\nYour output is evidence for that decision, not the decision itself. If the\nreviewers found nothing worth passing on, say so plainly rather than padding.\n"
+            },
+            "provider": {
+              "String": "zai"
+            },
+            "shape": {
+              "String": "tripleoctagon"
+            }
+          }
+        },
+        "deep_review": {
+          "id": "deep_review",
+          "attrs": {
+            "prompt": {
+              "String": "You are the last check before this change is opened as a pull request and\nmerged automatically. Treat that responsibility seriously.\n\nAbove you have a consolidated verdict from four reviewers who each looked at\nthis change from a different angle — correctness, security, tests, and\nsimplicity.\n\nYou have not been handed the change itself. Get it yourself:\n\n    git --no-pager diff origin/main...HEAD\n\nIf `origin/main` does not resolve, use `main` instead.\n\nDo not simply ratify their verdict. Your job is to review the change yourself,\nusing their findings as leads rather than as conclusions. Use the shell to read\nany file you need in full — a diff hides the context a line sits in, and some\ndefects are only visible in the surrounding code.\n\nWeigh in particular:\n\n- Anything the four reviewers disagreed about, or that only one of them saw.\n- Whether the change actually does what the goal asked for. The reviewers were\n  each looking at a narrow dimension; nobody has yet checked the whole thing\n  against the original intent.\n- Whether the tests would fail if the code were wrong.\n- Anything the reviewers could not have seen because it lives in code the diff\n  does not touch.\n\nThen choose one of three routes.\n\nRoute \"fix\" — there are defects, and you can describe each one precisely enough\nthat another agent can fix it without guessing. Say which file, what is wrong,\nand what correct looks like. End with exactly:\n\n{\"preferred_next_label\": \"fix\"}\n\nRoute \"escalate\" — a human should decide. Use this when the change may not match\nwhat was actually wanted, when it touches security, data integrity, migrations,\ndeletion, or anything else where being wrong is expensive, or when you are\nsimply not confident. State plainly what you want the human to decide. End with\nexactly:\n\n{\"preferred_next_label\": \"escalate\"}\n\nRoute \"approve\" — the change does what the goal asked, you found nothing\nblocking, and you are confident. End with exactly:\n\n{\"preferred_next_label\": \"approve\"}\n\nWhen torn between approve and escalate, escalate. A pause costs minutes; a\nwrong merge costs much more.\n\nEmit exactly one of those three JSON objects, as the last thing in your\nresponse.\n"
+            },
+            "label": {
+              "String": "Deep Review"
+            },
+            "provider": {
+              "String": "zai"
+            },
+            "max_visits": {
+              "Integer": 6
+            },
+            "fidelity": {
+              "String": "full"
+            },
+            "model": {
+              "String": "glm-5.3"
+            },
+            "thread_id": {
+              "String": "build"
+            },
+            "reasoning_effort": {
+              "String": "max"
+            },
+            "class": {
+              "String": "deep"
+            }
+          },
+          "classes": [
+            "deep"
+          ]
+        },
+        "fork": {
+          "id": "fork",
+          "attrs": {
+            "label": {
+              "String": "Fan Out Reviews"
+            },
+            "max_parallel": {
+              "Integer": 4
+            },
+            "reasoning_effort": {
+              "String": "high"
+            },
+            "model": {
+              "String": "glm-5.3"
+            },
+            "provider": {
+              "String": "zai"
+            },
+            "shape": {
+              "String": "component"
+            }
+          }
+        },
+        "implement": {
+          "id": "implement",
+          "attrs": {
+            "reasoning_effort": {
+              "String": "high"
+            },
+            "max_visits": {
+              "Integer": 8
+            },
+            "model": {
+              "String": "glm-5.3-flash"
+            },
+            "thread_id": {
+              "String": "build"
+            },
+            "fidelity": {
+              "String": "full"
+            },
+            "class": {
+              "String": "fast"
+            },
+            "provider": {
+              "String": "zai"
+            },
+            "label": {
+              "String": "Implement"
+            },
+            "prompt": {
+              "String": "Implement the approved plan.\n\nThe goal is:\n\nFigure out a good way to add a provider for web searching that's not as expensive as brave or venice. Can we set something up that runs locally and provides the search?\n\nFollow the plan. Where reality differs from it, adapt and say what you changed\nand why.\n\nRules:\n\n- Match the surrounding code — its naming, structure, error handling, and\n  comment density. Read a neighbouring file before you write a new one.\n- Run this repository's existing tests and build after your change. If they\n  fail, fix them.\n- Do not commit. Fabro commits your work automatically at the end of the stage.\n- Do not open a pull request. A later stage does that.\n\nIf you are here after a review found defects, its findings are in the\nconversation above — read them and fix exactly what was raised, point by point.\nDo not take the opportunity to refactor unrelated code. If you believe a finding\nis wrong, say so and explain why rather than silently ignoring it; repeating the\nsame work unchanged will simply be rejected again.\n\nFinish by summarising what you changed, file by file."
+            }
+          },
+          "classes": [
+            "fast"
+          ]
+        },
+        "merge": {
+          "id": "merge",
+          "attrs": {
+            "model": {
+              "String": "glm-5.3"
+            },
+            "reasoning_effort": {
+              "String": "high"
+            },
+            "script": {
+              "String": "set -eu\nBRANCH=$(git branch --show-current)\ngit push origin $BRANCH\ngh pr merge $BRANCH --squash"
+            },
+            "shape": {
+              "String": "parallelogram"
+            },
+            "label": {
+              "String": "Merge PR"
+            },
+            "provider": {
+              "String": "zai"
+            }
+          }
+        },
+        "plan": {
+          "id": "plan",
+          "attrs": {
+            "label": {
+              "String": "Plan"
+            },
+            "max_visits": {
+              "Integer": 8
+            },
+            "fidelity": {
+              "String": "full"
+            },
+            "model": {
+              "String": "glm-5.3"
+            },
+            "reasoning_effort": {
+              "String": "high"
+            },
+            "prompt": {
+              "String": "Write the implementation plan for this change.\n\nThe goal is:\n\nFigure out a good way to add a provider for web searching that's not as expensive as brave or venice. Can we set something up that runs locally and provides the search?\n\nThe human has answered your questions. Treat their answers as authoritative —\nthey override any assumption you made earlier.\n\nYour plan must state:\n\n1. Every file you will create or modify, by path.\n2. What changes in each one.\n3. The order you will do it in.\n4. How you will verify it works, using this repository's existing test and build\n   tooling. If there is none, say so and describe what you will check manually.\n5. What you are deliberately not doing, and why.\n\nBe concrete. A plan that says \"add appropriate error handling\" is not a plan.\nDo not write any code yet.\n\nIf you are revising after a critique, address every point raised. State briefly\nwhat you changed and why, and if you are rejecting a criticism, say so and\njustify it."
+            },
+            "provider": {
+              "String": "zai"
+            },
+            "thread_id": {
+              "String": "build"
+            }
+          }
+        },
+        "r_simple": {
+          "id": "r_simple",
+          "attrs": {
+            "label": {
+              "String": "Simplicity"
+            },
+            "class": {
+              "String": "fast"
+            },
+            "fidelity": {
+              "String": "summary:high"
+            },
+            "prompt": {
+              "String": "**First, get the change in front of you.** Nothing has been handed to you, so\nfind it yourself:\n\n    git --no-pager diff origin/main...HEAD\n\nIf `origin/main` does not resolve, use `main` instead. Read whole files with\n`git show` or by opening them whenever the diff alone is not enough to judge —\na diff hides the context a line sits in, and most real defects live in that\ncontext.\n\nYou are reviewing only. Do not edit, create, or delete any file, and do not\ncommit. Three other reviewers are working in this same checkout at the same\ntime, and a write from you would corrupt what they are reading.\n\nReview the change for unnecessary complexity only.\n\nLook for: abstraction with a single caller, configuration nobody sets, dead or\nunreachable code, duplicated logic that already exists elsewhere in this\nrepository, indirection that makes the change harder to follow, and scope the\nchange added beyond what the goal asked for.\n\nFor each finding say what to delete or collapse, and what the simpler version\nlooks like.\n\nDo not report style preferences, formatting, or naming you merely dislike. Only\nreport complexity that will cost a future reader real time.\n\nIf the diff is appropriately simple, say so plainly.\n"
+            },
+            "provider": {
+              "String": "zai"
+            },
+            "model": {
+              "String": "glm-5.3-flash"
+            },
+            "reasoning_effort": {
+              "String": "high"
+            }
+          },
+          "classes": [
+            "fast"
+          ]
+        }
+      },
+      "edges": [
+        {
+          "from": "start",
+          "to": "understand",
+          "attrs": {}
+        },
+        {
+          "from": "understand",
+          "to": "ask",
+          "attrs": {}
+        },
+        {
+          "from": "ask",
+          "to": "triage",
+          "attrs": {}
+        },
+        {
+          "from": "triage",
+          "to": "ask",
+          "attrs": {
+            "label": {
+              "String": "more"
+            }
+          }
+        },
+        {
+          "from": "triage",
+          "to": "plan",
+          "attrs": {
+            "weight": {
+              "Integer": 10
+            },
+            "label": {
+              "String": "enough"
+            }
+          }
+        },
+        {
+          "from": "plan",
+          "to": "devils",
+          "attrs": {}
+        },
+        {
+          "from": "devils",
+          "to": "ask",
+          "attrs": {
+            "condition": {
+              "String": "internal.node_visit_count >= 4"
+            }
+          }
+        },
+        {
+          "from": "devils",
+          "to": "plan",
+          "attrs": {
+            "label": {
+              "String": "revise"
+            }
+          }
+        },
+        {
+          "from": "devils",
+          "to": "implement",
+          "attrs": {
+            "label": {
+              "String": "approve"
+            }
+          }
+        },
+        {
+          "from": "implement",
+          "to": "fork",
+          "attrs": {}
+        },
+        {
+          "from": "fork",
+          "to": "r_correct",
+          "attrs": {}
+        },
+        {
+          "from": "fork",
+          "to": "r_security",
+          "attrs": {}
+        },
+        {
+          "from": "fork",
+          "to": "r_tests",
+          "attrs": {}
+        },
+        {
+          "from": "fork",
+          "to": "r_simple",
+          "attrs": {}
+        },
+        {
+          "from": "r_correct",
+          "to": "synth",
+          "attrs": {}
+        },
+        {
+          "from": "r_security",
+          "to": "synth",
+          "attrs": {}
+        },
+        {
+          "from": "r_tests",
+          "to": "synth",
+          "attrs": {}
+        },
+        {
+          "from": "r_simple",
+          "to": "synth",
+          "attrs": {}
+        },
+        {
+          "from": "synth",
+          "to": "deep_review",
+          "attrs": {}
+        },
+        {
+          "from": "deep_review",
+          "to": "ask",
+          "attrs": {
+            "condition": {
+              "String": "internal.node_visit_count >= 4"
+            },
+            "weight": {
+              "Integer": 20
+            }
+          }
+        },
+        {
+          "from": "deep_review",
+          "to": "implement",
+          "attrs": {
+            "label": {
+              "String": "fix"
+            }
+          }
+        },
+        {
+          "from": "deep_review",
+          "to": "human_report",
+          "attrs": {
+            "label": {
+              "String": "escalate"
+            },
+            "weight": {
+              "Integer": 10
+            }
+          }
+        },
+        {
+          "from": "deep_review",
+          "to": "draft_pr",
+          "attrs": {
+            "label": {
+              "String": "approve"
+            }
+          }
+        },
+        {
+          "from": "human_report",
+          "to": "exit",
+          "attrs": {
+            "label": {
+              "String": "[S] Stop here"
+            }
+          }
+        },
+        {
+          "from": "human_report",
+          "to": "implement",
+          "attrs": {
+            "label": {
+              "String": "[F] Send back for fixes"
+            }
+          }
+        },
+        {
+          "from": "human_report",
+          "to": "draft_pr",
+          "attrs": {
+            "label": {
+              "String": "[M] Approve and open the PR"
+            }
+          }
+        },
+        {
+          "from": "draft_pr",
+          "to": "create_pr",
+          "attrs": {}
+        },
+        {
+          "from": "create_pr",
+          "to": "merge",
+          "attrs": {}
+        },
+        {
+          "from": "merge",
+          "to": "exit",
+          "attrs": {}
+        }
+      ],
+      "attrs": {
+        "model_stylesheet": {
+          "String": "\n            *      { model: glm-5.3; reasoning_effort: high; }\n            .deep  { model: glm-5.3; reasoning_effort: max; }\n            .fast  { model: glm-5.3-flash; }\n        "
+        },
+        "rankdir": {
+          "String": "LR"
+        },
+        "on_failure": {
+          "String": "exit"
+        },
+        "max_node_visits": {
+          "Integer": 24
+        },
+        "goal": {
+          "String": "Figure out a good way to add a provider for web searching that's not as expensive as brave or venice. Can we set something up that runs locally and provides the search?"
+        }
+      }
+    },
+    "graph_source": "digraph Sdlc {\n    graph [\n        goal=\"No goal supplied. Pass --goal or --goal-file.\",\n        model_stylesheet=\"\n            *      { model: glm-5.3; reasoning_effort: high; }\n            .deep  { model: glm-5.3; reasoning_effort: max; }\n            .fast  { model: glm-5.3-flash; }\n        \",\n        on_failure=\"exit\",\n        max_node_visits=24\n    ]\n    rankdir=LR\n\n    start [shape=Mdiamond, label=\"Start\"]\n    exit  [shape=Msquare, label=\"Exit\"]\n\n    understand [label=\"Understand\", thread_id=\"build\", fidelity=\"full\", prompt=\"@prompts/understand.md\"]\n    ask        [label=\"Ask the human\", thread_id=\"build\", fidelity=\"full\", prompt=\"@prompts/ask.md\", max_visits=5]\n    triage     [label=\"Triage Answers\", shape=tab, prompt=\"@prompts/triage-answers.md\"]\n\n    plan   [label=\"Plan\", thread_id=\"build\", fidelity=\"full\", prompt=\"@prompts/plan.md\", max_visits=8]\n    devils [label=\"Devil's Advocate\", thread_id=\"build\", fidelity=\"full\", prompt=\"@prompts/devils.md\"]\n\n    implement [label=\"Implement\", class=\"fast\", thread_id=\"build\", fidelity=\"full\", prompt=\"@prompts/implement.md\", max_visits=8]\n\n\n    fork [label=\"Fan Out Reviews\", shape=component, max_parallel=4]\n\n    r_correct  [label=\"Correctness\", class=\"fast\", fidelity=\"summary:high\", prompt=\"@prompts/review-correctness.md\"]\n    r_security [label=\"Security\", class=\"fast\", fidelity=\"summary:high\", prompt=\"@prompts/review-security.md\"]\n    r_tests    [label=\"Tests\", class=\"fast\", fidelity=\"summary:high\", prompt=\"@prompts/review-tests.md\"]\n    r_simple   [label=\"Simplicity\", class=\"fast\", fidelity=\"summary:high\", prompt=\"@prompts/review-simplicity.md\"]\n\n    synth [label=\"Synthesize Reviews\", shape=tripleoctagon, prompt=\"@prompts/synthesize.md\"]\n\n    draft_pr [label=\"Draft PR Description\", class=\"fast\", prompt=\"@prompts/draft-pr.md\"]\n\n    create_pr [label=\"Create PR\", shape=parallelogram,\n               script=\"set -eu\nBRANCH=$(git branch --show-current)\nif [ ! -s /tmp/pr-title.txt ]; then echo missing-or-empty-pr-title >&2; exit 1; fi\nif [ ! -s /tmp/pr-body.md ]; then echo missing-or-empty-pr-body >&2; exit 1; fi\nTITLE=$(head -n 1 /tmp/pr-title.txt | tr -d '\\`\\\"' | sed -e 's/^[[:space:]]*#*[[:space:]]*//' -e 's/[[:space:]]*$//' | cut -c1-70)\nif [ -z \\\"$TITLE\\\" ]; then echo pr-title-empty-after-sanitising >&2; exit 1; fi\ngit push -u origin $BRANCH\ngh pr create --base main --head $BRANCH --title \\\"$TITLE\\\" --body-file /tmp/pr-body.md\ngh pr view --json url --jq .url\"]\n\n    deep_review [label=\"Deep Review\", class=\"deep\", thread_id=\"build\", fidelity=\"full\", prompt=\"@prompts/deep-review.md\", max_visits=6]\n\n    human_report [shape=hexagon, label=\"Review flagged something needing your decision\"]\n\n    merge [label=\"Merge PR\", shape=parallelogram,\n           script=\"set -eu\nBRANCH=$(git branch --show-current)\ngit push origin $BRANCH\ngh pr merge $BRANCH --squash\"]\n\n    start -> understand -> ask -> triage\n\n    triage -> ask  [label=\"more\"]\n    triage -> plan [label=\"enough\", weight=10]\n\n    plan -> devils\n    devils -> ask [condition=\"internal.node_visit_count >= 4\"]\n    devils -> plan [label=\"revise\"]\n    devils -> implement [label=\"approve\"]\n\n    implement -> fork\n    fork -> r_correct\n    fork -> r_security\n    fork -> r_tests\n    fork -> r_simple\n    r_correct  -> synth\n    r_security -> synth\n    r_tests    -> synth\n    r_simple   -> synth\n\n    synth -> deep_review\n\n    deep_review -> ask [condition=\"internal.node_visit_count >= 4\", weight=20]\n    deep_review -> implement    [label=\"fix\"]\n    deep_review -> human_report [label=\"escalate\", weight=10]\n    deep_review -> draft_pr     [label=\"approve\"]\n\n    human_report -> exit      [label=\"[S] Stop here\"]\n    human_report -> implement [label=\"[F] Send back for fixes\"]\n    human_report -> draft_pr  [label=\"[M] Approve and open the PR\"]\n\n    draft_pr -> create_pr\n    create_pr -> merge\n    merge -> exit\n}\n",
+    "workflow_slug": "sdlc",
+    "workflow_version_id": "b0c996632eb4653025736cae608601e57be719834f7be8570641f5fc965c566e",
+    "target": {
+      "kind": "git",
+      "repo": "mhermann/fabro",
+      "branch": "main",
+      "sha": "b5700e9ca65867909a93ef4fbdded1b2fd39eadb"
+    },
+    "source_directory": "/workspace",
+    "provenance": {
+      "server": {
+        "version": "0.345.0-nightly.0"
+      },
+      "client": {
+        "user_agent": "fabro-cli/0.345.0-nightly.0",
+        "name": "fabro-cli",
+        "version": "0.345.0-nightly.0"
+      },
+      "subject": {
+        "kind": "user",
+        "identity": {
+          "issuer": "fabro:dev",
+          "subject": "dev"
+        },
+        "login": "dev",
+        "auth_method": "dev_token"
+      }
+    },
+    "definition_blob": "b287a967ceccc63f38d31dc4ed0fb218cf11833b58d697bd24c14b3114830e82",
+    "spec_blob": "a420f2c5b3bbabd8351fb14ad8174af7e1ad1d5347928616e97ea9fffe80c40a",
+    "git": {
+      "origin_url": "https://github.com/mhermann/fabro",
+      "branch": "main",
+      "sha": "b5700e9ca65867909a93ef4fbdded1b2fd39eadb",
+      "dirty": "clean"
+    }
+  },
+  "web_url": "http://127.0.0.1:32276/runs/01M1PF4XHVHC0NAXT6ENVV37VH",
+  "start": null,
+  "status": {
+    "kind": "starting"
+  },
+  "status_updated_at": "2026-09-04T15:03:44.479632Z",
+  "last_event_at": "2026-09-04T15:03:49.207191Z",
+  "pending_control": null,
+  "checkpoints": [],
+  "conclusion": null,
+  "sandbox": {
+    "kind": "ready",
+    "plan": {
+      "provider": "docker",
+      "image": "buildpack-deps:noble"
+    },
+    "instance": {
+      "provider": "docker",
+      "image": "buildpack-deps:noble",
+      "runtime": {
+        "id": "6432dd6dbb7921c20057f02085cd754c7fafca9bb90d2c36b3c7bf2e1824896b",
+        "working_directory": "/workspace/fabro",
+        "repo_cloned": true,
+        "clone_origin_url": "https://github.com/mhermann/fabro",
+        "clone_branch": "main",
+        "workspace_root": "/workspace",
+        "repos_root": "/repos",
+        "primary_repo_path": "/repos/mhermann/fabro",
+        "primary_repo_link": "/workspace/fabro"
+      }
+    }
+  },
+  "pull_request": null,
+  "superseded_by": null,
+  "pending_interviews": {},
+  "stages": {}
+}
