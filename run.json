@@ -888,7 +888,7 @@
     "kind": "running"
   },
   "status_updated_at": "2026-09-04T12:10:41.749440Z",
-  "last_event_at": "2026-09-04T12:12:39.296079Z",
+  "last_event_at": "2026-09-04T12:15:13.586544Z",
   "pending_control": null,
   "checkpoints": [
     {
@@ -1496,9 +1496,9 @@
       }
     },
     {
-      "seq": 0,
+      "seq": 438,
       "checkpoint": {
-        "timestamp": "2026-09-04T12:12:39.313745Z",
+        "timestamp": "2026-09-04T12:12:43.089588Z",
         "current_node": "plan",
         "completed_nodes": [
           "start",
@@ -1510,19 +1510,255 @@
         ],
         "node_retries": {},
         "context_values": {
+          "internal.work_dir": "/workspace/fabro",
+          "internal.retry_count.interview": 0,
+          "human.gate.text": "1. yes",
+          "thread.build.current_node": "plan",
+          "response.plan": "# Implementation Plan: z.ai GLM 5.3 + GLM 5.3 Flash\n\n## Resolved parameters\n\nCarrying forward the two decisions from the question round, plus the researched data everything else derives from:\n\n| | GLM 5.3 | GLM 5.3 Flash |\n|---|---|---|\n| Slug / family | `glm-5.3` / `glm-5` | `glm-5.3-flash` / `glm-5` |\n| Context / max output | 1,048,576 / 131,072 | 1,048,576 / 131,072 |\n| Vision | false (text-only per Z.ai + OpenRouter) | true (native multimodal) |\n| Efforts | `low`, `high`, `max` | `low`, `high`, `max` |\n| zai costs (per MTok) | 1.4 / 4.4 / 0.26 | 0.075 / 0.25 / 0.015 *(current advertised)* |\n| openrouter costs | 1.4 / 4.4 / 0.14 | 0.075 / 0.25 / 0.015 |\n| fireworks costs | 1.4 / 0.26 / 4.4 | 0.15 / 0.03 / 0.50 *(Fireworks charges list)* |\n\n- Flash pricing records **each provider's current advertised rate** with a TOML comment noting the Z.ai 50% launch promo ends 2026-09-09 (list: $0.15/$0.50/$0.03).\n- `glm-5.3-flash` gets **`small_default = true` on zai** (deepseek-v4-flash / gpt-oss-20b precedent; Fireworks keeps `gpt-oss-20b` as its small default — only one allowed per provider).\n- `glm-5.3` becomes the **zai provider default**; `glm-5.2` drops the flag.\n\n## Files and changes\n\n### 1. `lib/foundation/fabro-model/src/catalog/providers/zai.toml`\n\n- **Add `glm-5.3`** above `glm-5.2`: `display_name = \"GLM 5.3\"`, `default = true`, `aliases = [\"glm\", \"glm5\", \"glm53\", \"glm5.3\"]`; limits `context_window = 1048576`, `max_output = 131072`; features `tools = true`, `vision = false`, `reasoning = true`, `reasoning_effort = \"levels\"`, `prompt_cache = true`; controls `reasoning_effort = [\"low\", \"high\", \"max\"]`; costs `1.4 / 4.4 / 0.26`. Comment noting Z.ai serves it on the same coding endpoint and `thinking.type` only accepts `enabled`.\n- **Add `glm-5.3-flash`**: `display_name = \"GLM 5.3 Flash\"`, `small_default = true`, no aliases; same limits; features same as 5.3 except `vision = true`; same controls; costs `0.075 / 0.25 / 0.015` with the promo-expiry comment.\n- **Edit `glm-5.2`**: remove `default = true`; shrink `aliases` to `[\"glm52\", \"glm5.2\"]` (the portable `glm`/`glm5` move to 5.3).\n- **Edit `glm-4.7`**: comment only — upstream auto-routes GLM-5.2/5.1 → GLM-5.3 and GLM-4.7 → GLM-5.3-Flash on the coding plan.\n\n### 2. `lib/foundation/fabro-model/src/catalog/providers/openrouter.toml`\n\n- **Add `glm-5.3`**: `api_id = \"z-ai/glm-5.3\"`, `display_name = \"GLM 5.3 (via OpenRouter)\"`, `family = \"glm-5\"`, `aliases = [\"glm\", \"glm5\", \"glm53\", \"glm5.3\"]`; limits 1048576/131072; features tools/reasoning-levels/prompt_cache, `vision = false`; controls `[\"low\", \"high\", \"max\"]`; costs `1.4 / 4.4 / 0.14` (live OpenRouter rates).\n- **Add `glm-5.3-flash`**: `api_id = \"z-ai/glm-5.3-flash\"`, no aliases, `vision = true`, otherwise same shape; costs `0.075 / 0.25 / 0.015`.\n- **Edit `glm-5.2`**: shrink aliases to `[\"glm52\", \"glm5.2\"]`.\n\n### 3. `lib/foundation/fabro-model/src/catalog/providers/fireworks.toml`\n\n- **Add `glm-5.3`**: `api_id = \"accounts/fireworks/models/glm-5p3\"`, `display_name = \"GLM 5.3 (via Fireworks)\"`, `family = \"glm-5\"`; limits 1048576/131072; features mirroring the existing fireworks `glm-5.2` row (tools, reasoning, prompt_cache; no effort controls — unverifiable that Fireworks exposes `reasoning_effort`, and the 5.2 row omits it); costs `1.4 / 0.26 / 4.4`.\n- **Add `glm-5.3-flash`**: `api_id = \"accounts/fireworks/models/glm-5p3-flash\"`, same shape with `vision = true`; costs `0.15 / 0.03 / 0.50`.\n- Row comments noting prices verified 2026-09-04.\n\n### 4. `lib/foundation/fabro-model/src/catalog.rs`\n\n- **`LEGACY_BUILTIN_MODEL_IDENTIFIERS`** (~line 1832): insert `(\"z-ai/glm-5.3\", \"openrouter\", \"glm-5.3\")` and `(\"z-ai/glm-5.3-flash\", \"openrouter\", \"glm-5.3-flash\")` next to the existing `z-ai/glm-5.2` entry.\n- **Rewrite `builtin_glm_5_2_aliases_are_portable`** (~3447) → `builtin_glm_5_3_aliases_are_portable`: for `zai` + enabled `openrouter`, aliases `glm`, `glm5`, `glm53`, `glm5.3` must resolve to `glm-5.3`.\n- **`glm_5_2_in_catalog`** (~7222): inline snapshot changes (aliases shrink to `glm52`/`glm5.2`, `default: false`); trailing `get(\"glm\")`/`get(\"glm5\")` assertions change to `get(\"glm52\")`/`get(\"glm5.2\")` → `glm-5.2`.\n- **Add `glm_5_3_in_catalog`** and **`glm_5_3_flash_in_catalog`** tests in the same style (inline insta snapshots; assert `default = true` on 5.3, `small_default = true` on flash, alias resolution, and `model_settings(\"glm-5.3\").api_id == \"glm-5.3\"`).\n- **`builtin_deepseek_shared_slugs_are_portable_across_providers`** (~4333): add `\"glm-5.3\"`, `\"glm-5.3-flash\"` to the fireworks+openrouter id list.\n- Grep for any other `glm-5.2`-as-zai-default assertions and update; existing `zai` small-default coverage comes free via `builtin_small_defaults_are_marked_per_provider` (~4515).\n\n### 5. `lib/components/fabro-llm/tests/integration.rs`\n\n- Add `zai_glm_5_3_reasoning_tool_round_trip` (`live(\"ZAI_API_KEY\")`) and `openrouter_glm_5_3_reasoning_tool_round_trip` (`live(\"OPENROUTER_API_KEY\")`) — direct mirrors of the 5.2 tests (multiply-tool round trip, reasoning-before-tool-call assertion, authoritative-cost assertion on the OpenRouter one). Keep the 5.2 tests; upstream 5.2→5.3 auto-routing keeps them green.\n\n### 6. Docs\n\n- **`docs/public/core-concepts/models.mdx`**: update the `glm-5.2` row (aliases → `glm52`, `glm5.2`); add `glm-5.3` and `glm-5.3-flash` zai rows (aliases `glm`, `glm5`, `glm53`, `glm5.3` on 5.3; prices $1.40/$4.40 and $0.075/$0.25); leave the existing venice `glm-5.3` row alone; change the per-provider default table `zai` → `glm-5.3`.\n- **`docs/public/integrations/openrouter.mdx`** (~line 59): row becomes `glm-5.3` (`glm`, `glm5`, `glm53`, `glm5.3`), `glm-5.3-flash`, `glm-5.2`, `glm-4.6` with `z-ai/...` API IDs.\n- **`docs/public/integrations/fireworks.mdx`** (~line 56): add `glm-5.3`, `glm-5.3-flash` rows with `glm-5p3` / `glm-5p3-flash` API IDs.\n- **`docs/public/changelog/2026-09-04.mdx`** (new): \"GLM 5.3 and GLM 5.3 Flash\" — providers added, new zai default, alias moves, small_default, Z.ai upstream auto-routing note, flash promo note.\n\n## Order\n\n1. `zai.toml` → `openrouter.toml` → `fireworks.toml` (data first)\n2. `catalog.rs` legacy-identifier table + test updates; run `cargo nextest run -p fabro-model`, review pending snapshots with `cargo insta pending-snapshots`, accept selectively\n3. `integration.rs` live tests (compile-checked only — no keys here)\n4. Docs + changelog\n5. Grep `glm-5.2`/`glm-5` across repo for stale references; full verification pass\n\n## Verification\n\n- `cargo nextest run -p fabro-model` — catalog build + portability + snapshot tests (the one-default-per-provider build error would catch a missed flag flip).\n- `cargo build --workspace` and `cargo nextest run -p fabro-llm -p fabro-server` — compile + no drift in dependents.\n- `cargo +nightly-2026-04-14 fmt --all` (and clippy if the pinned toolchain is installed).\n- `grep -rn \"glm\" lib/ docs/public/ --include=\"*.toml\" --include=\"*.rs\" --include=\"*.mdx\"` — confirm docs tables match catalog numbers exactly.\n- Live round trips **cannot run here** (no `ZAI_API_KEY`/`OPENROUTER_API_KEY`); they'd run via `set -a && source .env && set +a && cargo nextest run -p fabro-llm --profile e2e --run-ignored only glm_5_3`. I'll note this in the PR description for the maintainer to trigger.\n\n## Deliberately not doing\n\n- **No Venice `glm-5.3-flash`** — Venice doesn't offer it; a row would be fabricated pricing.\n- **No Bedrock changes** — Bedrock only carries GLM 4.7/4.7-Flash/5 today.\n- **No Rust adapter/codec changes** — the OpenAI-compatible codec already handles both `reasoning_content` (Z.ai) and `reasoning` (OpenRouter) spellings; no Rust model enums exist anymore.\n- **No removal or repricing of `glm-5.2`/`glm-4.7`/`glm-4.6` rows**, and no alias changes on Venice's existing `glm-5.3` row.\n- **Not recording OpenRouter's 262,144 max-completion outlier** — Z.ai's documented 128K wins, matching family precedent.\n- **No `estimated_output_tps`, no `probe` flag, no flash aliases, no OpenAPI/client regeneration** (models are dynamic; no schema change).",
+          "thread.ask.current_node": "interview",
+          "graph.rankdir": "LR",
+          "internal.retry_count.triage": 0,
+          "failure_signature": "",
+          "current_node": "plan",
+          "graph.on_failure": "exit",
+          "human.gate.label": "1. yes",
+          "internal.run_id": "01M1P1HEMJHSJY1ZC1FQV4BJBA",
+          "last_stage": "plan",
+          "response.ask": "This is the first ask — no plan has bounced yet, so these are the pre-code questions. Most forks I can resolve from the repo precedent and the \"use precedent\" note; only two are genuine product calls.\n\n**Decided myself (from precedent + verified data, unless you object):**\n- **Scope of \"others\":** zai + OpenRouter + Fireworks (all three verifiably serve GLM 5.3 and 5.3 Flash today). Bedrock untouched (only has GLM 4.7/5), Venice untouched (already has `glm-5.3`, offers no Flash — adding one would be fabrication).\n- **Default:** `glm-5.3` becomes the zai provider default; `glm-5.2` drops the flag (only one default allowed per provider; this is exactly what the glm-4.7→glm-5.2 change did).\n- **Aliases:** portable set `glm`, `glm5`, `glm53`, `glm5.3` moves to `glm-5.3` on zai/OpenRouter; `glm52`/`glm5.2` stay pinned to `glm-5.2`. Flash gets no aliases initially.\n- **Limits & features:** 1,048,576 context / 131,072 max output for both (Z.ai's own docs; ignoring OpenRouter's 262,144 outlier), efforts `low`/`high`/`max` (Z.ai, Venice, and OpenRouter all agree), `vision = true` on Flash only (natively multimodal), reasoning-by-default implicit via `levels`.\n- **Tests & docs:** mirror the GLM 5.2 precedent — catalog portability/snapshot tests, live `zai`/`openrouter` round-trip e2e tests, models.mdx tables, integration doc tables, dated changelog entry.\n\n**Questions:**\n\n1. **Should `glm-5.3-flash` be the `small_default` on zai?** Today zai has no small default, so metadata enrichment (small token budget, short timeout) falls back to the provider default — currently glm-5.2, soon glm-5.3. Options: (a) yes, mark Flash as zai's `small_default` (matches the deepseek-v4-flash / gpt-oss-20b precedent, cheaper enrichment); (b) no, leave zai without a small default (zero behavior change for existing Z.ai users).\n\n2. **Which price do I record for `glm-5.3-flash`?** Z.ai's promo (50% off) ends 2026-09-09 — five days from now. Options: (a) current advertised rates per provider (Z.ai + OpenRouter: $0.075 / $0.25 / $0.015; Fireworks list: $0.15 / $0.50 / $0.03) with a comment noting the expiring promo — matches the repo's \"record what the provider charges\" convention; (b) list prices everywhere ($0.15 / $0.50 / $0.03) — durable past the promo but overestimates until it ends. (GLM 5.3 itself is unambiguous: $1.4 / $4.4 everywhere.)",
+          "internal.node_visit_count": 1,
+          "response.understand": "I now have a complete picture. No code was written and no files were modified.\n\n---\n\n## 1. Repository structure and where the change lands\n\n**Tooling:** Rust workspace (`lib/apps/*`, `lib/components/*`, `lib/foundation/*`), tested with `cargo nextest`; TypeScript web app (`apps/fabro-web`, Bun); Mintlify docs (`docs/public/**/*.mdx`). Formatting/lint via pinned nightly (`nightly-2026-04-14`). Insta snapshots used in some catalog tests.\n\n**How models work here (the key insight):** models are *data*, not code. The catalog is a set of TOML files embedded into the binary via `rust_embed` at `lib/foundation/fabro-model/src/catalog/providers/*.toml`. Each file declares a provider (`display_name`, `adapter`, `base_url`, `auth.credentials`, `priority`) and its model rows (`api_id`, `family`, `aliases`, `default`/`small_default`/`probe`, `limits`, `features`, `controls.reasoning_effort`, `costs`). Z.ai (`zai.toml`) already exists as an `openai_compatible` adapter pointed at `https://api.z.ai/api/coding/paas/v4`, currently listing `glm-5.2` (provider default) and `glm-4.7`.\n\n**A model entry appears in these places (all touched by precedent commit `c67cfef1` \"Add GLM 5.2 model support\" + follow-ups):**\n- `lib/foundation/fabro-model/src/catalog/providers/zai.toml` — direct provider rows\n- `.../providers/openrouter.toml` — gateway rows (`api_id = \"z-ai/glm-5.2\"`), plus `LEGACY_BUILTIN_MODEL_IDENTIFIERS` in `catalog.rs` (wire-ID → slug normalization, line ~1832)\n- `.../providers/fireworks.toml` — serverless rows (`api_id = \"accounts/fireworks/models/glm-5p2\"`, dots → `p`)\n- Tests in `lib/foundation/fabro-model/src/catalog.rs`: `builtin_glm_5_2_aliases_are_portable` (~line 3447), the `glm_5_2_in_catalog` insta snapshot (~7222), `builtin_deepseek_shared_slugs_are_portable_across_providers` (~4333)\n- Live e2e tests: `lib/components/fabro-llm/tests/integration.rs` (`zai_glm_5_2_reasoning_tool_round_trip`, `openrouter_glm_5_2_reasoning_tool_round_trip`, gated on `ZAI_API_KEY`/`OPENROUTER_API_KEY`)\n- Docs: `docs/public/core-concepts/models.mdx` (catalog table + per-provider default table), `docs/public/integrations/{openrouter,fireworks,venice}.mdx`, plus a dated `docs/public/changelog/*.mdx` entry\n- No Rust enum/code change is needed for a new model on an existing adapter/codec — the `adapter_registry` is keyed by `AdapterKind`, and the old per-model test table there has since been removed.\n\n**Constraint learned from the builder:** exactly one `default = true` and one `small_default = true` per provider, or the catalog build fails (`CatalogBuildError::MultipleProviderDefaults`).\n\n## 2. Goal restated concretely\n\nAdd **GLM 5.3** and **GLM 5.3 Flash** as first-class catalog offerings for the `zai` provider and every other built-in provider that actually serves them (OpenRouter, Fireworks; Venice already has `glm-5.3`): new TOML rows with researched limits/features/controls/costs, portable `glm*` aliases moved to the new flagship, `glm-5.3` becoming the Z.ai provider default per precedent, matching test/doc/changelog updates, and optionally live round-trip tests against Z.ai and OpenRouter.\n\n## 3. What I know for certain\n\n**From the repo:**\n- Z.ai ships `glm-5.2` (default, aliases `glm`, `glm5`, `glm52`, `glm5.2`, 1M/131072, efforts `high`/`max`, costs 1.4/4.4/0.26) and `glm-4.7`. Credentials: `ZAI_API_KEY` env/vault.\n- \"Portable aliases\" is an explicit, tested contract: `glm`, `glm5`, `glm52`, `glm5.2` must resolve to the same canonical slug on every provider that offers the family.\n- Exactly one default per provider; changing the default means moving the flag (precedent: glm-4.7→glm-5.2, documented in models.mdx \"Default model\" table).\n- `small_default` marks the small/cheap tier per provider (used for metadata enrichment with small budgets); `DeepSeek V4 Flash` and fireworks `gpt-oss-20b` carry it. Z.ai currently has no `small_default`.\n- Venice already has a `glm-5.3` row (1M/131072, efforts `low`/`high`/`max`, costs 1.75/5.5/0.325, aliases `glm`, `glm5`, `glm53`, `glm5.3`, `glm-5-3`) — so the unpinned `glm` alias will exist on multiple providers and resolves by provider priority (zai=60 > venice=35).\n- OpenRouter responses carry authoritative in-band `usage.cost`, so its cost rows are best-effort estimates only.\n- The OpenAI-compatible codec already handles Z.ai's `reasoning_content` and OpenRouter's `reasoning` spellings (added in the GLM 5.2 commit).\n\n**Researched (authoritative sources, fetched today):**\n- **Z.ai direct (docs.z.ai):** `glm-5.3` — text-only, 1M context, 128K max output, reasoning always on with `reasoning_effort` `low`/`high`/`max` (default `max`), `thinking.type` only accepts `enabled`; tools/streaming/caching/structured output supported; served on the same `api.z.ai/api/coding/paas/v4` chat-completions endpoint the catalog already uses. Pricing per MTok: **$1.4 input / $4.4 output / $0.26 cached**.\n- **Z.ai direct `glm-5.3-flash`:** model code `glm-5.3-flash`, native multimodal (image/video/file+text input), 1M context, 128K max output, same reasoning contract as 5.3. Pricing per MTok: **$0.15 / $0.50 / $0.03 list**, currently 50% off (**$0.075 / $0.25 / $0.015**) until 2026-09-09; caching supported.\n- **Z.ai coding plan routing:** requests for GLM-5.2/5.1 auto-route to GLM-5.3; GLM-4.7 auto-routes to GLM-5.3-Flash.\n- **OpenRouter live API:** `z-ai/glm-5.3` — text-only, 1,310,720 advertised / 1,048,576 top-provider context, 262,144 max completion tokens, efforts `max`/`high`/`low`, $1.40/$4.40/$0.14 per MTok. `z-ai/glm-5.3-flash` — text+image+video, same context, 131,072 max completion, efforts `max`/`high`/`low`, **$0.075/$0.25/$0.015** (matches Z.ai promo).\n- **Fireworks live pricing page:** `glm-5p3` → $1.40/$0.26/$4.40; `glm-5p3-flash` → $0.15/$0.03/$0.50 (standard tier). Both exist today.\n- **Amazon Bedrock:** Z.ai models on Bedrock are only GLM 4.7, GLM 4.7 Flash, GLM 5 — **no GLM 5.3**, so `bedrock.toml` is out of scope.\n\n## 4. Genuinely ambiguous (two reasonable engineers would differ)\n\n1. **Scope of \"others as well.\"** Fireworks provably serves both new models and OpenRouter is explicitly named; Venice already has `glm-5.3` (no Flash) and Bedrock has nothing. Does \"others\" mean *only* providers that serve GLM 5.3 today (zai+openrouter+fireworks), or should Venice get a `glm-5.3-flash` row too (Venice's catalog doesn't list one — adding it would be fabrication)?\n2. **Which model becomes the Z.ai default.** GLM 5.3 is the same price as 5.2 and is the flagship (strong precedent: glm-4.7→glm-5.2 moved the default to the flagship). But DeepSeek made its *Flash* the default+small_default because of cost. Flagship (GLM 5.3) is the likelier read, but it's a product call.\n3. **`small_default` for `glm-5.3-flash` on Z.ai.** It fits the \"small/cheap tier\" role and other providers mark their cheap tiers, but Z.ai has never had a `small_default`; adding one changes metadata-enrichment behavior for existing Z.ai users (budget/timeout-sensitive paths). Also: should fireworks' `glm-5p3-flash` get it (fireworks already has `gpt-oss-20b` as small default — so it *can't*, without displacing it)?\n4. **Which price to record for `glm-5.3-flash`.** List ($0.15/$0.50/$0.03) vs. current promotional ($0.075/$0.25/$0.015, ends 2026-09-09 — days from now). The repo has precedent both ways (glm-5.2 rows use list prices; `laguna-xs-2.1` records a promotional rate with an explanatory comment; OpenRouter's live API currently returns the promo price).\n5. **Limits disagreement between sources.** Z.ai docs say 1M context/128K output for both; OpenRouter advertises 1,310,720 context (1,048,576 top-provider) and 262,144 max completion for `glm-5.3`. Existing rows use 1,048,576/131,072. Whether to record OpenRouter's larger numbers or normalize to Z.ai's is a judgment call.\n6. **Alias surgery on the older rows.** Presumably `glm`/`glm5` move to `glm-5.3` while `glm52`/`glm5.2` stay pinned to the old model — but does `glm-5.2` keep its full alias set, or get trimmed? And should the Z.ai auto-routing note (5.2→5.3, 4.7→5.3-Flash on the coding plan) be recorded in the TOML comments/docs, since users selecting `glm-5.2` will silently get 5.3 upstream?\n7. **Effort levels on OpenRouter.** Z.ai and Venice expose `low`/`high`/`max` for 5.3; the existing OpenRouter `glm-5.2` row uses `high`/`xhigh` (OpenRouter's own naming). For `glm-5.3` OpenRouter reports `max`/`high`/`low` — whether to translate or mirror verbatim is a small consistency choice.\n8. **`reasoning_by_default` spelling.** GLM 5.3/Flash cannot disable thinking. Catalog-wise, `reasoning_effort = \"levels\"` already implies reasoning-by-default, and Venice's glm-5.3 row also sets it explicitly. Whether the new rows set it explicitly (and whether the *existing* `glm-5.2` zai row is left inconsistent) is unresolved.\n9. **Live e2e tests.** The GLM 5.2 precedent added two live round-trip tests (Z.ai + OpenRouter). Include the same for 5.3 (they only run under `--profile e2e` with real keys), and/or for Flash? A Flash test would also be the only coverage of vision content blocks on this route.\n10. **Changelog file/date.** A new dated changelog entry (today 2026-09-04) is customary, but whether this ships standalone or folded into the next entry, and its title, is editorial.",
+          "graph.goal": "Add z.ai GLM5.3 and GLM5.3 Flash support. Understand the provider model for the models\n\nNotes:\n- Use precedent for changing default model\n- Implement in openrouter and others as well\n- Research the pricing yourself",
+          "internal.fidelity": "full",
+          "internal.retry_count.understand": 0,
+          "outcome": "succeeded",
+          "thread.interview.current_node": "triage",
+          "human.gate.interview.question": "Answer the open questions",
+          "internal.thread_id": "build",
+          "graph.max_node_visits": "24",
+          "internal.retry_count.ask": 0,
+          "graph.model_stylesheet": "\n            *      { model: glm-5.2; reasoning_effort: high; }\n            .deep  { reasoning_effort: max; }\n        ",
+          "internal.retry_count.start": 0,
+          "preferred_label": "enough",
+          "failure_class": "",
+          "human.gate.interview.answer": "1. yes",
+          "human.gate.selected": "freeform",
+          "internal.retry_count.plan": 0,
+          "last_response": "# Implementation Plan: z.ai GLM 5.3 + GLM 5.3 Flash\n\n## Resolved parameters\n\nCarrying forward the two decisions from the question round, plus the researched data everything else derives from:\n\n| | GLM",
+          "response.triage": "The answers resolved the open questions. Here's what I now understand the task to be:\n\n**Goal:** Add z.ai GLM-5.3 and GLM-5.3 Flash to Fabro's provider/model catalog, mirroring how GLM-5.2 (and prior GLM versions) are registered.\n\n**What I'll build:**\n\n1. **z.ai (Zhipu) native provider** — add `glm-5.3` and `glm-5.3-flash` entries following the existing `glm-5.2` precedent: same provider shape, context window, capabilities/limits metadata, and streaming behavior as the incumbent GLM models.\n\n2. **Aggregators** — register both models through OpenRouter (`z-ai/glm-5.3`, `z-ai/glm-5.3-flash` naming per OpenRouter's convention) and any other provider catalogs that already carry GLM-5.2 (e.g. the OpenAI-compatible provider lists), so the models work everywhere GLM-5.2 currently works.\n\n3. **Pricing** — researched from public z.ai and OpenRouter pricing pages and encoded per-token input/output (and cached-input where the schema supports it) alongside the existing GLM-5.2 entries, with source noted in tests/comments.\n\n**Decisions I'm making on the human's behalf:**\n\n- **Default model:** follow repo precedent — I'll look at what happened when GLM-5.2 landed (whether the flagship bump became the default for the z.ai provider or defaults stayed put) and do exactly the same for 5.3, no more no less.\n- **Model IDs and display names** follow the existing GLM naming pattern rather than inventing a new one.\n- Pricing values are best-effort from public sources at implementation time; if a price isn't published for a tier (e.g. Flash caching), I'll omit rather than guess, consistent with how sibling models handle gaps.\n\nNo remaining ambiguity that would change what gets built — the notes explicitly delegated pricing research and default-model policy to me, and the interview confirmed the approach.\n\n{\"preferred_next_label\": \"enough\"}"
+        },
+        "node_outcomes": {
+          "ask": {
+            "status": "succeeded",
+            "context_updates": {
+              "last_stage": "ask",
+              "last_response": "This is the first ask — no plan has bounced yet, so these are the pre-code questions. Most forks I can resolve from the repo precedent and the \"use precedent\" note; only two are genuine product call",
+              "response.ask": "This is the first ask — no plan has bounced yet, so these are the pre-code questions. Most forks I can resolve from the repo precedent and the \"use precedent\" note; only two are genuine product calls.\n\n**Decided myself (from precedent + verified data, unless you object):**\n- **Scope of \"others\":** zai + OpenRouter + Fireworks (all three verifiably serve GLM 5.3 and 5.3 Flash today). Bedrock untouched (only has GLM 4.7/5), Venice untouched (already has `glm-5.3`, offers no Flash — adding one would be fabrication).\n- **Default:** `glm-5.3` becomes the zai provider default; `glm-5.2` drops the flag (only one default allowed per provider; this is exactly what the glm-4.7→glm-5.2 change did).\n- **Aliases:** portable set `glm`, `glm5`, `glm53`, `glm5.3` moves to `glm-5.3` on zai/OpenRouter; `glm52`/`glm5.2` stay pinned to `glm-5.2`. Flash gets no aliases initially.\n- **Limits & features:** 1,048,576 context / 131,072 max output for both (Z.ai's own docs; ignoring OpenRouter's 262,144 outlier), efforts `low`/`high`/`max` (Z.ai, Venice, and OpenRouter all agree), `vision = true` on Flash only (natively multimodal), reasoning-by-default implicit via `levels`.\n- **Tests & docs:** mirror the GLM 5.2 precedent — catalog portability/snapshot tests, live `zai`/`openrouter` round-trip e2e tests, models.mdx tables, integration doc tables, dated changelog entry.\n\n**Questions:**\n\n1. **Should `glm-5.3-flash` be the `small_default` on zai?** Today zai has no small default, so metadata enrichment (small token budget, short timeout) falls back to the provider default — currently glm-5.2, soon glm-5.3. Options: (a) yes, mark Flash as zai's `small_default` (matches the deepseek-v4-flash / gpt-oss-20b precedent, cheaper enrichment); (b) no, leave zai without a small default (zero behavior change for existing Z.ai users).\n\n2. **Which price do I record for `glm-5.3-flash`?** Z.ai's promo (50% off) ends 2026-09-09 — five days from now. Options: (a) current advertised rates per provider (Z.ai + OpenRouter: $0.075 / $0.25 / $0.015; Fireworks list: $0.15 / $0.50 / $0.03) with a comment noting the expiring promo — matches the repo's \"record what the provider charges\" convention; (b) list prices everywhere ($0.15 / $0.50 / $0.03) — durable past the promo but overestimates until it ends. (GLM 5.3 itself is unambiguous: $1.4 / $4.4 everywhere.)"
+            },
+            "notes": "Stage completed: ask",
+            "usage": {
+              "input": {
+                "usage": {
+                  "model": {
+                    "provider": "zai",
+                    "model_id": "glm-5.2"
+                  },
+                  "tokens": {
+                    "input_tokens": 3291,
+                    "output_tokens": 701,
+                    "reasoning_tokens": 4877,
+                    "cache_read_tokens": 125184,
+                    "cache_write_tokens": 0
+                  }
+                },
+                "facts": {
+                  "algorithm": "openai"
+                }
+              },
+              "total_usd_micros": 61697
+            },
+            "timing": {
+              "wall_time_ms": 0,
+              "inference_time_ms": 74293,
+              "tool_time_ms": 0,
+              "active_time_ms": 74293
+            }
+          },
+          "start": {
+            "status": "succeeded",
+            "usage": null
+          },
+          "understand": {
+            "status": "succeeded",
+            "context_updates": {
+              "response.understand": "I now have a complete picture. No code was written and no files were modified.\n\n---\n\n## 1. Repository structure and where the change lands\n\n**Tooling:** Rust workspace (`lib/apps/*`, `lib/components/*`, `lib/foundation/*`), tested with `cargo nextest`; TypeScript web app (`apps/fabro-web`, Bun); Mintlify docs (`docs/public/**/*.mdx`). Formatting/lint via pinned nightly (`nightly-2026-04-14`). Insta snapshots used in some catalog tests.\n\n**How models work here (the key insight):** models are *data*, not code. The catalog is a set of TOML files embedded into the binary via `rust_embed` at `lib/foundation/fabro-model/src/catalog/providers/*.toml`. Each file declares a provider (`display_name`, `adapter`, `base_url`, `auth.credentials`, `priority`) and its model rows (`api_id`, `family`, `aliases`, `default`/`small_default`/`probe`, `limits`, `features`, `controls.reasoning_effort`, `costs`). Z.ai (`zai.toml`) already exists as an `openai_compatible` adapter pointed at `https://api.z.ai/api/coding/paas/v4`, currently listing `glm-5.2` (provider default) and `glm-4.7`.\n\n**A model entry appears in these places (all touched by precedent commit `c67cfef1` \"Add GLM 5.2 model support\" + follow-ups):**\n- `lib/foundation/fabro-model/src/catalog/providers/zai.toml` — direct provider rows\n- `.../providers/openrouter.toml` — gateway rows (`api_id = \"z-ai/glm-5.2\"`), plus `LEGACY_BUILTIN_MODEL_IDENTIFIERS` in `catalog.rs` (wire-ID → slug normalization, line ~1832)\n- `.../providers/fireworks.toml` — serverless rows (`api_id = \"accounts/fireworks/models/glm-5p2\"`, dots → `p`)\n- Tests in `lib/foundation/fabro-model/src/catalog.rs`: `builtin_glm_5_2_aliases_are_portable` (~line 3447), the `glm_5_2_in_catalog` insta snapshot (~7222), `builtin_deepseek_shared_slugs_are_portable_across_providers` (~4333)\n- Live e2e tests: `lib/components/fabro-llm/tests/integration.rs` (`zai_glm_5_2_reasoning_tool_round_trip`, `openrouter_glm_5_2_reasoning_tool_round_trip`, gated on `ZAI_API_KEY`/`OPENROUTER_API_KEY`)\n- Docs: `docs/public/core-concepts/models.mdx` (catalog table + per-provider default table), `docs/public/integrations/{openrouter,fireworks,venice}.mdx`, plus a dated `docs/public/changelog/*.mdx` entry\n- No Rust enum/code change is needed for a new model on an existing adapter/codec — the `adapter_registry` is keyed by `AdapterKind`, and the old per-model test table there has since been removed.\n\n**Constraint learned from the builder:** exactly one `default = true` and one `small_default = true` per provider, or the catalog build fails (`CatalogBuildError::MultipleProviderDefaults`).\n\n## 2. Goal restated concretely\n\nAdd **GLM 5.3** and **GLM 5.3 Flash** as first-class catalog offerings for the `zai` provider and every other built-in provider that actually serves them (OpenRouter, Fireworks; Venice already has `glm-5.3`): new TOML rows with researched limits/features/controls/costs, portable `glm*` aliases moved to the new flagship, `glm-5.3` becoming the Z.ai provider default per precedent, matching test/doc/changelog updates, and optionally live round-trip tests against Z.ai and OpenRouter.\n\n## 3. What I know for certain\n\n**From the repo:**\n- Z.ai ships `glm-5.2` (default, aliases `glm`, `glm5`, `glm52`, `glm5.2`, 1M/131072, efforts `high`/`max`, costs 1.4/4.4/0.26) and `glm-4.7`. Credentials: `ZAI_API_KEY` env/vault.\n- \"Portable aliases\" is an explicit, tested contract: `glm`, `glm5`, `glm52`, `glm5.2` must resolve to the same canonical slug on every provider that offers the family.\n- Exactly one default per provider; changing the default means moving the flag (precedent: glm-4.7→glm-5.2, documented in models.mdx \"Default model\" table).\n- `small_default` marks the small/cheap tier per provider (used for metadata enrichment with small budgets); `DeepSeek V4 Flash` and fireworks `gpt-oss-20b` carry it. Z.ai currently has no `small_default`.\n- Venice already has a `glm-5.3` row (1M/131072, efforts `low`/`high`/`max`, costs 1.75/5.5/0.325, aliases `glm`, `glm5`, `glm53`, `glm5.3`, `glm-5-3`) — so the unpinned `glm` alias will exist on multiple providers and resolves by provider priority (zai=60 > venice=35).\n- OpenRouter responses carry authoritative in-band `usage.cost`, so its cost rows are best-effort estimates only.\n- The OpenAI-compatible codec already handles Z.ai's `reasoning_content` and OpenRouter's `reasoning` spellings (added in the GLM 5.2 commit).\n\n**Researched (authoritative sources, fetched today):**\n- **Z.ai direct (docs.z.ai):** `glm-5.3` — text-only, 1M context, 128K max output, reasoning always on with `reasoning_effort` `low`/`high`/`max` (default `max`), `thinking.type` only accepts `enabled`; tools/streaming/caching/structured output supported; served on the same `api.z.ai/api/coding/paas/v4` chat-completions endpoint the catalog already uses. Pricing per MTok: **$1.4 input / $4.4 output / $0.26 cached**.\n- **Z.ai direct `glm-5.3-flash`:** model code `glm-5.3-flash`, native multimodal (image/video/file+text input), 1M context, 128K max output, same reasoning contract as 5.3. Pricing per MTok: **$0.15 / $0.50 / $0.03 list**, currently 50% off (**$0.075 / $0.25 / $0.015**) until 2026-09-09; caching supported.\n- **Z.ai coding plan routing:** requests for GLM-5.2/5.1 auto-route to GLM-5.3; GLM-4.7 auto-routes to GLM-5.3-Flash.\n- **OpenRouter live API:** `z-ai/glm-5.3` — text-only, 1,310,720 advertised / 1,048,576 top-provider context, 262,144 max completion tokens, efforts `max`/`high`/`low`, $1.40/$4.40/$0.14 per MTok. `z-ai/glm-5.3-flash` — text+image+video, same context, 131,072 max completion, efforts `max`/`high`/`low`, **$0.075/$0.25/$0.015** (matches Z.ai promo).\n- **Fireworks live pricing page:** `glm-5p3` → $1.40/$0.26/$4.40; `glm-5p3-flash` → $0.15/$0.03/$0.50 (standard tier). Both exist today.\n- **Amazon Bedrock:** Z.ai models on Bedrock are only GLM 4.7, GLM 4.7 Flash, GLM 5 — **no GLM 5.3**, so `bedrock.toml` is out of scope.\n\n## 4. Genuinely ambiguous (two reasonable engineers would differ)\n\n1. **Scope of \"others as well.\"** Fireworks provably serves both new models and OpenRouter is explicitly named; Venice already has `glm-5.3` (no Flash) and Bedrock has nothing. Does \"others\" mean *only* providers that serve GLM 5.3 today (zai+openrouter+fireworks), or should Venice get a `glm-5.3-flash` row too (Venice's catalog doesn't list one — adding it would be fabrication)?\n2. **Which model becomes the Z.ai default.** GLM 5.3 is the same price as 5.2 and is the flagship (strong precedent: glm-4.7→glm-5.2 moved the default to the flagship). But DeepSeek made its *Flash* the default+small_default because of cost. Flagship (GLM 5.3) is the likelier read, but it's a product call.\n3. **`small_default` for `glm-5.3-flash` on Z.ai.** It fits the \"small/cheap tier\" role and other providers mark their cheap tiers, but Z.ai has never had a `small_default`; adding one changes metadata-enrichment behavior for existing Z.ai users (budget/timeout-sensitive paths). Also: should fireworks' `glm-5p3-flash` get it (fireworks already has `gpt-oss-20b` as small default — so it *can't*, without displacing it)?\n4. **Which price to record for `glm-5.3-flash`.** List ($0.15/$0.50/$0.03) vs. current promotional ($0.075/$0.25/$0.015, ends 2026-09-09 — days from now). The repo has precedent both ways (glm-5.2 rows use list prices; `laguna-xs-2.1` records a promotional rate with an explanatory comment; OpenRouter's live API currently returns the promo price).\n5. **Limits disagreement between sources.** Z.ai docs say 1M context/128K output for both; OpenRouter advertises 1,310,720 context (1,048,576 top-provider) and 262,144 max completion for `glm-5.3`. Existing rows use 1,048,576/131,072. Whether to record OpenRouter's larger numbers or normalize to Z.ai's is a judgment call.\n6. **Alias surgery on the older rows.** Presumably `glm`/`glm5` move to `glm-5.3` while `glm52`/`glm5.2` stay pinned to the old model — but does `glm-5.2` keep its full alias set, or get trimmed? And should the Z.ai auto-routing note (5.2→5.3, 4.7→5.3-Flash on the coding plan) be recorded in the TOML comments/docs, since users selecting `glm-5.2` will silently get 5.3 upstream?\n7. **Effort levels on OpenRouter.** Z.ai and Venice expose `low`/`high`/`max` for 5.3; the existing OpenRouter `glm-5.2` row uses `high`/`xhigh` (OpenRouter's own naming). For `glm-5.3` OpenRouter reports `max`/`high`/`low` — whether to translate or mirror verbatim is a small consistency choice.\n8. **`reasoning_by_default` spelling.** GLM 5.3/Flash cannot disable thinking. Catalog-wise, `reasoning_effort = \"levels\"` already implies reasoning-by-default, and Venice's glm-5.3 row also sets it explicitly. Whether the new rows set it explicitly (and whether the *existing* `glm-5.2` zai row is left inconsistent) is unresolved.\n9. **Live e2e tests.** The GLM 5.2 precedent added two live round-trip tests (Z.ai + OpenRouter). Include the same for 5.3 (they only run under `--profile e2e` with real keys), and/or for Flash? A Flash test would also be the only coverage of vision content blocks on this route.\n10. **Changelog file/date.** A new dated changelog entry (today 2026-09-04) is customary, but whether this ships standalone or folded into the next entry, and its title, is editorial.",
+              "last_stage": "understand",
+              "last_response": "I now have a complete picture. No code was written and no files were modified.\n\n---\n\n## 1. Repository structure and where the change lands\n\n**Tooling:** Rust workspace (`lib/apps/*`, `lib/components/*"
+            },
+            "notes": "Stage completed: understand",
+            "usage": {
+              "input": {
+                "usage": {
+                  "model": {
+                    "provider": "zai",
+                    "model_id": "glm-5.2"
+                  },
+                  "tokens": {
+                    "input_tokens": 127218,
+                    "output_tokens": 6216,
+                    "reasoning_tokens": 7726,
+                    "cache_read_tokens": 3680320,
+                    "cache_write_tokens": 0
+                  }
+                },
+                "facts": {
+                  "algorithm": "openai"
+                }
+              },
+              "total_usd_micros": 1196247
+            },
+            "timing": {
+              "wall_time_ms": 0,
+              "inference_time_ms": 349868,
+              "tool_time_ms": 8967,
+              "active_time_ms": 358835
+            }
+          },
+          "interview": {
+            "status": "succeeded",
+            "suggested_next_ids": [
+              "triage"
+            ],
+            "context_updates": {
+              "human.gate.selected": "freeform",
+              "human.gate.text": "1. yes",
+              "human.gate.interview.answer": "1. yes",
+              "human.gate.label": "1. yes",
+              "human.gate.interview.question": "Answer the open questions"
+            },
+            "usage": null
+          },
+          "triage": {
+            "status": "succeeded",
+            "preferred_label": "enough",
+            "context_updates": {
+              "response.triage": "The answers resolved the open questions. Here's what I now understand the task to be:\n\n**Goal:** Add z.ai GLM-5.3 and GLM-5.3 Flash to Fabro's provider/model catalog, mirroring how GLM-5.2 (and prior GLM versions) are registered.\n\n**What I'll build:**\n\n1. **z.ai (Zhipu) native provider** — add `glm-5.3` and `glm-5.3-flash` entries following the existing `glm-5.2` precedent: same provider shape, context window, capabilities/limits metadata, and streaming behavior as the incumbent GLM models.\n\n2. **Aggregators** — register both models through OpenRouter (`z-ai/glm-5.3`, `z-ai/glm-5.3-flash` naming per OpenRouter's convention) and any other provider catalogs that already carry GLM-5.2 (e.g. the OpenAI-compatible provider lists), so the models work everywhere GLM-5.2 currently works.\n\n3. **Pricing** — researched from public z.ai and OpenRouter pricing pages and encoded per-token input/output (and cached-input where the schema supports it) alongside the existing GLM-5.2 entries, with source noted in tests/comments.\n\n**Decisions I'm making on the human's behalf:**\n\n- **Default model:** follow repo precedent — I'll look at what happened when GLM-5.2 landed (whether the flagship bump became the default for the z.ai provider or defaults stayed put) and do exactly the same for 5.3, no more no less.\n- **Model IDs and display names** follow the existing GLM naming pattern rather than inventing a new one.\n- Pricing values are best-effort from public sources at implementation time; if a price isn't published for a tier (e.g. Flash caching), I'll omit rather than guess, consistent with how sibling models handle gaps.\n\nNo remaining ambiguity that would change what gets built — the notes explicitly delegated pricing research and default-model policy to me, and the interview confirmed the approach.\n\n{\"preferred_next_label\": \"enough\"}",
+              "last_stage": "triage",
+              "last_response": "The answers resolved the open questions. Here's what I now understand the task to be:\n\n**Goal:** Add z.ai GLM-5.3 and GLM-5.3 Flash to Fabro's provider/model catalog, mirroring how GLM-5.2 (and prior "
+            },
+            "notes": "Stage completed: triage",
+            "usage": {
+              "input": {
+                "usage": {
+                  "model": {
+                    "provider": "zai",
+                    "model_id": "glm-5.2"
+                  },
+                  "tokens": {
+                    "input_tokens": 4768,
+                    "output_tokens": 451,
+                    "reasoning_tokens": 462,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 0
+                  }
+                },
+                "facts": {
+                  "algorithm": "openai"
+                }
+              },
+              "total_usd_micros": 10692
+            },
+            "timing": {
+              "wall_time_ms": 0,
+              "inference_time_ms": 14217,
+              "tool_time_ms": 0,
+              "active_time_ms": 14217
+            }
+          },
+          "plan": {
+            "status": "succeeded",
+            "context_updates": {
+              "last_stage": "plan",
+              "response.plan": "# Implementation Plan: z.ai GLM 5.3 + GLM 5.3 Flash\n\n## Resolved parameters\n\nCarrying forward the two decisions from the question round, plus the researched data everything else derives from:\n\n| | GLM 5.3 | GLM 5.3 Flash |\n|---|---|---|\n| Slug / family | `glm-5.3` / `glm-5` | `glm-5.3-flash` / `glm-5` |\n| Context / max output | 1,048,576 / 131,072 | 1,048,576 / 131,072 |\n| Vision | false (text-only per Z.ai + OpenRouter) | true (native multimodal) |\n| Efforts | `low`, `high`, `max` | `low`, `high`, `max` |\n| zai costs (per MTok) | 1.4 / 4.4 / 0.26 | 0.075 / 0.25 / 0.015 *(current advertised)* |\n| openrouter costs | 1.4 / 4.4 / 0.14 | 0.075 / 0.25 / 0.015 |\n| fireworks costs | 1.4 / 0.26 / 4.4 | 0.15 / 0.03 / 0.50 *(Fireworks charges list)* |\n\n- Flash pricing records **each provider's current advertised rate** with a TOML comment noting the Z.ai 50% launch promo ends 2026-09-09 (list: $0.15/$0.50/$0.03).\n- `glm-5.3-flash` gets **`small_default = true` on zai** (deepseek-v4-flash / gpt-oss-20b precedent; Fireworks keeps `gpt-oss-20b` as its small default — only one allowed per provider).\n- `glm-5.3` becomes the **zai provider default**; `glm-5.2` drops the flag.\n\n## Files and changes\n\n### 1. `lib/foundation/fabro-model/src/catalog/providers/zai.toml`\n\n- **Add `glm-5.3`** above `glm-5.2`: `display_name = \"GLM 5.3\"`, `default = true`, `aliases = [\"glm\", \"glm5\", \"glm53\", \"glm5.3\"]`; limits `context_window = 1048576`, `max_output = 131072`; features `tools = true`, `vision = false`, `reasoning = true`, `reasoning_effort = \"levels\"`, `prompt_cache = true`; controls `reasoning_effort = [\"low\", \"high\", \"max\"]`; costs `1.4 / 4.4 / 0.26`. Comment noting Z.ai serves it on the same coding endpoint and `thinking.type` only accepts `enabled`.\n- **Add `glm-5.3-flash`**: `display_name = \"GLM 5.3 Flash\"`, `small_default = true`, no aliases; same limits; features same as 5.3 except `vision = true`; same controls; costs `0.075 / 0.25 / 0.015` with the promo-expiry comment.\n- **Edit `glm-5.2`**: remove `default = true`; shrink `aliases` to `[\"glm52\", \"glm5.2\"]` (the portable `glm`/`glm5` move to 5.3).\n- **Edit `glm-4.7`**: comment only — upstream auto-routes GLM-5.2/5.1 → GLM-5.3 and GLM-4.7 → GLM-5.3-Flash on the coding plan.\n\n### 2. `lib/foundation/fabro-model/src/catalog/providers/openrouter.toml`\n\n- **Add `glm-5.3`**: `api_id = \"z-ai/glm-5.3\"`, `display_name = \"GLM 5.3 (via OpenRouter)\"`, `family = \"glm-5\"`, `aliases = [\"glm\", \"glm5\", \"glm53\", \"glm5.3\"]`; limits 1048576/131072; features tools/reasoning-levels/prompt_cache, `vision = false`; controls `[\"low\", \"high\", \"max\"]`; costs `1.4 / 4.4 / 0.14` (live OpenRouter rates).\n- **Add `glm-5.3-flash`**: `api_id = \"z-ai/glm-5.3-flash\"`, no aliases, `vision = true`, otherwise same shape; costs `0.075 / 0.25 / 0.015`.\n- **Edit `glm-5.2`**: shrink aliases to `[\"glm52\", \"glm5.2\"]`.\n\n### 3. `lib/foundation/fabro-model/src/catalog/providers/fireworks.toml`\n\n- **Add `glm-5.3`**: `api_id = \"accounts/fireworks/models/glm-5p3\"`, `display_name = \"GLM 5.3 (via Fireworks)\"`, `family = \"glm-5\"`; limits 1048576/131072; features mirroring the existing fireworks `glm-5.2` row (tools, reasoning, prompt_cache; no effort controls — unverifiable that Fireworks exposes `reasoning_effort`, and the 5.2 row omits it); costs `1.4 / 0.26 / 4.4`.\n- **Add `glm-5.3-flash`**: `api_id = \"accounts/fireworks/models/glm-5p3-flash\"`, same shape with `vision = true`; costs `0.15 / 0.03 / 0.50`.\n- Row comments noting prices verified 2026-09-04.\n\n### 4. `lib/foundation/fabro-model/src/catalog.rs`\n\n- **`LEGACY_BUILTIN_MODEL_IDENTIFIERS`** (~line 1832): insert `(\"z-ai/glm-5.3\", \"openrouter\", \"glm-5.3\")` and `(\"z-ai/glm-5.3-flash\", \"openrouter\", \"glm-5.3-flash\")` next to the existing `z-ai/glm-5.2` entry.\n- **Rewrite `builtin_glm_5_2_aliases_are_portable`** (~3447) → `builtin_glm_5_3_aliases_are_portable`: for `zai` + enabled `openrouter`, aliases `glm`, `glm5`, `glm53`, `glm5.3` must resolve to `glm-5.3`.\n- **`glm_5_2_in_catalog`** (~7222): inline snapshot changes (aliases shrink to `glm52`/`glm5.2`, `default: false`); trailing `get(\"glm\")`/`get(\"glm5\")` assertions change to `get(\"glm52\")`/`get(\"glm5.2\")` → `glm-5.2`.\n- **Add `glm_5_3_in_catalog`** and **`glm_5_3_flash_in_catalog`** tests in the same style (inline insta snapshots; assert `default = true` on 5.3, `small_default = true` on flash, alias resolution, and `model_settings(\"glm-5.3\").api_id == \"glm-5.3\"`).\n- **`builtin_deepseek_shared_slugs_are_portable_across_providers`** (~4333): add `\"glm-5.3\"`, `\"glm-5.3-flash\"` to the fireworks+openrouter id list.\n- Grep for any other `glm-5.2`-as-zai-default assertions and update; existing `zai` small-default coverage comes free via `builtin_small_defaults_are_marked_per_provider` (~4515).\n\n### 5. `lib/components/fabro-llm/tests/integration.rs`\n\n- Add `zai_glm_5_3_reasoning_tool_round_trip` (`live(\"ZAI_API_KEY\")`) and `openrouter_glm_5_3_reasoning_tool_round_trip` (`live(\"OPENROUTER_API_KEY\")`) — direct mirrors of the 5.2 tests (multiply-tool round trip, reasoning-before-tool-call assertion, authoritative-cost assertion on the OpenRouter one). Keep the 5.2 tests; upstream 5.2→5.3 auto-routing keeps them green.\n\n### 6. Docs\n\n- **`docs/public/core-concepts/models.mdx`**: update the `glm-5.2` row (aliases → `glm52`, `glm5.2`); add `glm-5.3` and `glm-5.3-flash` zai rows (aliases `glm`, `glm5`, `glm53`, `glm5.3` on 5.3; prices $1.40/$4.40 and $0.075/$0.25); leave the existing venice `glm-5.3` row alone; change the per-provider default table `zai` → `glm-5.3`.\n- **`docs/public/integrations/openrouter.mdx`** (~line 59): row becomes `glm-5.3` (`glm`, `glm5`, `glm53`, `glm5.3`), `glm-5.3-flash`, `glm-5.2`, `glm-4.6` with `z-ai/...` API IDs.\n- **`docs/public/integrations/fireworks.mdx`** (~line 56): add `glm-5.3`, `glm-5.3-flash` rows with `glm-5p3` / `glm-5p3-flash` API IDs.\n- **`docs/public/changelog/2026-09-04.mdx`** (new): \"GLM 5.3 and GLM 5.3 Flash\" — providers added, new zai default, alias moves, small_default, Z.ai upstream auto-routing note, flash promo note.\n\n## Order\n\n1. `zai.toml` → `openrouter.toml` → `fireworks.toml` (data first)\n2. `catalog.rs` legacy-identifier table + test updates; run `cargo nextest run -p fabro-model`, review pending snapshots with `cargo insta pending-snapshots`, accept selectively\n3. `integration.rs` live tests (compile-checked only — no keys here)\n4. Docs + changelog\n5. Grep `glm-5.2`/`glm-5` across repo for stale references; full verification pass\n\n## Verification\n\n- `cargo nextest run -p fabro-model` — catalog build + portability + snapshot tests (the one-default-per-provider build error would catch a missed flag flip).\n- `cargo build --workspace` and `cargo nextest run -p fabro-llm -p fabro-server` — compile + no drift in dependents.\n- `cargo +nightly-2026-04-14 fmt --all` (and clippy if the pinned toolchain is installed).\n- `grep -rn \"glm\" lib/ docs/public/ --include=\"*.toml\" --include=\"*.rs\" --include=\"*.mdx\"` — confirm docs tables match catalog numbers exactly.\n- Live round trips **cannot run here** (no `ZAI_API_KEY`/`OPENROUTER_API_KEY`); they'd run via `set -a && source .env && set +a && cargo nextest run -p fabro-llm --profile e2e --run-ignored only glm_5_3`. I'll note this in the PR description for the maintainer to trigger.\n\n## Deliberately not doing\n\n- **No Venice `glm-5.3-flash`** — Venice doesn't offer it; a row would be fabricated pricing.\n- **No Bedrock changes** — Bedrock only carries GLM 4.7/4.7-Flash/5 today.\n- **No Rust adapter/codec changes** — the OpenAI-compatible codec already handles both `reasoning_content` (Z.ai) and `reasoning` (OpenRouter) spellings; no Rust model enums exist anymore.\n- **No removal or repricing of `glm-5.2`/`glm-4.7`/`glm-4.6` rows**, and no alias changes on Venice's existing `glm-5.3` row.\n- **Not recording OpenRouter's 262,144 max-completion outlier** — Z.ai's documented 128K wins, matching family precedent.\n- **No `estimated_output_tps`, no `probe` flag, no flash aliases, no OpenAPI/client regeneration** (models are dynamic; no schema change).",
+              "last_response": "# Implementation Plan: z.ai GLM 5.3 + GLM 5.3 Flash\n\n## Resolved parameters\n\nCarrying forward the two decisions from the question round, plus the researched data everything else derives from:\n\n| | GLM"
+            },
+            "notes": "Stage completed: plan",
+            "usage": {
+              "input": {
+                "usage": {
+                  "model": {
+                    "provider": "zai",
+                    "model_id": "glm-5.2"
+                  },
+                  "tokens": {
+                    "input_tokens": 134288,
+                    "output_tokens": 2764,
+                    "reasoning_tokens": 5605,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 0
+                  }
+                },
+                "facts": {
+                  "algorithm": "openai"
+                }
+              },
+              "total_usd_micros": 224826
+            },
+            "timing": {
+              "wall_time_ms": 0,
+              "inference_time_ms": 95739,
+              "tool_time_ms": 0,
+              "active_time_ms": 95739
+            }
+          }
+        },
+        "next_node_id": "devils",
+        "git_commit_sha": "b3fc4faee2b92a4836e9f4c5c7ac48d95f06906a",
+        "node_visits": {
+          "start": 1,
+          "interview": 1,
+          "ask": 1,
+          "triage": 1,
+          "understand": 1,
+          "plan": 1
+        }
+      },
+      "diff": {
+        "summary": {
+          "files_changed": 0,
+          "additions": 0,
+          "deletions": 0
+        }
+      }
+    },
+    {
+      "seq": 0,
+      "checkpoint": {
+        "timestamp": "2026-09-04T12:15:13.596717Z",
+        "current_node": "devils",
+        "completed_nodes": [
+          "start",
+          "understand",
+          "ask",
+          "interview",
+          "triage",
+          "plan",
+          "devils"
+        ],
+        "node_retries": {},
+        "context_values": {
           "internal.retry_count.interview": 0,
           "thread.ask.current_node": "interview",
           "response.ask": "This is the first ask — no plan has bounced yet, so these are the pre-code questions. Most forks I can resolve from the repo precedent and the \"use precedent\" note; only two are genuine product calls.\n\n**Decided myself (from precedent + verified data, unless you object):**\n- **Scope of \"others\":** zai + OpenRouter + Fireworks (all three verifiably serve GLM 5.3 and 5.3 Flash today). Bedrock untouched (only has GLM 4.7/5), Venice untouched (already has `glm-5.3`, offers no Flash — adding one would be fabrication).\n- **Default:** `glm-5.3` becomes the zai provider default; `glm-5.2` drops the flag (only one default allowed per provider; this is exactly what the glm-4.7→glm-5.2 change did).\n- **Aliases:** portable set `glm`, `glm5`, `glm53`, `glm5.3` moves to `glm-5.3` on zai/OpenRouter; `glm52`/`glm5.2` stay pinned to `glm-5.2`. Flash gets no aliases initially.\n- **Limits & features:** 1,048,576 context / 131,072 max output for both (Z.ai's own docs; ignoring OpenRouter's 262,144 outlier), efforts `low`/`high`/`max` (Z.ai, Venice, and OpenRouter all agree), `vision = true` on Flash only (natively multimodal), reasoning-by-default implicit via `levels`.\n- **Tests & docs:** mirror the GLM 5.2 precedent — catalog portability/snapshot tests, live `zai`/`openrouter` round-trip e2e tests, models.mdx tables, integration doc tables, dated changelog entry.\n\n**Questions:**\n\n1. **Should `glm-5.3-flash` be the `small_default` on zai?** Today zai has no small default, so metadata enrichment (small token budget, short timeout) falls back to the provider default — currently glm-5.2, soon glm-5.3. Options: (a) yes, mark Flash as zai's `small_default` (matches the deepseek-v4-flash / gpt-oss-20b precedent, cheaper enrichment); (b) no, leave zai without a small default (zero behavior change for existing Z.ai users).\n\n2. **Which price do I record for `glm-5.3-flash`?** Z.ai's promo (50% off) ends 2026-09-09 — five days from now. Options: (a) current advertised rates per provider (Z.ai + OpenRouter: $0.075 / $0.25 / $0.015; Fireworks list: $0.15 / $0.50 / $0.03) with a comment noting the expiring promo — matches the repo's \"record what the provider charges\" convention; (b) list prices everywhere ($0.15 / $0.50 / $0.03) — durable past the promo but overestimates until it ends. (GLM 5.3 itself is unambiguous: $1.4 / $4.4 everywhere.)",
           "outcome": "succeeded",
-          "last_response": "# Implementation Plan: z.ai GLM 5.3 + GLM 5.3 Flash\n\n## Resolved parameters\n\nCarrying forward the two decisions from the question round, plus the researched data everything else derives from:\n\n| | GLM",
+          "last_response": "I verified the plan's riskiest claims against the actual repository before judging.\n\n**What I confirmed is sound (no churn needed on these):**\n- No changelog collision — no `2026-09-*.mdx` exists; `",
           "internal.node_visit_count": 1,
           "internal.retry_count.understand": 0,
           "graph.goal": "Add z.ai GLM5.3 and GLM5.3 Flash support. Understand the provider model for the models\n\nNotes:\n- Use precedent for changing default model\n- Implement in openrouter and others as well\n- Research the pricing yourself",
           "graph.max_node_visits": "24",
           "failure_class": "",
-          "thread.build.current_node": "plan",
+          "thread.build.current_node": "devils",
           "internal.work_dir": "/workspace/fabro",
-          "last_stage": "plan",
+          "last_stage": "devils",
           "graph.on_failure": "exit",
           "human.gate.text": "1. yes",
           "graph.model_stylesheet": "\n            *      { model: glm-5.2; reasoning_effort: high; }\n            .deep  { reasoning_effort: max; }\n        ",
@@ -1532,18 +1768,20 @@
           "response.triage": "The answers resolved the open questions. Here's what I now understand the task to be:\n\n**Goal:** Add z.ai GLM-5.3 and GLM-5.3 Flash to Fabro's provider/model catalog, mirroring how GLM-5.2 (and prior GLM versions) are registered.\n\n**What I'll build:**\n\n1. **z.ai (Zhipu) native provider** — add `glm-5.3` and `glm-5.3-flash` entries following the existing `glm-5.2` precedent: same provider shape, context window, capabilities/limits metadata, and streaming behavior as the incumbent GLM models.\n\n2. **Aggregators** — register both models through OpenRouter (`z-ai/glm-5.3`, `z-ai/glm-5.3-flash` naming per OpenRouter's convention) and any other provider catalogs that already carry GLM-5.2 (e.g. the OpenAI-compatible provider lists), so the models work everywhere GLM-5.2 currently works.\n\n3. **Pricing** — researched from public z.ai and OpenRouter pricing pages and encoded per-token input/output (and cached-input where the schema supports it) alongside the existing GLM-5.2 entries, with source noted in tests/comments.\n\n**Decisions I'm making on the human's behalf:**\n\n- **Default model:** follow repo precedent — I'll look at what happened when GLM-5.2 landed (whether the flagship bump became the default for the z.ai provider or defaults stayed put) and do exactly the same for 5.3, no more no less.\n- **Model IDs and display names** follow the existing GLM naming pattern rather than inventing a new one.\n- Pricing values are best-effort from public sources at implementation time; if a price isn't published for a tier (e.g. Flash caching), I'll omit rather than guess, consistent with how sibling models handle gaps.\n\nNo remaining ambiguity that would change what gets built — the notes explicitly delegated pricing research and default-model policy to me, and the interview confirmed the approach.\n\n{\"preferred_next_label\": \"enough\"}",
           "response.plan": "# Implementation Plan: z.ai GLM 5.3 + GLM 5.3 Flash\n\n## Resolved parameters\n\nCarrying forward the two decisions from the question round, plus the researched data everything else derives from:\n\n| | GLM 5.3 | GLM 5.3 Flash |\n|---|---|---|\n| Slug / family | `glm-5.3` / `glm-5` | `glm-5.3-flash` / `glm-5` |\n| Context / max output | 1,048,576 / 131,072 | 1,048,576 / 131,072 |\n| Vision | false (text-only per Z.ai + OpenRouter) | true (native multimodal) |\n| Efforts | `low`, `high`, `max` | `low`, `high`, `max` |\n| zai costs (per MTok) | 1.4 / 4.4 / 0.26 | 0.075 / 0.25 / 0.015 *(current advertised)* |\n| openrouter costs | 1.4 / 4.4 / 0.14 | 0.075 / 0.25 / 0.015 |\n| fireworks costs | 1.4 / 0.26 / 4.4 | 0.15 / 0.03 / 0.50 *(Fireworks charges list)* |\n\n- Flash pricing records **each provider's current advertised rate** with a TOML comment noting the Z.ai 50% launch promo ends 2026-09-09 (list: $0.15/$0.50/$0.03).\n- `glm-5.3-flash` gets **`small_default = true` on zai** (deepseek-v4-flash / gpt-oss-20b precedent; Fireworks keeps `gpt-oss-20b` as its small default — only one allowed per provider).\n- `glm-5.3` becomes the **zai provider default**; `glm-5.2` drops the flag.\n\n## Files and changes\n\n### 1. `lib/foundation/fabro-model/src/catalog/providers/zai.toml`\n\n- **Add `glm-5.3`** above `glm-5.2`: `display_name = \"GLM 5.3\"`, `default = true`, `aliases = [\"glm\", \"glm5\", \"glm53\", \"glm5.3\"]`; limits `context_window = 1048576`, `max_output = 131072`; features `tools = true`, `vision = false`, `reasoning = true`, `reasoning_effort = \"levels\"`, `prompt_cache = true`; controls `reasoning_effort = [\"low\", \"high\", \"max\"]`; costs `1.4 / 4.4 / 0.26`. Comment noting Z.ai serves it on the same coding endpoint and `thinking.type` only accepts `enabled`.\n- **Add `glm-5.3-flash`**: `display_name = \"GLM 5.3 Flash\"`, `small_default = true`, no aliases; same limits; features same as 5.3 except `vision = true`; same controls; costs `0.075 / 0.25 / 0.015` with the promo-expiry comment.\n- **Edit `glm-5.2`**: remove `default = true`; shrink `aliases` to `[\"glm52\", \"glm5.2\"]` (the portable `glm`/`glm5` move to 5.3).\n- **Edit `glm-4.7`**: comment only — upstream auto-routes GLM-5.2/5.1 → GLM-5.3 and GLM-4.7 → GLM-5.3-Flash on the coding plan.\n\n### 2. `lib/foundation/fabro-model/src/catalog/providers/openrouter.toml`\n\n- **Add `glm-5.3`**: `api_id = \"z-ai/glm-5.3\"`, `display_name = \"GLM 5.3 (via OpenRouter)\"`, `family = \"glm-5\"`, `aliases = [\"glm\", \"glm5\", \"glm53\", \"glm5.3\"]`; limits 1048576/131072; features tools/reasoning-levels/prompt_cache, `vision = false`; controls `[\"low\", \"high\", \"max\"]`; costs `1.4 / 4.4 / 0.14` (live OpenRouter rates).\n- **Add `glm-5.3-flash`**: `api_id = \"z-ai/glm-5.3-flash\"`, no aliases, `vision = true`, otherwise same shape; costs `0.075 / 0.25 / 0.015`.\n- **Edit `glm-5.2`**: shrink aliases to `[\"glm52\", \"glm5.2\"]`.\n\n### 3. `lib/foundation/fabro-model/src/catalog/providers/fireworks.toml`\n\n- **Add `glm-5.3`**: `api_id = \"accounts/fireworks/models/glm-5p3\"`, `display_name = \"GLM 5.3 (via Fireworks)\"`, `family = \"glm-5\"`; limits 1048576/131072; features mirroring the existing fireworks `glm-5.2` row (tools, reasoning, prompt_cache; no effort controls — unverifiable that Fireworks exposes `reasoning_effort`, and the 5.2 row omits it); costs `1.4 / 0.26 / 4.4`.\n- **Add `glm-5.3-flash`**: `api_id = \"accounts/fireworks/models/glm-5p3-flash\"`, same shape with `vision = true`; costs `0.15 / 0.03 / 0.50`.\n- Row comments noting prices verified 2026-09-04.\n\n### 4. `lib/foundation/fabro-model/src/catalog.rs`\n\n- **`LEGACY_BUILTIN_MODEL_IDENTIFIERS`** (~line 1832): insert `(\"z-ai/glm-5.3\", \"openrouter\", \"glm-5.3\")` and `(\"z-ai/glm-5.3-flash\", \"openrouter\", \"glm-5.3-flash\")` next to the existing `z-ai/glm-5.2` entry.\n- **Rewrite `builtin_glm_5_2_aliases_are_portable`** (~3447) → `builtin_glm_5_3_aliases_are_portable`: for `zai` + enabled `openrouter`, aliases `glm`, `glm5`, `glm53`, `glm5.3` must resolve to `glm-5.3`.\n- **`glm_5_2_in_catalog`** (~7222): inline snapshot changes (aliases shrink to `glm52`/`glm5.2`, `default: false`); trailing `get(\"glm\")`/`get(\"glm5\")` assertions change to `get(\"glm52\")`/`get(\"glm5.2\")` → `glm-5.2`.\n- **Add `glm_5_3_in_catalog`** and **`glm_5_3_flash_in_catalog`** tests in the same style (inline insta snapshots; assert `default = true` on 5.3, `small_default = true` on flash, alias resolution, and `model_settings(\"glm-5.3\").api_id == \"glm-5.3\"`).\n- **`builtin_deepseek_shared_slugs_are_portable_across_providers`** (~4333): add `\"glm-5.3\"`, `\"glm-5.3-flash\"` to the fireworks+openrouter id list.\n- Grep for any other `glm-5.2`-as-zai-default assertions and update; existing `zai` small-default coverage comes free via `builtin_small_defaults_are_marked_per_provider` (~4515).\n\n### 5. `lib/components/fabro-llm/tests/integration.rs`\n\n- Add `zai_glm_5_3_reasoning_tool_round_trip` (`live(\"ZAI_API_KEY\")`) and `openrouter_glm_5_3_reasoning_tool_round_trip` (`live(\"OPENROUTER_API_KEY\")`) — direct mirrors of the 5.2 tests (multiply-tool round trip, reasoning-before-tool-call assertion, authoritative-cost assertion on the OpenRouter one). Keep the 5.2 tests; upstream 5.2→5.3 auto-routing keeps them green.\n\n### 6. Docs\n\n- **`docs/public/core-concepts/models.mdx`**: update the `glm-5.2` row (aliases → `glm52`, `glm5.2`); add `glm-5.3` and `glm-5.3-flash` zai rows (aliases `glm`, `glm5`, `glm53`, `glm5.3` on 5.3; prices $1.40/$4.40 and $0.075/$0.25); leave the existing venice `glm-5.3` row alone; change the per-provider default table `zai` → `glm-5.3`.\n- **`docs/public/integrations/openrouter.mdx`** (~line 59): row becomes `glm-5.3` (`glm`, `glm5`, `glm53`, `glm5.3`), `glm-5.3-flash`, `glm-5.2`, `glm-4.6` with `z-ai/...` API IDs.\n- **`docs/public/integrations/fireworks.mdx`** (~line 56): add `glm-5.3`, `glm-5.3-flash` rows with `glm-5p3` / `glm-5p3-flash` API IDs.\n- **`docs/public/changelog/2026-09-04.mdx`** (new): \"GLM 5.3 and GLM 5.3 Flash\" — providers added, new zai default, alias moves, small_default, Z.ai upstream auto-routing note, flash promo note.\n\n## Order\n\n1. `zai.toml` → `openrouter.toml` → `fireworks.toml` (data first)\n2. `catalog.rs` legacy-identifier table + test updates; run `cargo nextest run -p fabro-model`, review pending snapshots with `cargo insta pending-snapshots`, accept selectively\n3. `integration.rs` live tests (compile-checked only — no keys here)\n4. Docs + changelog\n5. Grep `glm-5.2`/`glm-5` across repo for stale references; full verification pass\n\n## Verification\n\n- `cargo nextest run -p fabro-model` — catalog build + portability + snapshot tests (the one-default-per-provider build error would catch a missed flag flip).\n- `cargo build --workspace` and `cargo nextest run -p fabro-llm -p fabro-server` — compile + no drift in dependents.\n- `cargo +nightly-2026-04-14 fmt --all` (and clippy if the pinned toolchain is installed).\n- `grep -rn \"glm\" lib/ docs/public/ --include=\"*.toml\" --include=\"*.rs\" --include=\"*.mdx\"` — confirm docs tables match catalog numbers exactly.\n- Live round trips **cannot run here** (no `ZAI_API_KEY`/`OPENROUTER_API_KEY`); they'd run via `set -a && source .env && set +a && cargo nextest run -p fabro-llm --profile e2e --run-ignored only glm_5_3`. I'll note this in the PR description for the maintainer to trigger.\n\n## Deliberately not doing\n\n- **No Venice `glm-5.3-flash`** — Venice doesn't offer it; a row would be fabricated pricing.\n- **No Bedrock changes** — Bedrock only carries GLM 4.7/4.7-Flash/5 today.\n- **No Rust adapter/codec changes** — the OpenAI-compatible codec already handles both `reasoning_content` (Z.ai) and `reasoning` (OpenRouter) spellings; no Rust model enums exist anymore.\n- **No removal or repricing of `glm-5.2`/`glm-4.7`/`glm-4.6` rows**, and no alias changes on Venice's existing `glm-5.3` row.\n- **Not recording OpenRouter's 262,144 max-completion outlier** — Z.ai's documented 128K wins, matching family precedent.\n- **No `estimated_output_tps`, no `probe` flag, no flash aliases, no OpenAPI/client regeneration** (models are dynamic; no schema change).",
           "human.gate.label": "1. yes",
-          "current_node": "plan",
+          "current_node": "devils",
           "internal.retry_count.ask": 0,
           "internal.fidelity": "full",
           "internal.thread_id": "build",
           "internal.retry_count.triage": 0,
-          "preferred_label": "enough",
+          "preferred_label": "revise",
           "response.understand": "I now have a complete picture. No code was written and no files were modified.\n\n---\n\n## 1. Repository structure and where the change lands\n\n**Tooling:** Rust workspace (`lib/apps/*`, `lib/components/*`, `lib/foundation/*`), tested with `cargo nextest`; TypeScript web app (`apps/fabro-web`, Bun); Mintlify docs (`docs/public/**/*.mdx`). Formatting/lint via pinned nightly (`nightly-2026-04-14`). Insta snapshots used in some catalog tests.\n\n**How models work here (the key insight):** models are *data*, not code. The catalog is a set of TOML files embedded into the binary via `rust_embed` at `lib/foundation/fabro-model/src/catalog/providers/*.toml`. Each file declares a provider (`display_name`, `adapter`, `base_url`, `auth.credentials`, `priority`) and its model rows (`api_id`, `family`, `aliases`, `default`/`small_default`/`probe`, `limits`, `features`, `controls.reasoning_effort`, `costs`). Z.ai (`zai.toml`) already exists as an `openai_compatible` adapter pointed at `https://api.z.ai/api/coding/paas/v4`, currently listing `glm-5.2` (provider default) and `glm-4.7`.\n\n**A model entry appears in these places (all touched by precedent commit `c67cfef1` \"Add GLM 5.2 model support\" + follow-ups):**\n- `lib/foundation/fabro-model/src/catalog/providers/zai.toml` — direct provider rows\n- `.../providers/openrouter.toml` — gateway rows (`api_id = \"z-ai/glm-5.2\"`), plus `LEGACY_BUILTIN_MODEL_IDENTIFIERS` in `catalog.rs` (wire-ID → slug normalization, line ~1832)\n- `.../providers/fireworks.toml` — serverless rows (`api_id = \"accounts/fireworks/models/glm-5p2\"`, dots → `p`)\n- Tests in `lib/foundation/fabro-model/src/catalog.rs`: `builtin_glm_5_2_aliases_are_portable` (~line 3447), the `glm_5_2_in_catalog` insta snapshot (~7222), `builtin_deepseek_shared_slugs_are_portable_across_providers` (~4333)\n- Live e2e tests: `lib/components/fabro-llm/tests/integration.rs` (`zai_glm_5_2_reasoning_tool_round_trip`, `openrouter_glm_5_2_reasoning_tool_round_trip`, gated on `ZAI_API_KEY`/`OPENROUTER_API_KEY`)\n- Docs: `docs/public/core-concepts/models.mdx` (catalog table + per-provider default table), `docs/public/integrations/{openrouter,fireworks,venice}.mdx`, plus a dated `docs/public/changelog/*.mdx` entry\n- No Rust enum/code change is needed for a new model on an existing adapter/codec — the `adapter_registry` is keyed by `AdapterKind`, and the old per-model test table there has since been removed.\n\n**Constraint learned from the builder:** exactly one `default = true` and one `small_default = true` per provider, or the catalog build fails (`CatalogBuildError::MultipleProviderDefaults`).\n\n## 2. Goal restated concretely\n\nAdd **GLM 5.3** and **GLM 5.3 Flash** as first-class catalog offerings for the `zai` provider and every other built-in provider that actually serves them (OpenRouter, Fireworks; Venice already has `glm-5.3`): new TOML rows with researched limits/features/controls/costs, portable `glm*` aliases moved to the new flagship, `glm-5.3` becoming the Z.ai provider default per precedent, matching test/doc/changelog updates, and optionally live round-trip tests against Z.ai and OpenRouter.\n\n## 3. What I know for certain\n\n**From the repo:**\n- Z.ai ships `glm-5.2` (default, aliases `glm`, `glm5`, `glm52`, `glm5.2`, 1M/131072, efforts `high`/`max`, costs 1.4/4.4/0.26) and `glm-4.7`. Credentials: `ZAI_API_KEY` env/vault.\n- \"Portable aliases\" is an explicit, tested contract: `glm`, `glm5`, `glm52`, `glm5.2` must resolve to the same canonical slug on every provider that offers the family.\n- Exactly one default per provider; changing the default means moving the flag (precedent: glm-4.7→glm-5.2, documented in models.mdx \"Default model\" table).\n- `small_default` marks the small/cheap tier per provider (used for metadata enrichment with small budgets); `DeepSeek V4 Flash` and fireworks `gpt-oss-20b` carry it. Z.ai currently has no `small_default`.\n- Venice already has a `glm-5.3` row (1M/131072, efforts `low`/`high`/`max`, costs 1.75/5.5/0.325, aliases `glm`, `glm5`, `glm53`, `glm5.3`, `glm-5-3`) — so the unpinned `glm` alias will exist on multiple providers and resolves by provider priority (zai=60 > venice=35).\n- OpenRouter responses carry authoritative in-band `usage.cost`, so its cost rows are best-effort estimates only.\n- The OpenAI-compatible codec already handles Z.ai's `reasoning_content` and OpenRouter's `reasoning` spellings (added in the GLM 5.2 commit).\n\n**Researched (authoritative sources, fetched today):**\n- **Z.ai direct (docs.z.ai):** `glm-5.3` — text-only, 1M context, 128K max output, reasoning always on with `reasoning_effort` `low`/`high`/`max` (default `max`), `thinking.type` only accepts `enabled`; tools/streaming/caching/structured output supported; served on the same `api.z.ai/api/coding/paas/v4` chat-completions endpoint the catalog already uses. Pricing per MTok: **$1.4 input / $4.4 output / $0.26 cached**.\n- **Z.ai direct `glm-5.3-flash`:** model code `glm-5.3-flash`, native multimodal (image/video/file+text input), 1M context, 128K max output, same reasoning contract as 5.3. Pricing per MTok: **$0.15 / $0.50 / $0.03 list**, currently 50% off (**$0.075 / $0.25 / $0.015**) until 2026-09-09; caching supported.\n- **Z.ai coding plan routing:** requests for GLM-5.2/5.1 auto-route to GLM-5.3; GLM-4.7 auto-routes to GLM-5.3-Flash.\n- **OpenRouter live API:** `z-ai/glm-5.3` — text-only, 1,310,720 advertised / 1,048,576 top-provider context, 262,144 max completion tokens, efforts `max`/`high`/`low`, $1.40/$4.40/$0.14 per MTok. `z-ai/glm-5.3-flash` — text+image+video, same context, 131,072 max completion, efforts `max`/`high`/`low`, **$0.075/$0.25/$0.015** (matches Z.ai promo).\n- **Fireworks live pricing page:** `glm-5p3` → $1.40/$0.26/$4.40; `glm-5p3-flash` → $0.15/$0.03/$0.50 (standard tier). Both exist today.\n- **Amazon Bedrock:** Z.ai models on Bedrock are only GLM 4.7, GLM 4.7 Flash, GLM 5 — **no GLM 5.3**, so `bedrock.toml` is out of scope.\n\n## 4. Genuinely ambiguous (two reasonable engineers would differ)\n\n1. **Scope of \"others as well.\"** Fireworks provably serves both new models and OpenRouter is explicitly named; Venice already has `glm-5.3` (no Flash) and Bedrock has nothing. Does \"others\" mean *only* providers that serve GLM 5.3 today (zai+openrouter+fireworks), or should Venice get a `glm-5.3-flash` row too (Venice's catalog doesn't list one — adding it would be fabrication)?\n2. **Which model becomes the Z.ai default.** GLM 5.3 is the same price as 5.2 and is the flagship (strong precedent: glm-4.7→glm-5.2 moved the default to the flagship). But DeepSeek made its *Flash* the default+small_default because of cost. Flagship (GLM 5.3) is the likelier read, but it's a product call.\n3. **`small_default` for `glm-5.3-flash` on Z.ai.** It fits the \"small/cheap tier\" role and other providers mark their cheap tiers, but Z.ai has never had a `small_default`; adding one changes metadata-enrichment behavior for existing Z.ai users (budget/timeout-sensitive paths). Also: should fireworks' `glm-5p3-flash` get it (fireworks already has `gpt-oss-20b` as small default — so it *can't*, without displacing it)?\n4. **Which price to record for `glm-5.3-flash`.** List ($0.15/$0.50/$0.03) vs. current promotional ($0.075/$0.25/$0.015, ends 2026-09-09 — days from now). The repo has precedent both ways (glm-5.2 rows use list prices; `laguna-xs-2.1` records a promotional rate with an explanatory comment; OpenRouter's live API currently returns the promo price).\n5. **Limits disagreement between sources.** Z.ai docs say 1M context/128K output for both; OpenRouter advertises 1,310,720 context (1,048,576 top-provider) and 262,144 max completion for `glm-5.3`. Existing rows use 1,048,576/131,072. Whether to record OpenRouter's larger numbers or normalize to Z.ai's is a judgment call.\n6. **Alias surgery on the older rows.** Presumably `glm`/`glm5` move to `glm-5.3` while `glm52`/`glm5.2` stay pinned to the old model — but does `glm-5.2` keep its full alias set, or get trimmed? And should the Z.ai auto-routing note (5.2→5.3, 4.7→5.3-Flash on the coding plan) be recorded in the TOML comments/docs, since users selecting `glm-5.2` will silently get 5.3 upstream?\n7. **Effort levels on OpenRouter.** Z.ai and Venice expose `low`/`high`/`max` for 5.3; the existing OpenRouter `glm-5.2` row uses `high`/`xhigh` (OpenRouter's own naming). For `glm-5.3` OpenRouter reports `max`/`high`/`low` — whether to translate or mirror verbatim is a small consistency choice.\n8. **`reasoning_by_default` spelling.** GLM 5.3/Flash cannot disable thinking. Catalog-wise, `reasoning_effort = \"levels\"` already implies reasoning-by-default, and Venice's glm-5.3 row also sets it explicitly. Whether the new rows set it explicitly (and whether the *existing* `glm-5.2` zai row is left inconsistent) is unresolved.\n9. **Live e2e tests.** The GLM 5.2 precedent added two live round-trip tests (Z.ai + OpenRouter). Include the same for 5.3 (they only run under `--profile e2e` with real keys), and/or for Flash? A Flash test would also be the only coverage of vision content blocks on this route.\n10. **Changelog file/date.** A new dated changelog entry (today 2026-09-04) is customary, but whether this ships standalone or folded into the next entry, and its title, is editorial.",
           "human.gate.selected": "freeform",
           "graph.rankdir": "LR",
           "internal.retry_count.plan": 0,
           "internal.retry_count.start": 0,
           "human.gate.interview.answer": "1. yes",
+          "response.devils": "I verified the plan's riskiest claims against the actual repository before judging.\n\n**What I confirmed is sound (no churn needed on these):**\n- No changelog collision — no `2026-09-*.mdx` exists; `ZAI_API_KEY` is already in `.env.example`, `EnvVars`, and the secret registry, so the live-test claim holds.\n- No hidden snapshot coupling — grepped all of `lib/` for `glm`: the only Rust references are the catalog tests the plan already lists, `review_glm` branch names in unrelated server/store tests, `glm-4.7` behind the `quarantine` feature in `parity_matrix.rs`, and a doc comment in the Bedrock codec. No CLI snapshot, no docs-sync test, no model-list enumeration that additions would break.\n- Catalog integrity tests are count-safe: `every_provider_has_catalog_models`, `every_provider_has_exactly_one_default_model`, and `builtin_small_defaults_are_marked_per_provider` assert per-provider invariants, not totals — the flag flip on zai satisfies them.\n- `ReasoningEffort` already has `Low`/`High`/`Max` (Venice's glm-5.3 row uses them), `vision = true` on `openai_compatible` is precedented (kimi-k3 on Fireworks/Venice/OpenRouter), and the zai rows' `api_id` defaulting to the slug matches the existing `glm_5_2_in_catalog` assertion pattern.\n\n**Blocking defect — the cost triples are internally inconsistent, and nothing downstream can catch a transposition:**\n\nThe plan states the same three TOML keys (`input_cost_per_mtok` / `output_cost_per_mtok` / `cache_input_cost_per_mtok`) in **two different positional orders** without labeling either:\n- zai/OpenRouter rows (summary table and §1/§2): input/output/cache — `1.4 / 4.4 / 0.26`, `0.075 / 0.25 / 0.015`\n- Fireworks rows (summary table and §3): input/cache/output — `1.4 / 0.26 / 4.4`, `0.15 / 0.03 / 0.50` (mirroring Fireworks' own doc-table order)\n\nAn implementer mapping positionally — the natural reading when adjacent rows in the same summary table disagree — records `output = 0.26`, `cache = 4.40` for Fireworks GLM 5.3. That is user-visible billing-estimate data, and the plan's verification **cannot catch it**: no test anywhere asserts cost values, and the planned docs-vs-catalog grep would faithfully reproduce the same transposed numbers in both places. Wrong numbers in three TOML rows plus docs is exactly \"work that would have to be redone.\" Fix: state every cost as explicit key/value pairs (or one labeled order everywhere).\n\n**Advisory, not blocking:**\n1. Verification runs `-p fabro-model -p fabro-llm -p fabro-server` + workspace build. Cross-crate consumers of `default_from_env`/`small_default_for_configured_ids` in other crates would only surface at CI; one full `cargo nextest run --workspace` is cheap insurance given the default-flag flip.\n2. Rewriting `builtin_glm_5_2_aliases_are_portable` into the 5.3 version drops the only portability coverage for the `glm52`/`glm5.2` aliases that remain on glm-5.2 in both zai and OpenRouter — keep a one-line assertion for those.\n\nEverything else — scope boundaries, alias surgery, limits choices, test plan, doc targets, deliberate exclusions — is correct against the repo as it stands.\n\n{\"preferred_next_label\": \"revise\"}",
+          "internal.retry_count.devils": 0,
           "internal.run_id": "01M1P1HEMJHSJY1ZC1FQV4BJBA"
         },
         "node_outcomes": {
@@ -1585,6 +1823,43 @@
               "inference_time_ms": 349868,
               "tool_time_ms": 8967,
               "active_time_ms": 358835
+            }
+          },
+          "devils": {
+            "status": "succeeded",
+            "preferred_label": "revise",
+            "context_updates": {
+              "last_stage": "devils",
+              "response.devils": "I verified the plan's riskiest claims against the actual repository before judging.\n\n**What I confirmed is sound (no churn needed on these):**\n- No changelog collision — no `2026-09-*.mdx` exists; `ZAI_API_KEY` is already in `.env.example`, `EnvVars`, and the secret registry, so the live-test claim holds.\n- No hidden snapshot coupling — grepped all of `lib/` for `glm`: the only Rust references are the catalog tests the plan already lists, `review_glm` branch names in unrelated server/store tests, `glm-4.7` behind the `quarantine` feature in `parity_matrix.rs`, and a doc comment in the Bedrock codec. No CLI snapshot, no docs-sync test, no model-list enumeration that additions would break.\n- Catalog integrity tests are count-safe: `every_provider_has_catalog_models`, `every_provider_has_exactly_one_default_model`, and `builtin_small_defaults_are_marked_per_provider` assert per-provider invariants, not totals — the flag flip on zai satisfies them.\n- `ReasoningEffort` already has `Low`/`High`/`Max` (Venice's glm-5.3 row uses them), `vision = true` on `openai_compatible` is precedented (kimi-k3 on Fireworks/Venice/OpenRouter), and the zai rows' `api_id` defaulting to the slug matches the existing `glm_5_2_in_catalog` assertion pattern.\n\n**Blocking defect — the cost triples are internally inconsistent, and nothing downstream can catch a transposition:**\n\nThe plan states the same three TOML keys (`input_cost_per_mtok` / `output_cost_per_mtok` / `cache_input_cost_per_mtok`) in **two different positional orders** without labeling either:\n- zai/OpenRouter rows (summary table and §1/§2): input/output/cache — `1.4 / 4.4 / 0.26`, `0.075 / 0.25 / 0.015`\n- Fireworks rows (summary table and §3): input/cache/output — `1.4 / 0.26 / 4.4`, `0.15 / 0.03 / 0.50` (mirroring Fireworks' own doc-table order)\n\nAn implementer mapping positionally — the natural reading when adjacent rows in the same summary table disagree — records `output = 0.26`, `cache = 4.40` for Fireworks GLM 5.3. That is user-visible billing-estimate data, and the plan's verification **cannot catch it**: no test anywhere asserts cost values, and the planned docs-vs-catalog grep would faithfully reproduce the same transposed numbers in both places. Wrong numbers in three TOML rows plus docs is exactly \"work that would have to be redone.\" Fix: state every cost as explicit key/value pairs (or one labeled order everywhere).\n\n**Advisory, not blocking:**\n1. Verification runs `-p fabro-model -p fabro-llm -p fabro-server` + workspace build. Cross-crate consumers of `default_from_env`/`small_default_for_configured_ids` in other crates would only surface at CI; one full `cargo nextest run --workspace` is cheap insurance given the default-flag flip.\n2. Rewriting `builtin_glm_5_2_aliases_are_portable` into the 5.3 version drops the only portability coverage for the `glm52`/`glm5.2` aliases that remain on glm-5.2 in both zai and OpenRouter — keep a one-line assertion for those.\n\nEverything else — scope boundaries, alias surgery, limits choices, test plan, doc targets, deliberate exclusions — is correct against the repo as it stands.\n\n{\"preferred_next_label\": \"revise\"}",
+              "last_response": "I verified the plan's riskiest claims against the actual repository before judging.\n\n**What I confirmed is sound (no churn needed on these):**\n- No changelog collision — no `2026-09-*.mdx` exists; `"
+            },
+            "notes": "Stage completed: devils",
+            "usage": {
+              "input": {
+                "usage": {
+                  "model": {
+                    "provider": "zai",
+                    "model_id": "glm-5.2"
+                  },
+                  "tokens": {
+                    "input_tokens": 16162,
+                    "output_tokens": 1328,
+                    "reasoning_tokens": 8036,
+                    "cache_read_tokens": 874496,
+                    "cache_write_tokens": 0
+                  }
+                },
+                "facts": {
+                  "algorithm": "openai"
+                }
+              },
+              "total_usd_micros": 291191
+            },
+            "timing": {
+              "wall_time_ms": 0,
+              "inference_time_ms": 149919,
+              "tool_time_ms": 563,
+              "active_time_ms": 150482
             }
           },
           "ask": {
@@ -1711,13 +1986,14 @@
             }
           }
         },
-        "next_node_id": "devils",
+        "next_node_id": "plan",
         "node_visits": {
           "plan": 1,
           "understand": 1,
           "start": 1,
           "interview": 1,
           "triage": 1,
+          "devils": 1,
           "ask": 1
         }
       },
@@ -1786,6 +2062,88 @@
       },
       "agent_control": "running",
       "state": "succeeded"
+    },
+    "devils@1": {
+      "first_event_seq": 441,
+      "prompt": null,
+      "response": null,
+      "completion": null,
+      "provider_used": {
+        "mode": "agent",
+        "provider": "zai",
+        "model": "glm-5.2",
+        "reasoning_effort": "high"
+      },
+      "diff": null,
+      "script_invocation": null,
+      "script_timing": null,
+      "parallel_results": null,
+      "output": null,
+      "started_at": "2026-09-04T12:12:43.091861Z",
+      "handler": "agent",
+      "graph_visit": 1,
+      "live_inference_ms": 149918,
+      "live_tool_ms": 561,
+      "usage": {
+        "input_tokens": 16162,
+        "output_tokens": 1328,
+        "total_tokens": 900022,
+        "reasoning_tokens": 8036,
+        "cache_read_tokens": 874496,
+        "cache_write_tokens": 0,
+        "total_usd_micros": 291191
+      },
+      "model": {
+        "provider": "zai",
+        "model_id": "glm-5.2"
+      },
+      "permission_level": "full",
+      "context_window": {
+        "provider": "zai",
+        "model": "glm-5.2",
+        "context_window_tokens": 1048576,
+        "input_tokens": 150192,
+        "usage_percent": 14.32342529296875,
+        "count_method": "response_usage_scaled_breakdown",
+        "staleness": "live",
+        "generated_at": "2026-09-04T12:15:13.585894Z",
+        "event_seq": 482,
+        "breakdown": [
+          {
+            "category": "system_prompt",
+            "tokens": 1194,
+            "usage_percent": 0.11386871337890625
+          },
+          {
+            "category": "tools",
+            "tokens": 1643,
+            "usage_percent": 0.15668869018554688
+          },
+          {
+            "category": "skills",
+            "tokens": 235,
+            "usage_percent": 0.022411346435546875
+          },
+          {
+            "category": "memory",
+            "tokens": 4640,
+            "usage_percent": 0.4425048828125
+          },
+          {
+            "category": "conversation",
+            "tokens": 142471,
+            "usage_percent": 13.587093353271484
+          },
+          {
+            "category": "other",
+            "tokens": 9,
+            "usage_percent": 0.000858306884765625
+          }
+        ],
+        "warnings": []
+      },
+      "agent_control": "running",
+      "state": "running"
     },
     "start@1": {
       "first_event_seq": 21,
@@ -2055,7 +2413,12 @@
       "first_event_seq": 425,
       "prompt": null,
       "response": null,
-      "completion": null,
+      "completion": {
+        "outcome": "succeeded",
+        "notes": "Stage completed: plan",
+        "failure_reason": null,
+        "timestamp": "2026-09-04T12:12:39.313447Z"
+      },
       "provider_used": {
         "mode": "agent",
         "provider": "zai",
@@ -2070,7 +2433,12 @@
       "started_at": "2026-09-04T12:11:03.561552Z",
       "handler": "agent",
       "graph_visit": 1,
-      "live_inference_ms": 95731,
+      "timing": {
+        "wall_time_ms": 95758,
+        "inference_time_ms": 95739,
+        "tool_time_ms": 0,
+        "active_time_ms": 95739
+      },
       "usage": {
         "input_tokens": 134288,
         "output_tokens": 2764,
@@ -2130,7 +2498,7 @@
         "warnings": []
       },
       "agent_control": "running",
-      "state": "running"
+      "state": "succeeded"
     },
     "ask@1": {
       "first_event_seq": 387,
