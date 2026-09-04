@@ -1,0 +1,6 @@
+{
+  "outcome": "succeeded",
+  "notes": "Script completed: set -eu\nBRANCH=$(git branch --show-current)\ngit push origin $BRANCH\ngh pr merge $BRANCH --squash",
+  "failure_reason": null,
+  "timestamp": "2026-09-04T12:46:30.448909Z"
+}
