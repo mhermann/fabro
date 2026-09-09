@@ -881,14 +881,140 @@
     }
   },
   "web_url": "http://127.0.0.1:32276/runs/01M22Z63CN2WNR95GFXQD7F0H6",
-  "start": null,
-  "status": {
-    "kind": "starting"
+  "start": {
+    "start_time": "2026-09-09T11:34:59.700586Z",
+    "run_branch": "fabro/run/01M22Z63CN2WNR95GFXQD7F0H6",
+    "base_sha": "abb07abf983e9ed71f5e3c9b80e6f7d5f631c79c"
   },
-  "status_updated_at": "2026-09-09T11:34:53.649Z",
-  "last_event_at": "2026-09-09T11:34:59.693491Z",
+  "status": {
+    "kind": "running"
+  },
+  "status_updated_at": "2026-09-09T11:34:59.700606Z",
+  "last_event_at": "2026-09-09T11:39:25.818919Z",
   "pending_control": null,
-  "checkpoints": [],
+  "checkpoints": [
+    {
+      "seq": 24,
+      "checkpoint": {
+        "timestamp": "2026-09-09T11:35:01.943460Z",
+        "current_node": "start",
+        "completed_nodes": [
+          "start"
+        ],
+        "node_retries": {},
+        "context_values": {
+          "current_node": "start",
+          "failure_class": "",
+          "failure_signature": "",
+          "graph.on_failure": "exit",
+          "internal.node_visit_count": 1,
+          "internal.retry_count.start": 0,
+          "internal.thread_id": null,
+          "internal.work_dir": "/workspace/fabro",
+          "internal.fidelity": "compact",
+          "graph.model_stylesheet": "\n            *      { model: glm-5.3; reasoning_effort: high; }\n            .deep  { model: glm-5.3; reasoning_effort: max; }\n            .fast  { model: glm-5.3-flash; }\n        ",
+          "graph.rankdir": "LR",
+          "graph.max_node_visits": "24",
+          "graph.goal": "Figure out a good way to add a provider for web searching that's not as expensive as brave or venice. Can we set something up that runs locally and provides the search?",
+          "outcome": "succeeded",
+          "internal.run_id": "01M22Z63CN2WNR95GFXQD7F0H6"
+        },
+        "node_outcomes": {
+          "start": {
+            "status": "succeeded",
+            "usage": null
+          }
+        },
+        "next_node_id": "understand",
+        "node_visits": {
+          "start": 1
+        }
+      },
+      "diff": {}
+    },
+    {
+      "seq": 0,
+      "checkpoint": {
+        "timestamp": "2026-09-09T11:39:25.826017Z",
+        "current_node": "understand",
+        "completed_nodes": [
+          "start",
+          "understand"
+        ],
+        "node_retries": {},
+        "context_values": {
+          "internal.retry_count.understand": 0,
+          "internal.retry_count.start": 0,
+          "graph.on_failure": "exit",
+          "graph.rankdir": "LR",
+          "outcome": "succeeded",
+          "thread.build.current_node": "understand",
+          "graph.goal": "Figure out a good way to add a provider for web searching that's not as expensive as brave or venice. Can we set something up that runs locally and provides the search?",
+          "internal.fidelity": "full",
+          "last_stage": "understand",
+          "internal.work_dir": "/workspace/fabro",
+          "internal.thread_id": "build",
+          "internal.node_visit_count": 1,
+          "graph.max_node_visits": "24",
+          "failure_signature": "",
+          "graph.model_stylesheet": "\n            *      { model: glm-5.3; reasoning_effort: high; }\n            .deep  { model: glm-5.3; reasoning_effort: max; }\n            .fast  { model: glm-5.3-flash; }\n        ",
+          "response.understand": "I have a complete picture now. Here's my exploration report.\n\n## 1. Repository structure and where the change lands\n\n**Fabro** is an AI workflow orchestration platform: Rust workspace (`lib/apps`, `lib/components`, `lib/foundation`) plus TypeScript apps (`apps/fabro-web`, `apps/marketing`). Workflows are Graphviz graphs; each node is a stage run by an AI agent with a tool registry.\n\nThe web search feature is concentrated in a small, well-isolated set of files:\n\n| Concern | Location |\n|---|---|\n| Backend enum + HTTP + result formatting | `lib/components/fabro-agent/src/web_search.rs` (`SearchBackend::{Brave, Venice}`) |\n| Tool registration (`web_search` tool, registered only when a credential exists) | `lib/components/fabro-agent/src/tools.rs` (`register_web_search_tool`) |\n| Secrets struct | `lib/components/fabro-agent/src/config.rs` (`ToolSecrets`) |\n| Vault → secrets for server runs | `lib/components/fabro-workflow/src/pipeline/initialize.rs` (`tool_secrets_from_configured_sources`) |\n| Process-env → secrets for CLI runs | `lib/components/fabro-agent/src/cli.rs` |\n| Env var name registry / secret classification | `lib/foundation/fabro-static/src/env_vars.rs`, `secret_registry.rs` |\n| Doctor diagnostics probe | `lib/apps/fabro-server/src/diagnostics.rs` (`check_web_search` → `check_brave_search` / `check_venice_search`) |\n| Demo-mode doctor string | `lib/apps/fabro-server/src/demo/mod.rs` |\n| Docs | `docs/public/integrations/brave-search.mdx`, `venice-search.mdx`, `agents/tools.mdx`, changelog |\n| Tests | Unit tests in `web_search.rs` (httpmock), `tests/it/parity_matrix.rs` (`web_search_provider_test!`), e2e live test gated on `BRAVE_SEARCH_API_KEY` |\n\nPrecedents that matter: each `SearchBackend` variant already carries an injectable `search_url` (used by tests via httpmock), and the repo already has a **self-hosted proxy pattern** — the LiteLLM provider is documented as a local service configured via `settings.toml` with a `base_url`. The repo also ships multiple `docker-compose*.yaml` files and a `docker/` dir, so running a sibling local service is an established deployment shape.\n\n## 2. Goal restated concretely\n\nToday the `web_search` agent tool has exactly two backends — Brave (paid/rate-limited API) and Venice (balance-based paid API) — selected purely by which API key is in the vault (Brave wins when both exist; no key ⇒ the tool is omitted from the agent's toolset and prompt). The goal is to add a **third backend that costs nothing per query because it runs as a local/self-hosted service** the operator deploys (the ecosystem-standard answer is SearXNG: a self-hosted metasearch engine with a JSON API, no API key, runs in Docker, aggregates Google/Bing/DDG). Concretely: add a `SearchBackend` variant that talks to a locally-running search service's HTTP endpoint, wire its configuration (a URL rather than an API key) through vault/settings/env plumbing, register the tool when it's configured, probe it in `fabro doctor`, document it, and test it.\n\n## 3. What I know for certain\n\n- **Selection is credential-presence-driven**: `SearchBackend::from_secrets` matches on `(brave_key, venice_key)` tuples; the tool exists iff one is present. A local backend that needs *no key* breaks this assumption and needs a different enable signal.\n- **The tool executes in the Fabro process**, not in the run sandbox — `web_search.rs` uses `fabro_http` directly (the `ToolContext` sandbox handle is unused). So \"runs locally\" means *reachable from the Fabro server/worker process* (e.g. a compose sibling service), not from run containers.\n- **Result shape is already normalized**: both backends map into `SearchHit { title, url, description, date }` → `format_hits`. SearXNG's JSON (`results[].title/url/content/publishedDate`) maps onto this cleanly.\n- **Both existing backends are simple reqwest calls** against a `search_url` field that is already injectable per-instance — adding a variant that takes a configured base URL requires no architectural change.\n- **Brave/Venice costs are real**: Venice is per-query paid (the code even parses `x-venice-balance-usd` on 402); Brave's free tier is rate-limited. This motivates the goal.\n- **The full touchpoint list for any new backend is enumerable**: `SearchBackend` variant + `from_secrets`/`search()`, `ToolSecrets` (or a new config field), env var constants, `secret_registry.rs` classification, `initialize.rs` + `cli.rs` plumbing, `diagnostics.rs` probe + demo string, docs (`integrations/*.mdx`, `tools.mdx`), changelog, unit tests (httpmock pattern is ready), parity-matrix wiring.\n- **A non-secret config path exists as precedent**: `settings.toml` layers (`SettingsLayer` with `llm`, `server`, `run`, … sections) — LiteLLM's `base_url` lives there. The vault also stores arbitrary strings, so a URL *could* be stored as a pseudo-secret (`fabro secret set SEARXNG_URL ...`) — both patterns have precedent adjacent to this code.\n- **Docs/internal strategy files govern part of this work**: `server-secrets-strategy.md` explicitly lists `BRAVE_SEARCH_API_KEY`/`VENICE_API_KEY` as vault-provisioned optional secrets; any new secret must be added there and in the registry.\n\n## 4. What is genuinely ambiguous\n\n1. **Which local engine?** SearXNG is the obvious candidate (JSON API, keyless, Docker), but Whoogle, YaCy, or scraping DuckDuckGo's lite endpoint directly (zero deployment, but fragile/ToS-questionable) are defensible alternatives. \"Not as expensive\" doesn't pick one.\n2. **\"Runs locally\" vs. actually free/offline**: SearXNG is a *metasearch* — it still queries Google/Bing/DDG upstreams from the operator's machine (needs internet, can get rate-limited/blocked upstream). A fully local index (YaCy) is a different, much weaker product. Which guarantee does the user actually want?\n3. **How is the local backend configured and selected?** Options with real trade-offs: (a) store a URL in the vault like a secret (reuses all existing plumbing, but a URL isn't a secret and the secrets strategy doc semantic gets bent); (b) a `settings.toml` section following the LiteLLM precedent (cleaner semantics, but `ToolSecrets`/`from_secrets` and both plumbings in `initialize.rs`/`cli.rs` need a parallel config path); (c) a plain env var. Two engineers would split here.\n4. **Precedence semantics**: when Brave/Venice keys *and* a local backend are all configured, which wins? Current code is a strict Brave > Venice ladder; is local the new default (cheap), the fallback, or explicitly chosen?\n5. **Auth on the local service**: SearXNG can be exposed with no auth, a bearer token, or behind a reverse proxy. Do we support an optional key, or keep it keyless-only for v1?\n6. **Deployment scope**: docs + compose *example* only, or a first-class service added to the shipped `docker-compose.yaml` / a new `cargo dev` helper? Should the repo bundle a searxng service definition, and should `fabro doctor` probe it like the paid providers?\n7. **\"Provider\" granularity**: a new hardcoded `SearchBackend` variant (consistent with today's code), or a config-driven generic endpoint (any base URL + optional key) that makes \"provider\" pluggable forever? The first is minimal; the second is a small design shift.\n8. **Testing expectations**: httpmock unit tests are clearly expected; but should there be an e2e live test, and if so how does CI obtain a running local instance (spin up SearXNG in Docker in CI? twin-style recorded fixtures?)?\n\nMy recommendation when we proceed: SearXNG as a new `SearchBackend` variant, configured via a vault-stored `SEARXNG_URL` (with optional `SEARXNG_API_KEY`), taking precedence over Brave/Venice when present — but items 1, 3, and 4 above are the ones worth confirming before writing code.",
+          "last_response": "I have a complete picture now. Here's my exploration report.\n\n## 1. Repository structure and where the change lands\n\n**Fabro** is an AI workflow orchestration platform: Rust workspace (`lib/apps`, `li",
+          "current_node": "understand",
+          "internal.run_id": "01M22Z63CN2WNR95GFXQD7F0H6",
+          "failure_class": ""
+        },
+        "node_outcomes": {
+          "start": {
+            "status": "succeeded",
+            "usage": null
+          },
+          "understand": {
+            "status": "succeeded",
+            "context_updates": {
+              "last_response": "I have a complete picture now. Here's my exploration report.\n\n## 1. Repository structure and where the change lands\n\n**Fabro** is an AI workflow orchestration platform: Rust workspace (`lib/apps`, `li",
+              "last_stage": "understand",
+              "response.understand": "I have a complete picture now. Here's my exploration report.\n\n## 1. Repository structure and where the change lands\n\n**Fabro** is an AI workflow orchestration platform: Rust workspace (`lib/apps`, `lib/components`, `lib/foundation`) plus TypeScript apps (`apps/fabro-web`, `apps/marketing`). Workflows are Graphviz graphs; each node is a stage run by an AI agent with a tool registry.\n\nThe web search feature is concentrated in a small, well-isolated set of files:\n\n| Concern | Location |\n|---|---|\n| Backend enum + HTTP + result formatting | `lib/components/fabro-agent/src/web_search.rs` (`SearchBackend::{Brave, Venice}`) |\n| Tool registration (`web_search` tool, registered only when a credential exists) | `lib/components/fabro-agent/src/tools.rs` (`register_web_search_tool`) |\n| Secrets struct | `lib/components/fabro-agent/src/config.rs` (`ToolSecrets`) |\n| Vault → secrets for server runs | `lib/components/fabro-workflow/src/pipeline/initialize.rs` (`tool_secrets_from_configured_sources`) |\n| Process-env → secrets for CLI runs | `lib/components/fabro-agent/src/cli.rs` |\n| Env var name registry / secret classification | `lib/foundation/fabro-static/src/env_vars.rs`, `secret_registry.rs` |\n| Doctor diagnostics probe | `lib/apps/fabro-server/src/diagnostics.rs` (`check_web_search` → `check_brave_search` / `check_venice_search`) |\n| Demo-mode doctor string | `lib/apps/fabro-server/src/demo/mod.rs` |\n| Docs | `docs/public/integrations/brave-search.mdx`, `venice-search.mdx`, `agents/tools.mdx`, changelog |\n| Tests | Unit tests in `web_search.rs` (httpmock), `tests/it/parity_matrix.rs` (`web_search_provider_test!`), e2e live test gated on `BRAVE_SEARCH_API_KEY` |\n\nPrecedents that matter: each `SearchBackend` variant already carries an injectable `search_url` (used by tests via httpmock), and the repo already has a **self-hosted proxy pattern** — the LiteLLM provider is documented as a local service configured via `settings.toml` with a `base_url`. The repo also ships multiple `docker-compose*.yaml` files and a `docker/` dir, so running a sibling local service is an established deployment shape.\n\n## 2. Goal restated concretely\n\nToday the `web_search` agent tool has exactly two backends — Brave (paid/rate-limited API) and Venice (balance-based paid API) — selected purely by which API key is in the vault (Brave wins when both exist; no key ⇒ the tool is omitted from the agent's toolset and prompt). The goal is to add a **third backend that costs nothing per query because it runs as a local/self-hosted service** the operator deploys (the ecosystem-standard answer is SearXNG: a self-hosted metasearch engine with a JSON API, no API key, runs in Docker, aggregates Google/Bing/DDG). Concretely: add a `SearchBackend` variant that talks to a locally-running search service's HTTP endpoint, wire its configuration (a URL rather than an API key) through vault/settings/env plumbing, register the tool when it's configured, probe it in `fabro doctor`, document it, and test it.\n\n## 3. What I know for certain\n\n- **Selection is credential-presence-driven**: `SearchBackend::from_secrets` matches on `(brave_key, venice_key)` tuples; the tool exists iff one is present. A local backend that needs *no key* breaks this assumption and needs a different enable signal.\n- **The tool executes in the Fabro process**, not in the run sandbox — `web_search.rs` uses `fabro_http` directly (the `ToolContext` sandbox handle is unused). So \"runs locally\" means *reachable from the Fabro server/worker process* (e.g. a compose sibling service), not from run containers.\n- **Result shape is already normalized**: both backends map into `SearchHit { title, url, description, date }` → `format_hits`. SearXNG's JSON (`results[].title/url/content/publishedDate`) maps onto this cleanly.\n- **Both existing backends are simple reqwest calls** against a `search_url` field that is already injectable per-instance — adding a variant that takes a configured base URL requires no architectural change.\n- **Brave/Venice costs are real**: Venice is per-query paid (the code even parses `x-venice-balance-usd` on 402); Brave's free tier is rate-limited. This motivates the goal.\n- **The full touchpoint list for any new backend is enumerable**: `SearchBackend` variant + `from_secrets`/`search()`, `ToolSecrets` (or a new config field), env var constants, `secret_registry.rs` classification, `initialize.rs` + `cli.rs` plumbing, `diagnostics.rs` probe + demo string, docs (`integrations/*.mdx`, `tools.mdx`), changelog, unit tests (httpmock pattern is ready), parity-matrix wiring.\n- **A non-secret config path exists as precedent**: `settings.toml` layers (`SettingsLayer` with `llm`, `server`, `run`, … sections) — LiteLLM's `base_url` lives there. The vault also stores arbitrary strings, so a URL *could* be stored as a pseudo-secret (`fabro secret set SEARXNG_URL ...`) — both patterns have precedent adjacent to this code.\n- **Docs/internal strategy files govern part of this work**: `server-secrets-strategy.md` explicitly lists `BRAVE_SEARCH_API_KEY`/`VENICE_API_KEY` as vault-provisioned optional secrets; any new secret must be added there and in the registry.\n\n## 4. What is genuinely ambiguous\n\n1. **Which local engine?** SearXNG is the obvious candidate (JSON API, keyless, Docker), but Whoogle, YaCy, or scraping DuckDuckGo's lite endpoint directly (zero deployment, but fragile/ToS-questionable) are defensible alternatives. \"Not as expensive\" doesn't pick one.\n2. **\"Runs locally\" vs. actually free/offline**: SearXNG is a *metasearch* — it still queries Google/Bing/DDG upstreams from the operator's machine (needs internet, can get rate-limited/blocked upstream). A fully local index (YaCy) is a different, much weaker product. Which guarantee does the user actually want?\n3. **How is the local backend configured and selected?** Options with real trade-offs: (a) store a URL in the vault like a secret (reuses all existing plumbing, but a URL isn't a secret and the secrets strategy doc semantic gets bent); (b) a `settings.toml` section following the LiteLLM precedent (cleaner semantics, but `ToolSecrets`/`from_secrets` and both plumbings in `initialize.rs`/`cli.rs` need a parallel config path); (c) a plain env var. Two engineers would split here.\n4. **Precedence semantics**: when Brave/Venice keys *and* a local backend are all configured, which wins? Current code is a strict Brave > Venice ladder; is local the new default (cheap), the fallback, or explicitly chosen?\n5. **Auth on the local service**: SearXNG can be exposed with no auth, a bearer token, or behind a reverse proxy. Do we support an optional key, or keep it keyless-only for v1?\n6. **Deployment scope**: docs + compose *example* only, or a first-class service added to the shipped `docker-compose.yaml` / a new `cargo dev` helper? Should the repo bundle a searxng service definition, and should `fabro doctor` probe it like the paid providers?\n7. **\"Provider\" granularity**: a new hardcoded `SearchBackend` variant (consistent with today's code), or a config-driven generic endpoint (any base URL + optional key) that makes \"provider\" pluggable forever? The first is minimal; the second is a small design shift.\n8. **Testing expectations**: httpmock unit tests are clearly expected; but should there be an e2e live test, and if so how does CI obtain a running local instance (spin up SearXNG in Docker in CI? twin-style recorded fixtures?)?\n\nMy recommendation when we proceed: SearXNG as a new `SearchBackend` variant, configured via a vault-stored `SEARXNG_URL` (with optional `SEARXNG_API_KEY`), taking precedence over Brave/Venice when present — but items 1, 3, and 4 above are the ones worth confirming before writing code."
+            },
+            "notes": "Stage completed: understand",
+            "usage": {
+              "input": {
+                "usage": {
+                  "model": {
+                    "provider": "zai",
+                    "model_id": "glm-5.3"
+                  },
+                  "tokens": {
+                    "input_tokens": 36665,
+                    "output_tokens": 4354,
+                    "reasoning_tokens": 3494,
+                    "cache_read_tokens": 483136,
+                    "cache_write_tokens": 0
+                  }
+                },
+                "facts": {
+                  "algorithm": "openai"
+                }
+              },
+              "total_usd_micros": 211448
+            },
+            "timing": {
+              "wall_time_ms": 0,
+              "inference_time_ms": 260470,
+              "tool_time_ms": 3119,
+              "active_time_ms": 263589
+            }
+          }
+        },
+        "next_node_id": "ask",
+        "node_visits": {
+          "start": 1,
+          "understand": 1
+        }
+      },
+      "diff": {}
+    }
+  ],
   "conclusion": null,
   "sandbox": {
     "kind": "ready",
@@ -915,5 +1041,261 @@
   "pull_request": null,
   "superseded_by": null,
   "pending_interviews": {},
-  "stages": {}
+  "stages": {
+    "start@1": {
+      "first_event_seq": 21,
+      "prompt": null,
+      "response": null,
+      "completion": {
+        "outcome": "succeeded",
+        "notes": null,
+        "failure_reason": null,
+        "timestamp": "2026-09-09T11:35:01.943214Z"
+      },
+      "provider_used": null,
+      "diff": null,
+      "script_invocation": null,
+      "script_timing": null,
+      "parallel_results": null,
+      "output": null,
+      "started_at": "2026-09-09T11:35:01.939727Z",
+      "handler": "start",
+      "graph_visit": 1,
+      "timing": {
+        "wall_time_ms": 0,
+        "inference_time_ms": 0,
+        "tool_time_ms": 0,
+        "active_time_ms": 0
+      },
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "reasoning_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0
+      },
+      "agent_control": "running",
+      "state": "succeeded"
+    },
+    "understand@1": {
+      "first_event_seq": 25,
+      "prompt": null,
+      "response": null,
+      "completion": null,
+      "provider_used": {
+        "mode": "agent",
+        "provider": "zai",
+        "model": "glm-5.3",
+        "reasoning_effort": "high"
+      },
+      "diff": null,
+      "script_invocation": null,
+      "script_timing": null,
+      "parallel_results": null,
+      "output": null,
+      "started_at": "2026-09-09T11:35:01.946612Z",
+      "handler": "agent",
+      "graph_visit": 1,
+      "live_inference_ms": 260461,
+      "live_tool_ms": 3106,
+      "usage": {
+        "input_tokens": 36665,
+        "output_tokens": 4354,
+        "total_tokens": 527649,
+        "reasoning_tokens": 3494,
+        "cache_read_tokens": 483136,
+        "cache_write_tokens": 0,
+        "total_usd_micros": 211448
+      },
+      "model": {
+        "provider": "zai",
+        "model_id": "glm-5.3"
+      },
+      "skills": {
+        "available": [
+          {
+            "name": "rust-style-guide",
+            "description": "Apply this Rust style guide when writing, reviewing, refactoring, or configuring Rust code for this project. Covers Rust 2024/MSRV, library vs application conventions, public API design, errors, panics, ownership and cloning, async/Tokio/concurrency, tracing, rustfmt/Clippy, testing with nextest, and unsafe/macro policy. Also use when setting up new Rust projects, investigating Rust performance, verifying library releases, or reviewing Rust code changes."
+          }
+        ],
+        "activated": []
+      },
+      "permission_level": "full",
+      "agent_tools": [
+        {
+          "name": "close_agent",
+          "description": "Close a running or completed subagent that is no longer needed.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "subagent",
+          "invoked": false
+        },
+        {
+          "name": "edit_file",
+          "description": "Edit a file by replacing an exact string. The old_string must be an exact match and unique unless replace_all is true; include surrounding context when needed. Read the file first and preserve existing indentation.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "write",
+          "invoked": false
+        },
+        {
+          "name": "glob",
+          "description": "Find files by search-root-relative path using a glob pattern. Use path to choose the search root. `*` stays within one path segment and `**` searches recursively. Prefer this over shell find or ls when locating repository files.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "read",
+          "invoked": false
+        },
+        {
+          "name": "grep",
+          "description": "Search file contents with a regex pattern. Use path to choose the search root, glob_filter to limit matching files, case_insensitive for case folding, and max_results to cap output.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "read",
+          "invoked": true
+        },
+        {
+          "name": "read_file",
+          "description": "Read files before editing them. Returns line-numbered text and supports offset/limit for large files. Use this instead of shell cat, head, tail, or sed when inspecting repository files.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "read",
+          "invoked": true
+        },
+        {
+          "name": "request_user_input",
+          "description": "Ask the human one or more questions and wait for their answers before continuing this stage.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "other",
+          "invoked": false
+        },
+        {
+          "name": "send_input",
+          "description": "Send a follow-up message to a subagent. A running agent receives it at a safe turn boundary. A completed agent starts another turn in the same session with its existing history.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "subagent",
+          "invoked": false
+        },
+        {
+          "name": "shell",
+          "description": "Execute Bash commands for terminal operations, package managers, tests and builds. Use dedicated tools for file reads, file edits, filename searches, and content searches. Provide timeout_ms for long-running commands.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "shell",
+          "invoked": true
+        },
+        {
+          "name": "spawn_agent",
+          "description": "Spawn a subagent for independent work or context isolation. Use it for tasks that can proceed separately, and avoid duplicating the same work in the parent session.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "subagent",
+          "invoked": false
+        },
+        {
+          "name": "update_plan",
+          "description": "Update the multi-step plan for the current task. Submit the entire plan; existing steps are reconciled by exact step text.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "other",
+          "invoked": false
+        },
+        {
+          "name": "use_skill",
+          "description": "Load a skill's instructions by name. Call this when the user's request matches an available skill.",
+          "source": {
+            "kind": "skill"
+          },
+          "category": "other",
+          "invoked": false
+        },
+        {
+          "name": "wait",
+          "description": "Wait for a subagent to complete, then use the result to synthesize the outcome for the user.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "subagent",
+          "invoked": false
+        },
+        {
+          "name": "web_fetch",
+          "description": "Fetch content from a URL that starts with http:// or https://. Pass a prompt to extract specific information or summarize the page; omit prompt to return the page content.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "other",
+          "invoked": false
+        },
+        {
+          "name": "write_file",
+          "description": "Create new files, or overwrite an existing file only when replacement is explicitly intended. Prefer edit_file for targeted changes to existing files because write_file overwrites the full file content.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "write",
+          "invoked": false
+        }
+      ],
+      "context_window": {
+        "provider": "zai",
+        "model": "glm-5.3",
+        "context_window_tokens": 1048576,
+        "input_tokens": 35989,
+        "usage_percent": 3.432178497314453,
+        "count_method": "response_usage_scaled_breakdown",
+        "staleness": "live",
+        "generated_at": "2026-09-09T11:39:25.818743Z",
+        "event_seq": 204,
+        "breakdown": [
+          {
+            "category": "system_prompt",
+            "tokens": 1080,
+            "usage_percent": 0.102996826171875
+          },
+          {
+            "category": "tools",
+            "tokens": 1483,
+            "usage_percent": 0.14142990112304688
+          },
+          {
+            "category": "skills",
+            "tokens": 212,
+            "usage_percent": 0.0202178955078125
+          },
+          {
+            "category": "memory",
+            "tokens": 4188,
+            "usage_percent": 0.3993988037109375
+          },
+          {
+            "category": "conversation",
+            "tokens": 29018,
+            "usage_percent": 2.7673721313476562
+          },
+          {
+            "category": "other",
+            "tokens": 8,
+            "usage_percent": 0.000762939453125
+          }
+        ],
+        "warnings": []
+      },
+      "agent_control": "running",
+      "state": "running"
+    }
+  }
 }
