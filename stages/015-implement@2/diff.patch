@@ -1,0 +1,52 @@
+diff --git a/docs/public/administration/deploy-railway.mdx b/docs/public/administration/deploy-railway.mdx
+index 410476b4..b517ddf2 100644
+--- a/docs/public/administration/deploy-railway.mdx
++++ b/docs/public/administration/deploy-railway.mdx
+@@ -41,7 +41,7 @@ Add variables in **Service → Variables** as needed. The [Server Configuration]
+ | `SESSION_SECRET` | 64-character hex string; required when the web UI is enabled |
+ | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | Optional static S3 object-store credentials |
+ 
+-Do not put optional integration secrets in Railway variables for server runtime. After the server is running, add LLM provider keys, Slack, Daytona, Brave Search, Venice Search, `SEARXNG_API_KEY`, `GITHUB_TOKEN`, and GitHub App secrets to the server vault with `fabro secret set`, `fabro provider login`, or `fabro install`. `SEARXNG_URL` is not a secret — set it in Railway variables (or `server.env`) so the server process can reach your SearXNG instance.
++Do not put optional integration secrets in Railway variables for server runtime. After the server is running, add LLM provider keys, Slack, Daytona, Brave Search, Venice Search, `SEARXNG_API_KEY`, `GITHUB_TOKEN`, and GitHub App secrets to the server vault with `fabro secret set`, `fabro provider login`, or `fabro install`. `SEARXNG_URL` is not a secret — set it in Railway variables so the server process can reach your SearXNG instance. Railway injects variables into the container's process environment; `server.env` inside `/storage` is not consulted for it.
+ 
+ No `.env` file is auto-loaded inside the container; bootstrap variables come from Railway's environment.
+ 
+diff --git a/docs/public/administration/security.mdx b/docs/public/administration/security.mdx
+index 9d24bd68..f9d80247 100644
+--- a/docs/public/administration/security.mdx
++++ b/docs/public/administration/security.mdx
+@@ -38,7 +38,7 @@ Fabro is single-tenant software designed for small, trusted teams. The following
+ ### Secrets
+ 
+ - **Keep API keys out of sandboxes.** The local sandbox strips environment variables ending in `_API_KEY`, `_SECRET`, `_TOKEN`, `_PASSWORD`, or `_CREDENTIAL`, but Docker and Daytona sandboxes provide stronger isolation — only explicitly configured variables are passed through.
+-- **Use the server vault for optional integration credentials.** For server-backed workflows, persist LLM provider keys, Slack, Daytona, Brave Search, Venice Search, `SEARXNG_API_KEY`, GitHub token, and GitHub App secrets with `fabro provider login`, `fabro secret set`, or `fabro install`. Process env and `server.env` are reserved for bootstrap secrets such as `SESSION_SECRET`, `FABRO_DEV_TOKEN`, and object-store credentials, plus non-secret endpoint config such as `SEARXNG_URL`. Do not commit secrets to version control.
++- **Use the server vault for optional integration credentials.** For server-backed workflows, persist LLM provider keys, Slack, Daytona, Brave Search, Venice Search, `SEARXNG_API_KEY`, GitHub token, and GitHub App secrets with `fabro provider login`, `fabro secret set`, or `fabro install`. Process env and `server.env` are reserved for bootstrap secrets such as `SESSION_SECRET`, `FABRO_DEV_TOKEN`, and object-store credentials, plus process-env endpoint config such as `SEARXNG_URL`. Do not commit secrets to version control.
+ - **Rotate the session secret.** The `SESSION_SECRET` environment variable encrypts web app sessions. Rotate it periodically and use a strong random value.
+ 
+ ### Execution
+diff --git a/docs/public/administration/server-configuration.mdx b/docs/public/administration/server-configuration.mdx
+index e42de5bf..be98cafd 100644
+--- a/docs/public/administration/server-configuration.mdx
++++ b/docs/public/administration/server-configuration.mdx
+@@ -369,7 +369,7 @@ Fabro splits server-runtime secrets into two scopes:
+ - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` when a manual config uses
+   static S3 object-store credentials
+ 
+-`server.env` is not used for Slack, Daytona, Brave Search, Venice Search, `SEARXNG_API_KEY`, LLM provider keys, `GITHUB_TOKEN`, or GitHub App private key/client secret/webhook secret. Configure those optional integrations with `fabro secret set`, `fabro provider login`, or `fabro install`. `SEARXNG_URL` is an exception by design: it is non-secret endpoint config read from the server process env (or `server.env`) and forwarded to workflow workers.
++`server.env` is not used for Slack, Daytona, Brave Search, Venice Search, `SEARXNG_API_KEY`, LLM provider keys, `GITHUB_TOKEN`, or GitHub App private key/client secret/webhook secret. Configure those optional integrations with `fabro secret set`, `fabro provider login`, or `fabro install`. `SEARXNG_URL` is an exception by design: it is non-secret endpoint config read from the server process env (never from `server.env`) and forwarded to workflow workers.
+ 
+ During startup, Fabro temporarily migrates recognized legacy optional integration secrets from process env or `server.env` into the vault. When a matching `server.env` entry can be safely removed, Fabro writes a hidden backup beside `server.env` first. Process env values cannot be cleaned up automatically, so remove those from your deployment environment after the vault contains the secret.
+ 
+diff --git a/docs/public/integrations/searxng-search.mdx b/docs/public/integrations/searxng-search.mdx
+index 4adeea0c..96422909 100644
+--- a/docs/public/integrations/searxng-search.mdx
++++ b/docs/public/integrations/searxng-search.mdx
+@@ -39,7 +39,7 @@ The `json` entry in `search.formats` is required — without it SearXNG answers
+ export SEARXNG_URL=http://searxng.internal:8080
+ ```
+ 
+-`SEARXNG_URL` is ordinary configuration, not a secret: the Fabro server reads it from its own process environment (or `server.env`), and it is forwarded to workflow workers.
++`SEARXNG_URL` is ordinary configuration, not a secret: the Fabro server reads it from its own process environment — never from `server.env` — and forwards it to workflow workers. Get it into the server process by exporting it before starting `fabro serve`, a systemd `Environment=` line, or a line in `.env` when you deploy with the packaged Docker Compose setup (its `env_file` entry loads `.env` into the container's process environment).
+ 
+ 3. Optionally store a bearer token if your instance sits behind an authenticating proxy:
+ 
