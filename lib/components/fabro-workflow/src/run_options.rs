@@ -6,6 +6,7 @@ use fabro_types::{ForkSourceRef, GitContext, RunId, WorkflowSettings};
 use tokio_util::sync::CancellationToken;
 
 use crate::git::{GitAuthor, git_author_from_settings};
+use crate::pipeline::types::ForgejoRunCreds;
 
 /// Git checkpoint options for a workflow run.
 #[derive(Clone)]
@@ -32,6 +33,9 @@ pub struct RunOptions {
     pub workflow_slug:    Option<String>,
     /// GitHub credentials for pushing metadata branches to origin.
     pub github_app:       Option<fabro_github::GitHubCredentials>,
+    /// Forgejo instance credentials for the run origin; `None` when no
+    /// Forgejo instance is configured. Static PAT — no token source needed.
+    pub forgejo:          Option<ForgejoRunCreds>,
     /// Submitter-side git context captured before the run was created.
     pub pre_run_git:      Option<GitContext>,
     /// Source checkpoint ref used by fork/rewind-created runs.

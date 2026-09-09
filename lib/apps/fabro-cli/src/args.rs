@@ -1397,6 +1397,7 @@ impl Commands {
             Self::Install { command, .. } => match command {
                 None => "install",
                 Some(InstallCommand::Github(_)) => "install github",
+                Some(InstallCommand::Forgejo(_)) => "install forgejo",
             },
             Self::Uninstall(_) => "uninstall",
             Self::Auth(ns) => match &ns.command {
@@ -1710,6 +1711,16 @@ pub(crate) enum InstallGitHubStrategyArg {
 pub(crate) enum InstallCommand {
     /// Configure GitHub integration (token or GitHub App)
     Github(InstallGithubArgs),
+    /// Configure Forgejo integration (single instance, API token)
+    Forgejo(InstallForgejoArgs),
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub(crate) struct InstallForgejoArgs {
+    /// Forgejo instance base URL, e.g. https://forgejo.example.com
+    /// (requires --non-interactive; interactive install prompts instead)
+    #[arg(long)]
+    pub(crate) url: Option<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]

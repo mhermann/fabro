@@ -29,5 +29,6 @@ pub use start::{StartServices, Started, start};
 pub use timeline::{ForkTarget, RunTimeline, TimelineEntry, build_timeline, timeline};
 pub use validate::{ValidateInput, validate, validate_with_catalog, validate_with_ready_providers};
 
+pub use crate::pipeline::types::ForgejoRunCreds;
 pub use crate::pipeline::{LlmSpec, SandboxEnvSpec};
 pub use crate::transforms::RenderMode;

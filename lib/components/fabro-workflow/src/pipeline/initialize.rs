@@ -29,6 +29,7 @@ use crate::handler::llm::{AgentAcpBackend, AgentApiBackend, BackendRouter, routi
 use crate::handler::{HandlerRegistry, default_registry};
 #[cfg(test)]
 use crate::model_fallback::ModelFallbackPolicy;
+use crate::pipeline::types::ForgejoRunCreds;
 use crate::run_metadata::{RunMetadataRuntime, build_metadata_writer, metadata_branch_name};
 use crate::run_options::{GitCheckpointOptions, RunOptions};
 use crate::sandbox_git_runtime::SandboxGitRuntime;
@@ -95,8 +96,23 @@ async fn configure_sandbox_git_identity(
 fn build_sandbox_env(
     spec: &SandboxEnvSpec,
     github_app: Option<&fabro_github::GitHubCredentials>,
+    forgejo: Option<&ForgejoRunCreds>,
 ) -> Result<BuiltSandboxEnv, Error> {
     let mut env = spec.toml_env.clone();
+
+    // A Forgejo run origin gets its instance credential injected as a plain
+    // env var (static PAT, no minting) plus a host-scoped git credential
+    // helper, mirroring the GitHub bridge shape.
+    if let Some(creds) = forgejo {
+        env.insert(EnvVars::FORGEJO_TOKEN.to_string(), creds.token.clone());
+        if spec
+            .origin_url
+            .as_deref()
+            .is_some_and(|origin| fabro_types::is_forgejo_origin(origin, &creds.base_url))
+        {
+            git_bridge::merge_forgejo_bridge_env(&mut env, &creds.base_url)?;
+        }
+    }
 
     let no_token = |env| BuiltSandboxEnv {
         env,
@@ -520,6 +536,7 @@ pub async fn initialize(
     let built_env = build_sandbox_env(
         &options.sandbox_env,
         options.run_options.github_app.as_ref(),
+        options.run_options.forgejo.as_ref(),
     )?;
     resolve_declared_repository_token(&built_env).await?;
     let BuiltSandboxEnv {
@@ -890,6 +907,7 @@ mod tests {
             labels:           HashMap::new(),
             workflow_slug:    None,
             github_app:       None,
+            forgejo:          None,
             pre_run_git:      None,
             fork_source_ref:  None,
             base_branch:      None,
@@ -1676,7 +1694,7 @@ mod tests {
                 Some("https://github.com/fabro-sh/fabro"),
                 Some(integration(&["fabro-sh/keystone"])),
             );
-            let Err(err) = build_sandbox_env(&spec, None) else {
+            let Err(err) = build_sandbox_env(&spec, None, None) else {
                 panic!("declared additional repositories without credentials must fail");
             };
             assert!(
@@ -1689,7 +1707,7 @@ mod tests {
         fn declared_additional_repositories_require_an_origin() {
             let spec = spec(None, Some(integration(&["fabro-sh/keystone"])));
             let creds = GitHubCredentials::Pat("ghp_x".to_string());
-            let Err(err) = build_sandbox_env(&spec, Some(&creds)) else {
+            let Err(err) = build_sandbox_env(&spec, Some(&creds), None) else {
                 panic!("declared additional repositories without an origin must fail");
             };
             assert!(
@@ -1705,7 +1723,7 @@ mod tests {
                 Some(integration(&["fabro-sh/keystone"])),
             );
             let creds = GitHubCredentials::Pat("ghp_x".to_string());
-            let built = build_sandbox_env(&spec, Some(&creds)).unwrap();
+            let built = build_sandbox_env(&spec, Some(&creds), None).unwrap();
 
             assert!(built.github_token.is_some());
             let access = built.github_access.expect("access should be constructed");
@@ -1733,7 +1751,7 @@ mod tests {
                 Some("https://github.com/fabro-sh/fabro"),
                 Some(integration(&[])),
             );
-            let built = build_sandbox_env(&no_creds, None).unwrap();
+            let built = build_sandbox_env(&no_creds, None, None).unwrap();
             assert!(built.github_token.is_none());
             assert!(!built.env.contains_key("GIT_CONFIG_COUNT"));
 
@@ -1744,7 +1762,7 @@ mod tests {
                 slug:            None,
             });
             let no_origin = spec(None, Some(integration(&[])));
-            let built = build_sandbox_env(&no_origin, Some(&creds)).unwrap();
+            let built = build_sandbox_env(&no_origin, Some(&creds), None).unwrap();
             assert!(built.github_token.is_none());
             assert!(built.github_access.is_none());
         }

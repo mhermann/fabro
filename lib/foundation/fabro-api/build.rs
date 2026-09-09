@@ -333,6 +333,11 @@ fn main() {
             &[],
         ),
         (
+            "ForgejoIntegrationSettings",
+            "fabro_types::settings::server::ForgejoIntegrationSettings",
+            &[],
+        ),
+        (
             "SlackIntegrationSettings",
             "fabro_types::settings::server::SlackIntegrationSettings",
             &[],

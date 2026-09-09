@@ -15,7 +15,7 @@ use tokio::time;
 use tracing::{Instrument as _, info_span, warn};
 
 use super::handler::pull_requests::{
-    RunPrInputs, load_server_github_credentials, server_github_context,
+    RunPrInputs, load_server_github_credentials, server_forgejo_parts, server_github_context,
 };
 use super::{AppState, pull_request, workflow_event};
 
@@ -170,22 +170,49 @@ async fn attempt_pull_request_creation(
     run_state: &fabro_store::RunProjection,
     creation: &PullRequestCreation,
 ) -> anyhow::Result<Result<(), String>> {
-    let inputs = match RunPrInputs::extract(run_state, creation.force) {
+    let forgejo_base_url = state.forgejo_base_url();
+    let inputs = match RunPrInputs::extract(run_state, creation.force, forgejo_base_url.as_deref())
+    {
         Ok(inputs) => inputs,
         Err(err) => return Ok(Err(err.detail().to_string())),
     };
-    let creds = match load_server_github_credentials(state).await {
-        Ok(creds) => creds,
-        Err(err) => return Ok(Err(err.detail().to_string())),
+    // Select the remote by origin, mirroring the workflow publish path: a
+    // Forgejo origin publishes through the configured instance. GitHub
+    // credentials load only when the origin is not a Forgejo origin, and the
+    // `github_creds` binding outlives the context that borrows it.
+    let forgejo_parts = match &forgejo_base_url {
+        Some(base_url) if fabro_types::is_forgejo_origin(&inputs.normalized_origin, base_url) => {
+            match server_forgejo_parts(state, base_url).await {
+                Ok(parts) => Some(parts),
+                Err(err) => return Ok(Err(err.detail().to_string())),
+            }
+        }
+        _ => None,
     };
-    let github = match server_github_context(state, &creds) {
-        Ok(github) => github,
-        Err(err) => return Ok(Err(err.detail().to_string())),
+    let github_creds = if forgejo_parts.is_some() {
+        None
+    } else {
+        match load_server_github_credentials(state).await {
+            Ok(creds) => Some(creds),
+            Err(err) => return Ok(Err(err.detail().to_string())),
+        }
+    };
+    let scm = if let Some(parts) = &forgejo_parts {
+        pull_request::PullRequestRemote::Forgejo(parts.context())
+    } else {
+        let creds = github_creds
+            .as_ref()
+            .expect("GitHub credentials load above");
+        let github = match server_github_context(state, creds) {
+            Ok(github) => github,
+            Err(err) => return Ok(Err(err.detail().to_string())),
+        };
+        pull_request::PullRequestRemote::Github(github)
     };
     let catalog = state.catalog();
     let run_store_handle = run_store.clone().into();
     let request = pull_request::OpenPullRequestRequest {
-        github,
+        scm,
         origin_url: &inputs.normalized_origin,
         base_branch: inputs.base_branch,
         head_branch: inputs.run_branch,

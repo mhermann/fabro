@@ -114,4 +114,32 @@ describe("SettingsIntegrations route", () => {
     expect(text).toContain("Missing credentials");
     expect(text).toContain("missing: SLACK_APP_TOKEN, SLACK_BOT_TOKEN");
   });
+
+  test("renders the Forgejo instance row when the server reports it", () => {
+    systemIntegrations = sampleIntegrations();
+    systemIntegrations.data.splice(1, 0,
+      sampleStatus({
+        provider:   "forgejo",
+        status:     "configured",
+        connection: null,
+        metadata:   { url: "https://forgejo.example.com" },
+      }),
+    );
+
+    const renderer = renderSettingsIntegrations();
+    const text = textContent(renderer.toJSON());
+
+    expect(text).toContain("Forgejo");
+    expect(text).toContain("instance: https://forgejo.example.com");
+    expect(text).toContain("Configured");
+  });
+
+  test("omits the Forgejo row for older servers without a forgejo entry", () => {
+    systemIntegrations = sampleIntegrations();
+
+    const renderer = renderSettingsIntegrations();
+    const text = textContent(renderer.toJSON());
+
+    expect(text).not.toContain("Forgejo");
+  });
 });

@@ -159,6 +159,13 @@ draft = true
     Ok(created)
 }
 
+/// Which server repo-check endpoint the detected remote should probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Provider {
+    Github,
+    Forgejo,
+}
+
 async fn check_github_app_installation(target: &ServerTargetArgs, base_ctx: &CommandContext) {
     let printer = base_ctx.printer();
     // Get the git remote origin URL
@@ -192,10 +199,27 @@ async fn check_github_app_installation(target: &ServerTargetArgs, base_ctx: &Com
         Err(_) => return,
     };
 
-    // Convert SSH URL to HTTPS and parse owner/repo
+    // Classify the remote: a Forgejo instance remote probes the forgejo
+    // check endpoint; a github.com remote keeps the GitHub App flow; any
+    // other remote is skipped silently.
+    let forgejo_base = fabro_forgejo::forgejo_base_url(None);
+    let is_forgejo = forgejo_base
+        .as_deref()
+        .is_some_and(|base| fabro_types::is_forgejo_origin(&remote_url, base));
     let https_url = fabro_github::ssh_url_to_https(&remote_url);
-    let Ok((owner, repo)) = fabro_github::parse_github_owner_repo(&https_url) else {
-        return; // Not a GitHub repo — skip silently
+    let provider_repo = if is_forgejo {
+        fabro_forgejo::parse_forgejo_owner_repo(
+            &fabro_forgejo::normalize_repo_origin_url(&https_url),
+            forgejo_base.as_deref().unwrap_or_default(),
+        )
+        .map(|(owner, repo)| (Provider::Forgejo, owner, repo))
+    } else {
+        fabro_github::parse_github_owner_repo(&https_url)
+            .map(|(owner, repo)| (Provider::Github, owner, repo))
+    };
+    // Not a supported remote — skip silently.
+    let Ok((provider, owner, repo)) = provider_repo else {
+        return;
     };
 
     let ctx = match base_ctx.with_target(target) {
@@ -220,7 +244,10 @@ async fn check_github_app_installation(target: &ServerTargetArgs, base_ctx: &Com
         }
     };
 
-    let check = match server.get_github_repo(&owner, &repo).await {
+    let check = match match provider {
+        Provider::Forgejo => server.get_forgejo_repo(&owner, &repo).await,
+        Provider::Github => server.get_github_repo(&owner, &repo).await,
+    } {
         Ok(response) => response,
         Err(err) => {
             fabro_util::printerr!(printer, "\n  Warning: could not check GitHub access: {err}");
@@ -228,11 +255,15 @@ async fn check_github_app_installation(target: &ServerTargetArgs, base_ctx: &Com
         }
     };
 
+    let provider_label = match provider {
+        Provider::Github => "GitHub",
+        Provider::Forgejo => "Forgejo",
+    };
     if check.accessible {
         let green = console::Style::new().green();
         fabro_util::printerr!(
             printer,
-            "\n  {} GitHub access is configured for {owner}/{repo}",
+            "\n  {} {provider_label} access is configured for {owner}/{repo}",
             green.apply_to("✔")
         );
         return;
@@ -241,11 +272,16 @@ async fn check_github_app_installation(target: &ServerTargetArgs, base_ctx: &Com
     let yellow = console::Style::new().yellow();
     fabro_util::printerr!(
         printer,
-        "\n  {} GitHub access is not available for {owner}/{repo}",
+        "\n  {} {provider_label} access is not available for {owner}/{repo}",
         yellow.apply_to("!")
     );
     if let Some(url) = &check.install_url {
         fabro_util::printerr!(printer, "  Install at: {url}");
+    } else if provider == Provider::Forgejo {
+        fabro_util::printerr!(
+            printer,
+            "  Run `fabro install forgejo` (or set FORGEJO_TOKEN), then try again."
+        );
     } else {
         fabro_util::printerr!(
             printer,
@@ -261,17 +297,23 @@ async fn check_github_app_installation(target: &ServerTargetArgs, base_ctx: &Com
         })
         .await;
 
-        match server.get_github_repo(&owner, &repo).await {
+        match match provider {
+            Provider::Forgejo => server.get_forgejo_repo(&owner, &repo).await,
+            Provider::Github => server.get_github_repo(&owner, &repo).await,
+        } {
             Ok(response) => {
                 if response.accessible {
                     let green = console::Style::new().green();
                     fabro_util::printerr!(
                         printer,
-                        "  {} GitHub access is configured for {owner}/{repo}",
+                        "  {} {provider_label} access is configured for {owner}/{repo}",
                         green.apply_to("✔")
                     );
                 } else {
-                    fabro_util::printerr!(printer, "  GitHub access is still unavailable.");
+                    fabro_util::printerr!(
+                        printer,
+                        "  {provider_label} access is still unavailable."
+                    );
                     if let Some(url) = &check.install_url {
                         fabro_util::printerr!(printer, "  Install at: {url}");
                     }
@@ -280,7 +322,7 @@ async fn check_github_app_installation(target: &ServerTargetArgs, base_ctx: &Com
             Err(err) => {
                 fabro_util::printerr!(
                     printer,
-                    "  Warning: could not re-check GitHub access: {err}"
+                    "  Warning: could not re-check {provider_label} access: {err}"
                 );
             }
         }

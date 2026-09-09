@@ -25,6 +25,7 @@ export interface RepositoryRef {
 
 export const RepositoryRefProviderEnum = {
     GITHUB: 'github',
+    FORGEJO: 'forgejo',
     GIT: 'git',
     UNKNOWN: 'unknown'
 } as const;

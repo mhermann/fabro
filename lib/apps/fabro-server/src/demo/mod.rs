@@ -656,6 +656,26 @@ pub(crate) async fn get_github_repo(
         .into_response()
 }
 
+pub(crate) async fn get_forgejo_repo(
+    _auth: RequiredUser,
+    State(_state): State<Arc<AppState>>,
+    Path((owner, name)): Path<(String, String)>,
+) -> Response {
+    (
+        StatusCode::OK,
+        Json(json!({
+            "owner": owner,
+            "name": name,
+            "accessible": false,
+            "default_branch": null,
+            "private": null,
+            "permissions": null,
+            "install_url": null
+        })),
+    )
+        .into_response()
+}
+
 pub(crate) async fn run_diagnostics(
     _auth: RequiredUser,
     State(_state): State<Arc<AppState>>,
@@ -903,6 +923,17 @@ pub(crate) async fn get_system_integrations(
                     "metadata": {
                         "strategy": "app",
                         "slug": "fabro-demo"
+                    }
+                },
+                {
+                    "provider": "forgejo",
+                    "enabled": true,
+                    "configured": false,
+                    "status": "missing_credentials",
+                    "missing_credentials": ["FORGEJO_TOKEN"],
+                    "connection": null,
+                    "metadata": {
+                        "url": "https://forgejo.example.com"
                     }
                 },
                 {

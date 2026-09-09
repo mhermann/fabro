@@ -12141,6 +12141,7 @@ async fn merge_run_pull_request_uses_stored_link_coordinates() {
         owner:  "acme".to_string(),
         repo:   "widgets".to_string(),
         number: 42,
+        forge:  None,
     })
     .await;
 

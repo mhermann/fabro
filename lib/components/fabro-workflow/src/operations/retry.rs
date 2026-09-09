@@ -353,6 +353,7 @@ mod tests {
                 owner:  "fabro-sh".to_string(),
                 repo:   "fabro".to_string(),
                 number: 42,
+                forge:  None,
             },
         })
         .await

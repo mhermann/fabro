@@ -214,7 +214,8 @@ pub fn build_run_manifest(input: ManifestBuildInput) -> Result<BuiltManifest> {
         &working_directory,
     )?;
 
-    let configured_repo_origin_url = configured_repo_origin_url(&workflow_settings);
+    let configured_repo_origin_url = configured_repo_origin_url(&workflow_settings)
+        .context("failed to resolve the run.scm repository origin")?;
     let git = build_legacy_git_context(&working_directory, configured_repo_origin_url.as_deref());
     let args = input.args.filter(|args| !manifest_args_is_empty(args));
 
@@ -431,23 +432,54 @@ fn github_run_target(origin_url: &str, branch: &str, sha: Option<String>) -> Opt
     Some(target)
 }
 
-fn configured_repo_origin_url(settings: &WorkflowSettings) -> Option<String> {
+fn configured_repo_origin_url(settings: &WorkflowSettings) -> anyhow::Result<Option<String>> {
     let scm = &settings.run.scm;
+    // Forgejo runs originate from the single configured instance: the slug is
+    // host-free, so the URL only exists when FORGEJO_URL (or server settings)
+    // name the instance.
+    if scm
+        .provider
+        .as_deref()
+        .is_some_and(|provider| provider.eq_ignore_ascii_case("forgejo"))
+    {
+        let Some(base_url) = fabro_forgejo::forgejo_base_url(None) else {
+            anyhow::bail!(
+                "run.scm.provider = \"forgejo\" requires a configured Forgejo instance URL; \
+                 set server.integrations.forgejo.url or FORGEJO_URL"
+            );
+        };
+        let owner = scm.owner.as_deref().unwrap_or_default();
+        let repository = scm.repository.as_deref().unwrap_or_default();
+        if owner.trim().is_empty() || repository.trim().is_empty() {
+            anyhow::bail!(
+                "run.scm.provider = \"forgejo\" requires run.scm.owner and run.scm.repository"
+            );
+        }
+        let origin = format!("{base_url}/{owner}/{repository}");
+        let normalized = fabro_forgejo::normalize_repo_origin_url(&origin);
+        return Ok((!normalized.is_empty()).then_some(normalized));
+    }
     if !scm
         .provider
         .as_deref()
         .is_none_or(|provider| provider.eq_ignore_ascii_case("github"))
     {
-        return None;
+        return Ok(None);
     }
-    let owner = scm.owner.as_deref()?;
-    let repository = scm.repository.as_deref()?;
+    // `?` on Option: an absent owner or repository keeps the legacy
+    // "no configured origin" behavior.
+    let Some(owner) = scm.owner.as_deref() else {
+        return Ok(None);
+    };
+    let Some(repository) = scm.repository.as_deref() else {
+        return Ok(None);
+    };
     if owner.trim().is_empty() || repository.trim().is_empty() {
-        return None;
+        return Ok(None);
     }
     let origin = format!("https://github.com/{owner}/{repository}");
     let normalized = fabro_github::normalize_repo_origin_url(&origin);
-    (!normalized.is_empty()).then_some(normalized)
+    Ok((!normalized.is_empty()).then_some(normalized))
 }
 
 struct ManifestRepoInfo {
@@ -1678,6 +1710,89 @@ working_dir = "repos/target"
             Some(local_head.trim()),
             "the local branch should be pushed to the bare origin during manifest build",
         );
+    }
+
+    #[test]
+    fn forgejo_scm_origin_builds_from_configured_instance() {
+        let workspace = workspace_with_scm(
+            r#"_version = 1
+
+[run.scm]
+provider = "forgejo"
+owner = "acme"
+repository = "widgets"
+"#,
+        );
+
+        temp_env::with_var("FORGEJO_URL", Some("https://forgejo.example.com/"), || {
+            let built = build_run_manifest(ManifestBuildInput {
+                workflow: PathBuf::from(".fabro/workflows/demo/workflow.toml"),
+                cwd: workspace.clone(),
+                environment_defaults: test_environment_defaults(),
+                ..Default::default()
+            })
+            .unwrap();
+
+            let git = built
+                .manifest
+                .git
+                .expect("manifest git info should be detected");
+            assert_eq!(git.origin_url, "https://forgejo.example.com/acme/widgets");
+        });
+    }
+
+    #[test]
+    fn forgejo_scm_requires_a_configured_instance_url() {
+        let workspace = workspace_with_scm(
+            r#"_version = 1
+
+[run.scm]
+provider = "forgejo"
+owner = "acme"
+repository = "widgets"
+"#,
+        );
+
+        temp_env::with_var_unset("FORGEJO_URL", || {
+            let error = build_run_manifest(ManifestBuildInput {
+                workflow: PathBuf::from(".fabro/workflows/demo/workflow.toml"),
+                cwd: workspace.clone(),
+                environment_defaults: test_environment_defaults(),
+                ..Default::default()
+            })
+            .expect_err("forgejo without an instance URL must not build");
+
+            let rendered = format!("{error:#}");
+            assert!(rendered.contains("forgejo"), "{rendered}");
+            assert!(rendered.contains("FORGEJO_URL"), "{rendered}");
+        });
+    }
+
+    /// A throwaway workspace with a git repo, a workflow, and the given
+    /// project config — the minimum for exercising origin resolution.
+    fn workspace_with_scm(project_config: &str) -> PathBuf {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        init_git_repo(&workspace, "feature", "");
+        let workflow_dir = workspace.join(".fabro/workflows/demo");
+        std::fs::create_dir_all(&workflow_dir).unwrap();
+        std::fs::write(workspace.join(".fabro/project.toml"), project_config).unwrap();
+        std::fs::write(
+            workflow_dir.join("workflow.toml"),
+            "_version = 1\n\n[workflow]\ngraph = \"workflow.fabro\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workflow_dir.join("workflow.fabro"),
+            r"digraph Demo { start [shape=Mdiamond] exit [shape=Msquare] start -> exit }",
+        )
+        .unwrap();
+        // Leak the tempdir so the returned workspace path outlives the
+        // helper; these tests are short-lived and process-exit bounded.
+        let _ = temp.keep();
+        workspace
     }
 
     #[test]

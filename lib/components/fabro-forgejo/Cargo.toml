@@ -1,0 +1,27 @@
+[package]
+name = "fabro-forgejo"
+edition.workspace = true
+version.workspace = true
+publish = false
+license.workspace = true
+description = "Forgejo (single-instance, token-auth) API helpers for Fabro"
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+fabro-http.workspace = true
+fabro-redact.workspace = true
+fabro-static.workspace = true
+fabro-types = { path = "../../foundation/fabro-types" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

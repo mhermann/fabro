@@ -54,6 +54,23 @@ pub fn resolve_run(
                 .to_string(),
         });
     }
+    // Forgejo merge automation is version-dependent on self-hosted instances
+    // and the GitHub auto-merge (GraphQL `node_id`) flow has no Forgejo
+    // equivalent, so the combination is rejected instead of silently skipped.
+    if pull_request.as_ref().is_some_and(|pr| pr.auto_merge)
+        && layer
+            .scm
+            .as_ref()
+            .and_then(|scm| scm.provider.as_deref())
+            .is_some_and(|provider| provider.eq_ignore_ascii_case("forgejo"))
+    {
+        errors.push(ResolveError::Invalid {
+            path:   "run.pull_request.auto_merge".to_string(),
+            reason: "auto_merge is not supported for Forgejo runs; use a webhook-based merge \
+                     automation on the instance or disable auto_merge"
+                .to_string(),
+        });
+    }
 
     super::warn_if_demoted_template("run.working_dir", layer.working_dir.as_deref());
 

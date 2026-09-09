@@ -484,12 +484,28 @@ async fn build_preflight_report(
     };
 
     let daytona_api_key = state.vault_secret(EnvVars::DAYTONA_API_KEY).await?;
+    let forgejo_creds = if sandbox_provider.is_clone_based() {
+        match state.forgejo_credentials().await {
+            Ok(Some((base_url, creds))) => Some(fabro_sandbox::ForgejoSandboxCreds::new(
+                base_url,
+                creds.valid_token().to_string(),
+            )),
+            // A missing token for a configured instance is reported by the
+            // Forgejo check row below, not by failing the whole preflight
+            // run; a non-GitHub origin never reaches a sandbox in that state.
+            Ok(None) | Err(_) => None,
+        }
+    } else {
+        None
+    };
+    let forgejo_origin_check_ok = run_forgejo_origin_check(&mut checks, prepared, state).await;
     let sandbox_ok = run_sandbox_check(
         &mut checks,
         sandbox_provider,
         prepared,
         &resolved_run,
         github_app.clone(),
+        forgejo_creds.clone(),
         daytona_api_key,
     )
     .await;
@@ -499,6 +515,7 @@ async fn build_preflight_report(
         prepared,
         &resolved_run,
         github_app.clone(),
+        forgejo_creds.as_ref(),
     )
     .await;
     let llm_ok = run_llm_check(
@@ -513,8 +530,12 @@ async fn build_preflight_report(
     let github_token_ok =
         run_github_token_check(&mut checks, prepared, &resolved_run, github_app).await;
 
-    let checks_ok =
-        model_fallbacks_ok && sandbox_ok && repository_access_ok && llm_ok && github_token_ok;
+    let checks_ok = model_fallbacks_ok
+        && sandbox_ok
+        && repository_access_ok
+        && forgejo_origin_check_ok
+        && llm_ok
+        && github_token_ok;
 
     Ok((
         CheckReport {
@@ -769,6 +790,7 @@ async fn run_repository_access_check(
     prepared: &PreparedManifest,
     resolved_run: &RunNamespace,
     github_app: Option<fabro_github::GitHubCredentials>,
+    forgejo_creds: Option<&fabro_sandbox::ForgejoSandboxCreds>,
 ) -> bool {
     run_repository_access_check_with(
         checks,
@@ -776,6 +798,7 @@ async fn run_repository_access_check(
         prepared,
         resolved_run,
         github_app,
+        forgejo_creds,
         check_git_remote_ref,
     )
     .await
@@ -787,6 +810,7 @@ async fn run_repository_access_check_with<F, Fut>(
     prepared: &PreparedManifest,
     resolved_run: &RunNamespace,
     github_app: Option<fabro_github::GitHubCredentials>,
+    forgejo_creds: Option<&fabro_sandbox::ForgejoSandboxCreds>,
     check_remote_ref: F,
 ) -> bool
 where
@@ -804,6 +828,13 @@ where
     };
 
     let origin_url = fabro_github::normalize_repo_origin_url(&git.origin_url);
+    // A Forgejo origin is probed through the instance API; the GitHub
+    // ls-remote path below only ever sees github.com origins.
+    if let Some(creds) =
+        forgejo_creds.filter(|creds| fabro_types::is_forgejo_origin(&origin_url, &creds.base_url))
+    {
+        return check_forgejo_remote_ref(checks, &origin_url, &git.branch, creds).await;
+    }
     if let Err(err) = fabro_github::parse_github_owner_repo(&origin_url) {
         checks.push(CheckResult {
             name:        "Repository Access".into(),
@@ -811,7 +842,7 @@ where
             summary:     "failed".into(),
             details:     vec![CheckDetail::new(format!("Origin: {origin_url}"))],
             remediation: Some(format!(
-                "Clone-based sandboxes currently support GitHub repository origins only: {err}"
+                "Clone-based sandboxes support GitHub and configured Forgejo repository origins only: {err}"
             )),
         });
         return false;
@@ -824,6 +855,105 @@ where
     let details = repository_access_details(&request);
 
     match check_remote_ref(request, github_app).await {
+        Ok(()) => {
+            checks.push(CheckResult {
+                name: "Repository Access".into(),
+                status: CheckStatus::Pass,
+                summary: "reachable".into(),
+                details,
+                remediation: None,
+            });
+            true
+        }
+        Err(err) => {
+            checks.push(CheckResult {
+                name: "Repository Access".into(),
+                status: CheckStatus::Error,
+                summary: "failed".into(),
+                details,
+                remediation: Some(format!("Failed to verify repository access: {err}")),
+            });
+            false
+        }
+    }
+}
+
+/// Preflight check for a Forgejo run origin: the instance must be configured
+/// with a usable token, because the origin cannot fall back to GitHub
+/// credentials and public/anonymous clones are not a supported path.
+async fn run_forgejo_origin_check(
+    checks: &mut Vec<CheckResult>,
+    prepared: &PreparedManifest,
+    state: &AppState,
+) -> bool {
+    let Some(git) = prepared.git.as_ref() else {
+        return true;
+    };
+    let Some(base_url) = state.forgejo_base_url() else {
+        return true;
+    };
+    let origin_url = fabro_github::normalize_repo_origin_url(&git.origin_url);
+    if !fabro_types::is_forgejo_origin(&origin_url, &base_url) {
+        return true;
+    }
+
+    match state.forgejo_credentials().await {
+        Ok(Some((_, creds))) => {
+            checks.push(CheckResult {
+                name:        "Forgejo Access".into(),
+                status:      CheckStatus::Pass,
+                summary:     "configured".into(),
+                details:     vec![
+                    CheckDetail::new(format!("Origin: {origin_url}")),
+                    CheckDetail::new(format!("Instance: {base_url}")),
+                ],
+                remediation: None,
+            });
+            let _ = creds;
+            true
+        }
+        Err(err) => {
+            checks.push(CheckResult {
+                name:        "Forgejo Access".into(),
+                status:      CheckStatus::Error,
+                summary:     "failed".into(),
+                details:     vec![
+                    CheckDetail::new(format!("Origin: {origin_url}")),
+                    CheckDetail::new(format!("Instance: {base_url}")),
+                ],
+                remediation: Some(err.to_string()),
+            });
+            false
+        }
+        Ok(None) => false,
+    }
+}
+
+/// Probe a Forgejo origin's admitted branch through the instance API rather
+/// than `git ls-remote`: the token is the only supported credential, and the
+/// API probe reports authorization and missing-branch failures distinctly.
+async fn check_forgejo_remote_ref(
+    checks: &mut Vec<CheckResult>,
+    origin_url: &str,
+    branch: &str,
+    creds: &fabro_sandbox::ForgejoSandboxCreds,
+) -> bool {
+    let details = vec![CheckDetail::new(format!("Origin: {origin_url}"))];
+    let forgejo_credentials =
+        fabro_forgejo::ForgejoCredentials::Pat(creds.token.expose().to_string());
+    let context = fabro_forgejo::ForgejoContext::new(&forgejo_credentials, &creds.base_url);
+    let probe = async {
+        let (owner, repo) = fabro_forgejo::parse_forgejo_owner_repo(origin_url, &creds.base_url)
+            .map_err(|err| err.to_string())?;
+        match fabro_forgejo::branch_head_sha(&context, &owner, &repo, branch).await {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(format!("branch '{branch}' does not exist on the instance")),
+            Err(err) => Err(format!("{err:#}")),
+        }
+    }
+    .await;
+
+    match probe {
         Ok(()) => {
             checks.push(CheckResult {
                 name: "Repository Access".into(),
@@ -914,6 +1044,7 @@ fn preflight_sandbox_spec(
     prepared: &PreparedManifest,
     resolved_run: &RunNamespace,
     github_app: Option<fabro_github::GitHubCredentials>,
+    forgejo_creds: Option<fabro_sandbox::ForgejoSandboxCreds>,
     daytona_api_key: Option<String>,
 ) -> std::result::Result<SandboxSpec, fabro_sandbox::Error> {
     let clone_origin_url = prepared
@@ -936,6 +1067,7 @@ fn preflight_sandbox_spec(
             SandboxSpec::Docker {
                 config,
                 github_app,
+                forgejo: forgejo_creds,
                 run_id: None,
                 clone_origin_url,
                 clone_branch,
@@ -949,6 +1081,7 @@ fn preflight_sandbox_spec(
             SandboxSpec::Daytona {
                 config: Box::new(config),
                 github_app,
+                forgejo: forgejo_creds,
                 run_id: None,
                 clone_origin_url,
                 clone_branch,
@@ -966,6 +1099,7 @@ async fn run_sandbox_check(
     prepared: &PreparedManifest,
     resolved_run: &RunNamespace,
     github_app: Option<fabro_github::GitHubCredentials>,
+    forgejo_creds: Option<fabro_sandbox::ForgejoSandboxCreds>,
     daytona_api_key: Option<String>,
 ) -> bool {
     let spec = match preflight_sandbox_spec(
@@ -973,6 +1107,7 @@ async fn run_sandbox_check(
         prepared,
         resolved_run,
         github_app.clone(),
+        forgejo_creds,
         daytona_api_key,
     ) {
         Ok(spec) => spec,
@@ -2100,6 +2235,7 @@ provider = "local"
             &prepared,
             &resolved,
             None,
+            None,
             move |request, _github_app| {
                 calls_for_check.lock().unwrap().push(request);
                 async { Ok(()) }
@@ -2129,6 +2265,7 @@ provider = "local"
             &prepared,
             &resolved,
             None,
+            None,
             move |request, _github_app| {
                 calls_for_check.lock().unwrap().push(request);
                 async { Ok(()) }
@@ -2146,7 +2283,7 @@ provider = "local"
                 .remediation
                 .as_deref()
                 .unwrap_or_default()
-                .contains("GitHub repository origins only")
+                .contains("GitHub and configured Forgejo repository origins only")
         );
     }
 
@@ -2169,6 +2306,7 @@ provider = "local"
             SandboxProviderKind::Docker,
             &prepared,
             &resolved,
+            None,
             None,
             move |request, _github_app| {
                 calls_for_check.lock().unwrap().push(request);
@@ -2202,6 +2340,7 @@ provider = "local"
             &prepared,
             &resolved,
             None,
+            None,
             |_request, _github_app| async { Err("remote branch not found".to_string()) },
         )
         .await;
@@ -2231,6 +2370,7 @@ provider = "local"
             SandboxProviderKind::Docker,
             &prepared,
             &resolved,
+            None,
             None,
             None,
         );

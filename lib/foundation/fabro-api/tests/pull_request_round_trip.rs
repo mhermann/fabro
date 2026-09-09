@@ -104,6 +104,40 @@ fn pull_request_link_json_matches_openapi_shape() {
 }
 
 #[test]
+fn pull_request_link_legacy_json_stays_byte_identical_without_forge_key() {
+    // Stored runs from before Forgejo support serialize links without a
+    // `forge` key; those payloads must keep deserializing and re-serializing
+    // unchanged.
+    let legacy = json!({
+        "owner": "fabro-sh",
+        "repo": "fabro",
+        "number": 123,
+        "html_url": "https://github.com/fabro-sh/fabro/pull/123"
+    });
+
+    let link: PullRequestLink =
+        serde_json::from_value(legacy.clone()).expect("legacy link should deserialize");
+    assert!(link.forge.is_none());
+    assert_eq!(serde_json::to_value(link).unwrap(), legacy);
+}
+
+#[test]
+fn pull_request_link_forge_json_matches_openapi_shape() {
+    let fixture = json!({
+        "owner": "acme",
+        "repo": "widgets",
+        "number": 12,
+        "html_url": "https://forgejo.example.com/acme/widgets/pulls/12",
+        "forge": { "base_url": "https://forgejo.example.com" }
+    });
+
+    let domain_record: PullRequestLink =
+        serde_json::from_value(fixture.clone()).expect("forge link should deserialize");
+
+    assert_eq!(serde_json::to_value(domain_record).unwrap(), fixture);
+}
+
+#[test]
 fn pull_request_response_json_matches_openapi_shape() {
     let fixture = json!({
         "data": {

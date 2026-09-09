@@ -2440,6 +2440,7 @@ dependencies = [
  "fabro-config",
  "fabro-dump",
  "fabro-environment",
+ "fabro-forgejo",
  "fabro-github",
  "fabro-graphviz",
  "fabro-hooks",
@@ -2569,6 +2570,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ulid",
+ "url",
 ]
 
 [[package]]
@@ -2652,6 +2654,22 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "toml_edit",
+ "tracing",
+]
+
+[[package]]
+name = "fabro-forgejo"
+version = "0.345.0-nightly.0"
+dependencies = [
+ "anyhow",
+ "fabro-http",
+ "fabro-redact",
+ "fabro-static",
+ "fabro-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
@@ -2822,6 +2840,7 @@ dependencies = [
  "anyhow",
  "fabro-api",
  "fabro-config",
+ "fabro-forgejo",
  "fabro-github",
  "fabro-graphviz",
  "fabro-template",
@@ -2989,6 +3008,7 @@ dependencies = [
  "daytona-api-client",
  "daytona-sdk",
  "fabro-config",
+ "fabro-forgejo",
  "fabro-github",
  "fabro-http",
  "fabro-proc",
@@ -3046,6 +3066,7 @@ dependencies = [
  "fabro-config",
  "fabro-db",
  "fabro-environment",
+ "fabro-forgejo",
  "fabro-github",
  "fabro-graphviz",
  "fabro-hooks",
@@ -3396,6 +3417,7 @@ dependencies = [
  "fabro-core",
  "fabro-dump",
  "fabro-environment",
+ "fabro-forgejo",
  "fabro-github",
  "fabro-graphviz",
  "fabro-hooks",

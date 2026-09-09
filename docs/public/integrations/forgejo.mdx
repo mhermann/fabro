@@ -1,0 +1,95 @@
+---
+title: "Forgejo"
+description: "Integrate Fabro with a Forgejo instance for repository access and pull request automation"
+---
+
+Fabro supports [Forgejo](https://forgejo.org) as a second git forge alongside GitHub. Forgejo is self-hostable, so the integration is built around a **single configured instance**: one base URL and one API token. ([Codeberg](https://codeberg.org) runs Forgejo, but the integration targets any instance you control.)
+
+## Scope compared to GitHub
+
+| Capability | Forgejo | GitHub |
+|---|---|---|
+| Clone from instance origins (Docker/Daytona) | Yes | Yes |
+| Push run branches and checkpoints | Yes | Yes |
+| Auto-PR (`run.pull_request`) | Yes | Yes |
+| API-token auth | Yes | Yes (`token` strategy) |
+| GitHub App / installation tokens | No | Yes (`app` strategy) |
+| Browser OAuth sign-in | No | Yes |
+| Webhooks | Not yet | Yes |
+| `run.pull_request.auto_merge` | No (rejected at config resolution) | Yes |
+| `run.integrations.github.additional_repositories` | No | Yes |
+| Fork runs | No | Yes |
+
+The Forgejo API is the integration contract. Gitea instances usually work because Forgejo is a Gitea fork, but Gitea compatibility is not tested or promised.
+
+## Setup
+
+### Prerequisites
+
+- Admin (or a user with repo-creation rights) access to a Forgejo instance
+- Shell access to the host that runs the Fabro server
+
+### Create an API token
+
+In the instance web UI, go to **Settings → Applications → Generate New Token** and grant at least:
+
+| Scope | Purpose |
+|---|---|
+| `repository` (read + write) | Clone repos, push run branches and checkpoints |
+| `write:issue` | Open pull requests (Forgejo models PRs on issues) |
+| `read:user` | Lets `fabro install forgejo` verify the token |
+
+### Configure Fabro with `fabro install`
+
+Run the installer on the same machine that will run the Fabro server:
+
+```bash
+fabro install forgejo
+```
+
+The installer prompts for the instance URL and the token (hidden input), verifies the token with `GET /api/v1/user`, then writes:
+
+- `[server.integrations.forgejo] enabled = true, url = "<your instance>"` to `settings.toml`
+- the token to the vault as `FORGEJO_TOKEN`
+
+For scripted installs, pass the URL and export the token:
+
+```bash
+export FORGEJO_TOKEN="..."
+fabro install forgejo --url https://forgejo.example.com --non-interactive
+```
+
+## Run configuration
+
+Forgejo runs declare their origin through `run.scm` instead of a `github.com` URL:
+
+```toml
+[run.scm]
+provider = "forgejo"
+owner = "acme"
+repository = "widgets"
+```
+
+The instance URL resolves from `server.integrations.forgejo.url` (or the `FORGEJO_URL` environment variable as a fallback); the slug itself stays host-free. With this configured, `fabro run` builds the origin from the configured instance, and clone-based sandboxes clone from it with the stored `FORGEJO_TOKEN`.
+
+## Sandboxes and tokens
+
+On clone-based providers (Docker default, Daytona), Forgejo runs get:
+
+- the origin cloned from the instance, with branch/tag/exact-commit checkout semantics identical to GitHub runs;
+- `FORGEJO_TOKEN` injected into the sandbox environment;
+- a host-scoped git credential helper that reads `$FORGEJO_TOKEN` at git invocation time, so pushes and checkpoints work from inside the sandbox without the token landing in git config or argv.
+
+The token never overwrites `GITHUB_TOKEN`; GitHub runs and Forgejo runs each see only their own credentials.
+
+## Pull request automation
+
+`[run.pull_request]` works as documented in [run configuration](/execution/run-configuration#runpull_request), with Forgejo-specific behavior:
+
+- Draft pull requests use the instance `WIP:` title convention (Forgejo has no draft flag), so a draft request prefixes the title with `WIP:` when it is not already a WIP title.
+- Merges map `run.pull_request.merge_strategy` onto Forgejo's `Do` action (`merge`, `squash`, `rebase`).
+- `auto_merge = true` is rejected during config resolution: instance-side auto-merge support is version-dependent and the GitHub GraphQL flow has no Forgejo equivalent.
+
+## Unchanged GitHub paths
+
+Nothing on this page changes GitHub behavior: `github.com` origins, `run.scm.provider = "github"`, GitHub App installs, and webhooks keep working exactly as before. Server-submitted `GitRunTarget` runs still target github.com; Forgejo runs arrive through workflow `run.scm` configuration.

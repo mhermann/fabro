@@ -240,8 +240,9 @@ pub struct ServerLoggingSettings {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerIntegrationsSettings {
-    pub github: GithubIntegrationSettings,
-    pub slack:  SlackIntegrationSettings,
+    pub github:  GithubIntegrationSettings,
+    pub forgejo: ForgejoIntegrationSettings,
+    pub slack:   SlackIntegrationSettings,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,6 +253,15 @@ pub struct GithubIntegrationSettings {
     pub client_id: Option<String>,
     pub slug:      Option<String>,
     pub webhooks:  Option<IntegrationWebhooksSettings>,
+}
+
+/// Forgejo is self-hosted, so the integration carries the instance base URL.
+/// Tokens are stored in the vault under the same key namespace as other
+/// integrations; the settings only describe the instance endpoint.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForgejoIntegrationSettings {
+    pub enabled: bool,
+    pub url:     Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

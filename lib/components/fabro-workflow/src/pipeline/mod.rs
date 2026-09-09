@@ -19,8 +19,8 @@ pub use parse::parse;
 pub(crate) use persist::persist;
 pub use publish::publish;
 pub use pull_request::{
-    AutoMergeOptions, CreatedPullRequest, OpenPullRequestRequest, PrContent, build_pr_content,
-    open_pull_request,
+    AutoMergeOptions, CreatedPullRequest, OpenPullRequestRequest, PrContent, PullRequestRemote,
+    build_pr_content, open_pull_request,
 };
 pub use transform::transform;
 pub use types::{

@@ -154,6 +154,7 @@ models/failure-reason.ts
 models/file-checkpoint.ts
 models/file-diff.ts
 models/folder-run-target.ts
+models/forgejo-integration-settings.ts
 models/fork-request.ts
 models/fork-response.ts
 models/fork-source-ref.ts
@@ -313,6 +314,7 @@ models/pull-request-details-status.ts
 models/pull-request-details-timestamps.ts
 models/pull-request-details-unavailable-reason.ts
 models/pull-request-details.ts
+models/pull-request-link-forge.ts
 models/pull-request-link.ts
 models/pull-request-meta.ts
 models/pull-request-ref.ts

@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use fabro_types::ExecOutputTail;
 
-use super::pull_request::{AutoMergeOptions, OpenPullRequestRequest, open_pull_request};
+use super::pull_request::{
+    AutoMergeOptions, OpenPullRequestRequest, PullRequestRemote, open_pull_request,
+};
 use super::types::{Concluded, PublishOptions, PublishOutcome, Published};
 use crate::error::{Error, FailureCategory, classify_failure_reason};
 use crate::event::Event;
@@ -160,13 +162,39 @@ impl Concluded {
         let base_branch = self.run_options.base_branch.as_deref().ok_or_else(|| {
             self.pull_request_error("pull request creation requires a base branch")
         })?;
-        let credentials = options.github_app.as_ref().ok_or_else(|| {
-            self.pull_request_error("pull request creation requires GitHub credentials")
-        })?;
+        // Select the remote by origin: a Forgejo origin publishes through the
+        // configured instance; everything else is a github.com origin. The
+        // base URLs are hoisted so the borrowed contexts outlive the branch.
+        let forgejo_creds = options
+            .forgejo
+            .as_ref()
+            .filter(|creds| fabro_types::is_forgejo_origin(origin_url, &creds.base_url));
         let github_base_url = fabro_github::github_api_base_url();
+        let forgejo_credentials =
+            forgejo_creds.map(|creds| fabro_forgejo::ForgejoCredentials::Pat(creds.token.clone()));
+        let forgejo_context =
+            forgejo_credentials
+                .as_ref()
+                .zip(forgejo_creds)
+                .map(|(creds, run_creds)| {
+                    fabro_forgejo::ForgejoContext::new(creds, &run_creds.base_url)
+                });
+        let scm = if let Some(forgejo_context) = forgejo_context {
+            PullRequestRemote::Forgejo(forgejo_context)
+        } else {
+            let credentials = options.github_app.as_ref().ok_or_else(|| {
+                self.pull_request_error(
+                    "pull request creation requires GitHub credentials for a GitHub origin",
+                )
+            })?;
+            PullRequestRemote::Github(fabro_github::GitHubContext::new(
+                credentials,
+                &github_base_url,
+            ))
+        };
 
         let created = open_pull_request(OpenPullRequestRequest {
-            github: fabro_github::GitHubContext::new(credentials, &github_base_url),
+            scm,
             origin_url,
             base_branch,
             head_branch: run_branch,

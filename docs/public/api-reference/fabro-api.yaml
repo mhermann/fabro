@@ -5646,6 +5646,34 @@ paths:
               schema:
                 $ref: "#/components/schemas/RepoCheckResponse"
 
+  /api/v1/repos/forgejo/{owner}/{name}:
+    get:
+      operationId: getForgejoRepo
+      tags: [Repos]
+      summary: Check server access to a Forgejo repository
+      description: >
+        Probes the repository on the configured Forgejo instance
+        (`server.integrations.forgejo.url`) with the server's stored
+        `FORGEJO_TOKEN`.
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Repository access details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RepoCheckResponse"
+
   # ── Models ───────────────────────────────────────────────────────────
 
   /api/v1/models:
@@ -12475,7 +12503,7 @@ components:
           example: https://github.com/fabro-sh/fabro.git
         provider:
           type: string
-          enum: [github, git, unknown]
+          enum: [github, forgejo, git, unknown]
 
     BilledTokenCounts:
       description: Token counts with optional billed USD micros totals.
@@ -12574,7 +12602,10 @@ components:
           example: "Stage 'apply-changes' exceeded maximum retries."
 
     PullRequestLink:
-      description: Minimal GitHub pull request link associated with a run.
+      description: >-
+        Minimal pull request link associated with a run. GitHub links carry
+        only `owner`/`repo`/`number`; links on a Forgejo instance also carry a
+        `forge` object with the instance base URL.
       type: object
       required:
         - owner
@@ -12594,8 +12625,22 @@ components:
         html_url:
           type: string
           format: uri
-          description: Computed GitHub web URL for the pull request.
+          description: >-
+            Computed web URL for the pull request. GitHub links use
+            `https://github.com/{owner}/{repo}/pull/{number}`; Forgejo links
+            use `{forge.base_url}/{owner}/{repo}/pulls/{number}`.
           example: https://github.com/fabro-sh/fabro/pull/123
+        forge:
+          description: Present only for pull requests on a Forgejo instance.
+          type: object
+          required:
+            - base_url
+          properties:
+            base_url:
+              type: string
+              format: uri
+              description: Base URL of the self-hosted Forgejo instance.
+              example: https://forgejo.example.com
 
     PullRequest:
       description: Stored pull request link plus optional live GitHub details.
@@ -14551,12 +14596,27 @@ components:
 
     ServerIntegrationsSettings:
       type: object
-      required: [github, slack]
+      required: [github, forgejo, slack]
       properties:
         github:
           $ref: "#/components/schemas/GithubIntegrationSettings"
+        forgejo:
+          $ref: "#/components/schemas/ForgejoIntegrationSettings"
         slack:
           $ref: "#/components/schemas/SlackIntegrationSettings"
+
+    ForgejoIntegrationSettings:
+      type: object
+      required: [enabled, url]
+      properties:
+        enabled:
+          type: boolean
+          description: Whether the Forgejo integration is enabled on this server.
+        url:
+          type: ["string", "null"]
+          format: uri
+          description: Base URL of the configured Forgejo instance.
+          example: https://forgejo.example.com
 
     GithubIntegrationSettings:
       type: object
@@ -15480,7 +15540,7 @@ components:
     IntegrationProvider:
       description: Server integration provider.
       type: string
-      enum: [github, slack]
+      enum: [github, forgejo, slack]
 
     IntegrationStatus:
       description: Computed runtime integration status.

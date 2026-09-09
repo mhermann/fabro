@@ -1,13 +1,13 @@
 use std::path::Path;
 
 use fabro_types::settings::server::{
-    GithubIntegrationSettings, GithubIntegrationStrategy, IntegrationWebhooksSettings,
-    ObjectStoreProvider, ObjectStoreSettings, ServerApiSettings, ServerArtifactsSettings,
-    ServerAuthGithubSettings, ServerAuthMethod, ServerAuthSettings, ServerIntegrationsSettings,
-    ServerListenSettings, ServerLoggingSettings, ServerNamespace, ServerSandboxProviderSettings,
-    ServerSandboxProvidersSettings, ServerSandboxSettings, ServerSchedulerSettings,
-    ServerSlateDbSettings, ServerStorageSettings, ServerWebSettings, SlackIntegrationSettings,
-    WebhookStrategy,
+    ForgejoIntegrationSettings, GithubIntegrationSettings, GithubIntegrationStrategy,
+    IntegrationWebhooksSettings, ObjectStoreProvider, ObjectStoreSettings, ServerApiSettings,
+    ServerArtifactsSettings, ServerAuthGithubSettings, ServerAuthMethod, ServerAuthSettings,
+    ServerIntegrationsSettings, ServerListenSettings, ServerLoggingSettings, ServerNamespace,
+    ServerSandboxProviderSettings, ServerSandboxProvidersSettings, ServerSandboxSettings,
+    ServerSchedulerSettings, ServerSlateDbSettings, ServerStorageSettings, ServerWebSettings,
+    SlackIntegrationSettings, WebhookStrategy,
 };
 use fabro_util::Home;
 
@@ -28,7 +28,7 @@ pub fn resolve_server(layer: &ServerLayer, errors: &mut Vec<ResolveError>) -> Se
     let listen = resolve_listen(layer.listen.as_ref(), errors);
     let web = resolve_web(layer.web.as_ref());
     let auth = resolve_auth(layer.auth.as_ref(), errors);
-    let integrations = resolve_integrations(layer.integrations.as_ref());
+    let integrations = resolve_integrations(layer.integrations.as_ref(), errors);
     validate_github_webhook_strategy(&integrations, layer.api.as_ref(), errors);
 
     let api_url = layer.api.as_ref().and_then(|api| api.url.clone());
@@ -333,9 +333,12 @@ fn object_store_default_root(storage_root: &str, domain: &str) -> String {
         .into_owned()
 }
 
-fn resolve_integrations(layer: Option<&ServerIntegrationsLayer>) -> ServerIntegrationsSettings {
+fn resolve_integrations(
+    layer: Option<&ServerIntegrationsLayer>,
+    errors: &mut Vec<ResolveError>,
+) -> ServerIntegrationsSettings {
     ServerIntegrationsSettings {
-        github: layer
+        github:  layer
             .and_then(|integrations| integrations.github.as_ref())
             .map(|github| {
                 warn_if_demoted_template(
@@ -357,7 +360,14 @@ fn resolve_integrations(layer: Option<&ServerIntegrationsLayer>) -> ServerIntegr
                 }
             })
             .unwrap_or_default(),
-        slack:  layer
+        forgejo: layer
+            .and_then(|integrations| integrations.forgejo.as_ref())
+            .map(|forgejo| ForgejoIntegrationSettings {
+                enabled: forgejo.enabled.unwrap_or(true),
+                url:     resolve_forgejo_instance_url(forgejo.url.as_deref(), errors),
+            })
+            .unwrap_or_default(),
+        slack:   layer
             .and_then(|integrations| integrations.slack.as_ref())
             .map_or(
                 SlackIntegrationSettings {
@@ -375,6 +385,54 @@ fn resolve_integrations(layer: Option<&ServerIntegrationsLayer>) -> ServerIntegr
                     }
                 },
             ),
+    }
+}
+
+/// Validates the configured Forgejo instance URL. Forgejo is self-hosted, so
+/// any HTTPS host (optionally under a subpath) is accepted; the URL must be
+/// absolute and credential-free so sandbox clones can trust it.
+#[expect(
+    clippy::disallowed_types,
+    reason = "Instance URL validation parses an operator-configured endpoint, never credential-bearing logging output."
+)]
+fn resolve_forgejo_instance_url(
+    url: Option<&str>,
+    errors: &mut Vec<ResolveError>,
+) -> Option<String> {
+    let path = "server.integrations.forgejo.url";
+    let url = url.filter(|url| !url.trim().is_empty())?;
+    match url::Url::parse(url) {
+        Ok(parsed) => {
+            if parsed.scheme() != "https" {
+                errors.push(ResolveError::Invalid {
+                    path:   path.to_string(),
+                    reason: format!("instance URL must use https, got '{}'", parsed.scheme()),
+                });
+                return None;
+            }
+            if parsed.host_str().is_none() {
+                errors.push(ResolveError::Invalid {
+                    path:   path.to_string(),
+                    reason: "instance URL must include a host".to_string(),
+                });
+                return None;
+            }
+            if !parsed.username().is_empty() || parsed.password().is_some() {
+                errors.push(ResolveError::Invalid {
+                    path:   path.to_string(),
+                    reason: "instance URL must not embed credentials".to_string(),
+                });
+                return None;
+            }
+            Some(parsed.to_string().trim_end_matches('/').to_string())
+        }
+        Err(error) => {
+            errors.push(ResolveError::ParseFailure {
+                path:   path.to_string(),
+                reason: error.to_string(),
+            });
+            None
+        }
     }
 }
 

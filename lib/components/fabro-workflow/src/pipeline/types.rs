@@ -414,6 +414,37 @@ pub struct FinalizeOptions {
 pub struct PublishOptions {
     pub pr_config:  Option<PullRequestSettings>,
     pub github_app: Option<fabro_github::GitHubCredentials>,
+    /// Forgejo instance credentials, used when the run origin points at the
+    /// configured instance. Static token — Forgejo has no token minting.
+    pub forgejo:    Option<ForgejoRunCreds>,
     pub origin_url: Option<String>,
     pub model:      String,
+}
+
+/// Forgejo credentials carried through run/publish options.
+///
+/// `Debug` redacts the token: these options flow through structures that are
+/// occasionally logged wholesale.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ForgejoRunCreds {
+    pub base_url: String,
+    pub token:    String,
+}
+
+impl std::fmt::Debug for ForgejoRunCreds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForgejoRunCreds")
+            .field("base_url", &self.base_url)
+            .field("token", &"[redacted]")
+            .finish()
+    }
+}
+
+impl ForgejoRunCreds {
+    pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            token:    token.into(),
+        }
+    }
 }

@@ -46,6 +46,10 @@ pub const GITHUB_INSTALL_SECRET_KEYS: &[&str] = &[
     EnvVars::GITHUB_APP_WEBHOOK_SECRET,
 ];
 
+/// Forgejo secret name cleared from `server.env` on reinstall so a changed
+/// instance leaves no stale token behind. The live token lives in the vault.
+pub const FORGEJO_INSTALL_SECRET_KEYS: &[&str] = &[EnvVars::FORGEJO_TOKEN];
+
 /// GitHub App vault secret names cleared when switching back to the Token
 /// strategy.
 pub const GITHUB_APP_VAULT_KEYS: &[&str] = &[
@@ -204,6 +208,40 @@ fn github_integration_table(doc: &mut toml::Value) -> Result<&mut toml::Table> {
     github
         .as_table_mut()
         .context("settings.toml [server.integrations.github] is not a table")
+}
+
+/// `[server.integrations.forgejo]` table in settings.toml, creating parents.
+fn forgejo_integration_table(doc: &mut toml::Value) -> Result<&mut toml::Table> {
+    let root = doc
+        .as_table_mut()
+        .context("settings.toml root is not a table")?;
+    let server = root
+        .entry("server")
+        .or_insert_with(|| toml::Value::Table(toml::Table::default()));
+    let server_table = server
+        .as_table_mut()
+        .context("settings.toml [server] is not a table")?;
+    let integrations = server_table
+        .entry("integrations")
+        .or_insert_with(|| toml::Value::Table(toml::Table::default()));
+    let integrations_table = integrations
+        .as_table_mut()
+        .context("settings.toml [server.integrations] is not a table")?;
+    let forgejo = integrations_table
+        .entry("forgejo")
+        .or_insert_with(|| toml::Value::Table(toml::Table::default()));
+    forgejo
+        .as_table_mut()
+        .context("settings.toml [server.integrations.forgejo] is not a table")
+}
+
+/// Record the configured Forgejo instance in settings. The token never lands
+/// here; it lives in the vault under [`EnvVars::FORGEJO_TOKEN`].
+pub fn write_forgejo_settings(doc: &mut toml::Value, url: &str) -> Result<()> {
+    let forgejo = forgejo_integration_table(doc)?;
+    forgejo.insert("enabled".into(), toml::Value::Boolean(true));
+    forgejo.insert("url".into(), toml::Value::String(url.to_string()));
+    Ok(())
 }
 
 fn set_server_listen(doc: &mut toml::Value, listen_config: &InstallListenConfig) -> Result<()> {

@@ -32,7 +32,7 @@ use fabro_install::{
     PendingDevTokenWrite, PendingSettingsWrite, SecretStoreWrite,
     merge_server_settings as merge_server_settings_impl, prepare_dev_token_write_for_install,
     restore_optional_file, rollback_dev_token_write, seed_environments_in_storage,
-    write_github_app_settings, write_token_settings,
+    write_forgejo_settings, write_github_app_settings, write_token_settings,
 };
 use fabro_model::catalog::CatalogProvider;
 use fabro_model::{Catalog, CredentialRef, ProviderId};
@@ -57,8 +57,8 @@ use super::doctor;
 #[cfg(test)]
 use crate::args::default_web_url;
 use crate::args::{
-    DoctorArgs, InstallArgs, InstallCommand, InstallGitHubStrategyArg, InstallGithubArgs,
-    InstallNonInteractiveArgs, ServerTargetArgs,
+    DoctorArgs, InstallArgs, InstallCommand, InstallForgejoArgs, InstallGitHubStrategyArg,
+    InstallGithubArgs, InstallNonInteractiveArgs, ServerTargetArgs,
 };
 use crate::command_context::CommandContext;
 use crate::commands::server::{start, stop};
@@ -1563,7 +1563,136 @@ pub(crate) async fn execute(
         Some(InstallCommand::Github(github_args)) => {
             run_install_github_command(args, &github_args, ctx).await
         }
+        Some(InstallCommand::Forgejo(forgejo_args)) => {
+            run_install_forgejo_command(args, &forgejo_args, ctx).await
+        }
     }
+}
+
+/// `fabro install forgejo` — configure the single Forgejo instance and its
+/// API token. The token comes from `FORGEJO_TOKEN` when it is already set
+/// (required with `--non-interactive`); otherwise it is prompted as hidden
+/// input. The token is verified against the instance before anything is
+/// written.
+async fn run_install_forgejo_command(
+    args: &InstallArgs,
+    forgejo_args: &InstallForgejoArgs,
+    ctx: &CommandContext,
+) -> Result<()> {
+    let json = ctx.json_output();
+    if ctx.explicit_json_requested() && !args.non_interactive {
+        bail!("--json is only supported for install with --non-interactive");
+    }
+    let s = Styles::detect_stderr();
+    let result = Box::pin(run_install_forgejo_inner(
+        args,
+        forgejo_args,
+        &s,
+        ctx.printer(),
+    ))
+    .await;
+    if json {
+        let emit_result = match &result {
+            Ok(()) => emit_install_json_event(&install_complete_event()),
+            Err(err) => emit_install_json_event(&install_error_event(&err.to_string())),
+        };
+        if result.is_ok() {
+            emit_result?;
+        }
+    }
+    result
+}
+
+async fn run_install_forgejo_inner(
+    args: &InstallArgs,
+    forgejo_args: &InstallForgejoArgs,
+    s: &Styles,
+    printer: Printer,
+) -> Result<()> {
+    use fabro_forgejo::{ForgejoContext, ForgejoCredentials};
+
+    let fabro_dir = fabro_util::Home::from_env().root().to_path_buf();
+    let config_path = fabro_dir.join(SETTINGS_CONFIG_FILENAME);
+    if !config_path.exists() {
+        bail!("No settings.toml found. Run `fabro install` first.");
+    }
+    let existing_config_contents =
+        std::fs::read_to_string(&config_path).context("failed to read existing settings.toml")?;
+    let storage_dir = args
+        .storage_dir
+        .clone_path()
+        .or_else(|| local_server::storage_dir_from_toml(&existing_config_contents).ok())
+        .unwrap_or_else(default_storage_dir);
+    let mut doc: toml::Value = toml::from_str(&existing_config_contents)
+        .context("failed to parse existing settings.toml")?;
+
+    // Instance URL: flag wins, then prompt.
+    let url = match forgejo_args.url.as_deref() {
+        Some(url) => url.to_string(),
+        None if args.non_interactive => {
+            bail!("non-interactive install forgejo requires --url")
+        }
+        None => {
+            let raw: String = spawn_blocking(|| {
+                prompt_input("Forgejo instance URL (e.g. https://forgejo.example.com)")
+            })
+            .await??;
+            raw.trim().to_string()
+        }
+    };
+    let normalized_url = fabro_forgejo::forgejo_base_url(Some(&url))
+        .context("Forgejo instance URL must be an absolute https URL")?;
+
+    // Token: pre-set FORGEJO_TOKEN wins, then a hidden prompt (which
+    // non-interactive installs cannot run).
+    let token = match std::env::var(fabro_static::EnvVars::FORGEJO_TOKEN) {
+        Ok(raw) if !raw.trim().is_empty() => raw.trim().to_string(),
+        _ if args.non_interactive => {
+            bail!("non-interactive install forgejo requires FORGEJO_TOKEN in the environment")
+        }
+        _ => spawn_blocking(|| prompt_password("Forgejo API token")).await??,
+    };
+
+    // Verify the token before persisting anything.
+    let creds = ForgejoCredentials::Pat(token.clone());
+    let client = fabro_http::http_client()?;
+    let context = ForgejoContext::with_http_client(&creds, &normalized_url, client);
+    let user = fabro_forgejo::get_authenticated_user(&context)
+        .await
+        .context("Forgejo token validation failed")?;
+    fabro_util::printerr!(
+        printer,
+        "  {} Authenticated to {normalized_url} as {}",
+        s.green.apply_to("✔"),
+        user.login
+    );
+
+    write_forgejo_settings(&mut doc, &normalized_url)?;
+    let settings_toml = toml::to_string_pretty(&doc)?;
+    persist_github_install_changes(&storage_dir, &PendingGitHubInstallWrite {
+        settings_write:    PendingSettingsWrite {
+            path:              &config_path,
+            contents:          settings_toml.as_str(),
+            previous_contents: Some(existing_config_contents.as_str()),
+        },
+        server_env_set:    Vec::new(),
+        server_env_remove: Vec::new(),
+        vault_set:         vec![SecretStoreWrite {
+            name:        fabro_static::EnvVars::FORGEJO_TOKEN.to_string(),
+            value:       token,
+            secret_type: VaultSecretType::Token,
+            description: None,
+        }],
+        vault_remove:      Vec::new(),
+    })
+    .await?;
+
+    fabro_util::printerr!(
+        printer,
+        "  {} Forgejo instance {normalized_url} configured",
+        s.green.apply_to("✔")
+    );
+    Ok(())
 }
 
 async fn run_install_github_command(

@@ -18,20 +18,34 @@ use tokio::sync::{Mutex, MutexGuard};
 
 use crate::redact;
 use crate::sandbox::{RefreshOutcome, RemoteCredentialAction};
+use crate::sandbox_spec::ForgejoSandboxCreds;
 
 /// Build the shared installation-token source for a clone-based sandbox.
 ///
-/// Returns `None` when there are no managed credentials or no GitHub origin
-/// to scope them to. Minted tokens carry the same `contents: write`
-/// permission the clone token uses.
+/// Returns `None` when there are no managed credentials or no supported
+/// origin to scope them to. Minted tokens carry the same `contents: write`
+/// permission the clone token uses. A Forgejo origin uses a static-token
+/// source built from the configured instance PAT; Forgejo has no token
+/// minting, so refresh resolves to the same credential every time.
 pub(crate) fn build_token_source(
     github_app: Option<&GitHubCredentials>,
+    forgejo_creds: Option<&ForgejoSandboxCreds>,
     clone_origin_url: Option<&str>,
 ) -> crate::Result<Option<Arc<InstallationTokenSource>>> {
-    let Some(creds) = github_app else {
+    let Some(origin_url) = clone_origin_url.filter(|url| !url.trim().is_empty()) else {
         return Ok(None);
     };
-    let Some(origin_url) = clone_origin_url.filter(|url| !url.trim().is_empty()) else {
+    if let Some(forgejo) = forgejo_creds {
+        if fabro_types::is_forgejo_origin(
+            &fabro_github::normalize_repo_origin_url(origin_url),
+            &forgejo.base_url,
+        ) {
+            return Ok(Some(InstallationTokenSource::pat(
+                forgejo.token.expose().to_string(),
+            )));
+        }
+    }
+    let Some(creds) = github_app else {
         return Ok(None);
     };
     let normalized = fabro_github::normalize_repo_origin_url(origin_url);
@@ -612,16 +626,24 @@ mod tests {
 
     #[test]
     fn token_source_requires_managed_credentials_and_a_github_origin() {
-        assert!(build_token_source(None, Some(ORIGIN)).unwrap().is_none());
-        let pat = GitHubCredentials::Pat("ghp_pat".to_string());
-        assert!(build_token_source(Some(&pat), None).unwrap().is_none());
         assert!(
-            build_token_source(Some(&pat), Some("https://gitlab.com/owner/repo"))
+            build_token_source(None, None, Some(ORIGIN))
+                .unwrap()
+                .is_none()
+        );
+        let pat = GitHubCredentials::Pat("ghp_pat".to_string());
+        assert!(
+            build_token_source(Some(&pat), None, None)
                 .unwrap()
                 .is_none()
         );
         assert!(
-            build_token_source(Some(&pat), Some(ORIGIN))
+            build_token_source(Some(&pat), None, Some("https://gitlab.com/owner/repo"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            build_token_source(Some(&pat), None, Some(ORIGIN))
                 .unwrap()
                 .is_some()
         );

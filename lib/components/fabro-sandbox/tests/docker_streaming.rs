@@ -42,6 +42,7 @@ async fn streaming_timeout_terminates_docker_exec_before_returning() {
         None,
         None,
         None,
+        None,
     )
     .expect("docker sandbox should construct");
     sandbox
@@ -116,6 +117,7 @@ async fn streaming_command_receives_exact_stdin_and_eof() {
         None,
         None,
         None,
+        None,
     )
     .expect("docker sandbox should construct");
     sandbox
@@ -173,6 +175,7 @@ async fn cloned_docker_sandbox_uses_repos_checkout_and_workspace_symlink() {
             skip_clone: false,
             ..DockerSandboxOptions::default()
         },
+        None,
         None,
         None,
         Some("https://github.com/brynary/rack-test".to_string()),
@@ -241,6 +244,7 @@ async fn docker_runs_clean_bash_through_both_command_paths() {
             skip_clone: true,
             ..DockerSandboxOptions::default()
         },
+        None,
         None,
         None,
         None,
@@ -342,6 +346,7 @@ async fn docker_glob_matches_patterns_containing_a_path_separator() {
         None,
         None,
         None,
+        None,
     )
     .expect("docker sandbox should construct");
     sandbox
@@ -422,6 +427,7 @@ async fn docker_runtime_directory_is_private_and_outside_workspace() {
             skip_clone: true,
             ..DockerSandboxOptions::default()
         },
+        None,
         None,
         None,
         None,

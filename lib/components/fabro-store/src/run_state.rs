@@ -384,11 +384,16 @@ impl RunProjectionReducer for RunProjection {
                 });
             }
             EventBody::PullRequestCreated(props) => {
-                let pull_request = PullRequestLink {
-                    owner:  props.owner.clone(),
-                    repo:   props.repo.clone(),
-                    number: props.pr_number,
-                };
+                // Rebuild the durable link from the stored PR URL so
+                // non-GitHub forges keep their instance reference; the URL is
+                // the authoritative record, owner/repo/number are duplicates.
+                let pull_request = PullRequestLink::from_stored_pr_url(&props.pr_url)
+                    .unwrap_or_else(|_| PullRequestLink {
+                        owner:  props.owner.clone(),
+                        repo:   props.repo.clone(),
+                        number: props.pr_number,
+                        forge:  None,
+                    });
                 self.pull_request = Some(pull_request.clone());
                 if let Some(creation) = self
                     .pull_request_creation
@@ -4895,11 +4900,13 @@ mod tests {
             owner:  "fabro-sh".to_string(),
             repo:   "fabro".to_string(),
             number: 123,
+            forge:  None,
         };
         let replacement_pull_request = PullRequestLink {
             owner:  "acme".to_string(),
             repo:   "widgets".to_string(),
             number: 42,
+            forge:  None,
         };
 
         state

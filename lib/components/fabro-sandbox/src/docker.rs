@@ -37,6 +37,7 @@ use crate::sandbox::{
     REMOTE_WALK_TIMEOUT_MS, RefreshOutcome, StdioProcessControl, optional_timeout, resolve_path,
     validate_bash_probe, write_process_stdin,
 };
+use crate::sandbox_spec::ForgejoSandboxCreds;
 use crate::{
     CommandOutputCallback, DEFAULT_EXEC_OUTPUT_TAIL_BYTES, DirEntry, ExecResult,
     ExecStreamingRequest, ExecStreamingResult, GrepOptions, Sandbox, SandboxEvent,
@@ -153,6 +154,7 @@ pub struct DockerSandbox {
     docker:            Docker,
     config:            DockerSandboxOptions,
     push_credentials:  PushCredentialState,
+    forgejo:           Option<ForgejoSandboxCreds>,
     run_id:            Option<RunId>,
     clone_origin_url:  Option<String>,
     clone_branch:      Option<String>,
@@ -185,6 +187,7 @@ impl DockerSandbox {
     pub fn new(
         config: DockerSandboxOptions,
         github_app: Option<&GitHubCredentials>,
+        forgejo_creds: Option<&ForgejoSandboxCreds>,
         run_id: Option<RunId>,
         clone_origin_url: Option<String>,
         clone_branch: Option<String>,
@@ -198,6 +201,7 @@ impl DockerSandbox {
                 clone_branch.as_deref(),
                 clone_tag.as_deref(),
                 clone_commit_sha.as_deref(),
+                forgejo_creds.map(|creds| creds.base_url.as_str()),
             )?;
         }
         let docker = Docker::connect_with_local_defaults().map_err(crate::Error::docker_connect)?;
@@ -205,6 +209,7 @@ impl DockerSandbox {
             docker,
             config,
             github_app,
+            forgejo_creds.cloned(),
             run_id,
             clone_origin_url,
             clone_branch,
@@ -217,6 +222,7 @@ impl DockerSandbox {
         docker: Docker,
         config: DockerSandboxOptions,
         github_app: Option<&GitHubCredentials>,
+        forgejo: Option<ForgejoSandboxCreds>,
         run_id: Option<RunId>,
         clone_origin_url: Option<String>,
         clone_branch: Option<String>,
@@ -225,12 +231,14 @@ impl DockerSandbox {
     ) -> crate::Result<Self> {
         let push_credentials = PushCredentialState::new(push_credentials::build_token_source(
             github_app,
+            forgejo.as_ref(),
             clone_origin_url.as_deref(),
         )?);
         Ok(Self {
             docker,
             config,
             push_credentials,
+            forgejo,
             run_id,
             clone_origin_url,
             clone_branch,
@@ -257,6 +265,7 @@ impl DockerSandbox {
     ) -> crate::Result<Self> {
         let sandbox = Self::new(
             DockerSandboxOptions::default(),
+            None,
             None,
             run_id,
             clone_origin_url.clone(),
@@ -906,15 +915,21 @@ impl DockerSandbox {
         .await
     }
 
-    async fn clone_github_repo(
+    async fn clone_repo(
         &self,
         origin_url: String,
         branch: Option<String>,
         tag: Option<String>,
         commit_sha: Option<String>,
+        forgejo_base_url: Option<&str>,
     ) -> crate::Result<()> {
         self.verify_git_available().await?;
-        let layout = clone_source::github_repo_layout(&origin_url, WORKING_DIRECTORY, REPOS_ROOT)?;
+        let layout = clone_source::repo_layout_for_origin(
+            &origin_url,
+            forgejo_base_url,
+            WORKING_DIRECTORY,
+            REPOS_ROOT,
+        )?;
         // The clone mints its own token (never a warm-cache reuse) and seeds
         // the shared source, so the first refresh compares against the clone
         // token instead of believing nothing was ever embedded.
@@ -1838,6 +1853,7 @@ impl Sandbox for DockerSandbox {
             self.clone_branch.as_deref(),
             self.clone_tag.as_deref(),
             self.clone_commit_sha.as_deref(),
+            self.forgejo.as_ref().map(|creds| creds.base_url.as_str()),
         )
         .map_err(|e| self.fail_init(init_start, e))?;
 
@@ -1860,9 +1876,19 @@ impl Sandbox for DockerSandbox {
                 branch,
                 tag,
                 commit_sha,
+            }
+            // The git transport is host-agnostic: a Forgejo origin clones
+            // with the same commands, only the layout parse and the
+            // credential source differ.
+            | CloneDecision::Forgejo {
+                origin_url,
+                branch,
+                tag,
+                commit_sha,
             } => {
+                let forgejo_base_url = self.forgejo.as_ref().map(|creds| creds.base_url.as_str());
                 if let Err(e) = self
-                    .clone_github_repo(origin_url, branch, tag, commit_sha)
+                    .clone_repo(origin_url, branch, tag, commit_sha, forgejo_base_url)
                     .await
                 {
                     return Err(self.fail_init(init_start, e));
@@ -2681,6 +2707,7 @@ mod tests {
             DockerSandboxOptions::default(),
             None,
             None,
+            None,
             Some("https://github.com/acme/widgets".to_string()),
             Some("main".to_string()),
             None,
@@ -2697,6 +2724,7 @@ mod tests {
     fn exact_sha_without_branch_fails_before_docker_connection() {
         let error = DockerSandbox::new(
             DockerSandboxOptions::default(),
+            None,
             None,
             None,
             Some("https://github.com/acme/widgets".to_string()),
@@ -3084,6 +3112,7 @@ mod tests {
         let sandbox = DockerSandbox::with_docker_client(
             docker,
             DockerSandboxOptions::default(),
+            None,
             None,
             None,
             None,

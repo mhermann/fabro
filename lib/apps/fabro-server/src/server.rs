@@ -1572,6 +1572,50 @@ impl AppState {
             .and_then(|value| auth::derive_cookie_key(value.as_bytes()).ok())
     }
 
+    /// The configured Forgejo instance base URL, when the integration is
+    /// enabled and a URL is set. Settings win over `FORGEJO_URL` so a
+    /// configured server never silently follows a stray process-env value.
+    pub(crate) fn forgejo_base_url(&self) -> Option<String> {
+        let settings = &self.server_settings().server.integrations.forgejo;
+        if !settings.enabled {
+            return None;
+        }
+        settings
+            .url
+            .clone()
+            .or_else(|| self.config_env_lookup(EnvVars::FORGEJO_URL))
+            .map(|url| url.trim().trim_end_matches('/').to_string())
+            .filter(|url| !url.is_empty())
+    }
+
+    /// Forgejo credentials for the configured instance: the `FORGEJO_TOKEN`
+    /// secret from the vault or the process environment. Returns `Ok(None)`
+    /// when no instance URL is configured; an empty token with an instance
+    /// configured is a hard error so preflight can fail closed.
+    pub(crate) async fn forgejo_credentials(
+        &self,
+    ) -> anyhow::Result<Option<(String, fabro_forgejo::ForgejoCredentials)>> {
+        let Some(base_url) = self.forgejo_base_url() else {
+            return Ok(None);
+        };
+        let token = self
+            .vault_secret(EnvVars::FORGEJO_TOKEN)
+            .await
+            .map_err(anyhow::Error::new)?
+            .or_else(|| self.config_env_lookup(EnvVars::FORGEJO_TOKEN))
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty());
+        match token {
+            Some(token) => Ok(Some((
+                base_url,
+                fabro_forgejo::ForgejoCredentials::Pat(token),
+            ))),
+            None => anyhow::bail!(
+                "FORGEJO_TOKEN not configured -- run fabro install or run fabro secret set FORGEJO_TOKEN"
+            ),
+        }
+    }
+
     pub(crate) async fn github_credentials(
         &self,
         settings: &GithubIntegrationSettings,
@@ -4123,6 +4167,24 @@ async fn execute_run_in_process(state: Arc<AppState>, run_id: RunId) {
             return;
         }
     };
+    // Forgejo credentials are optional: they only matter when the run origin
+    // points at the configured instance, and a missing token there fails at
+    // preflight with a targeted message.
+    let forgejo = match state.forgejo_credentials().await {
+        Ok(None) => None,
+        Ok(Some((base_url, creds))) => Some(operations::ForgejoRunCreds::new(
+            base_url,
+            creds.valid_token().to_string(),
+        )),
+        Err(err) => {
+            tracing::warn!(
+                run_id = %run_id,
+                error = %err,
+                "Forgejo credentials unavailable; Forgejo origins will fail at preflight"
+            );
+            None
+        }
+    };
     let github_integration = match persisted
         .run_spec()
         .settings
@@ -4173,6 +4235,7 @@ async fn execute_run_in_process(state: Arc<AppState>, run_id: RunId) {
         artifact_sink: Some(ArtifactSink::Store(state.artifact_store.clone())),
         run_control: None,
         github_app,
+        forgejo,
         github_integration,
         vault: Arc::new(AsyncRwLock::new(vault.into_vault())),
         catalog: state.catalog(),

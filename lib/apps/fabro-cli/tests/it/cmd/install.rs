@@ -34,8 +34,9 @@ fn help() {
     Usage: fabro install [OPTIONS] [COMMAND]
 
     Commands:
-      github  Configure GitHub integration (token or GitHub App)
-      help    Print this message or the help of the given subcommand(s)
+      github   Configure GitHub integration (token or GitHub App)
+      forgejo  Configure Forgejo integration (single instance, API token)
+      help     Print this message or the help of the given subcommand(s)
 
     Options:
           --json                       Output as JSON [env: FABRO_JSON=]

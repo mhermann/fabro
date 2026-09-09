@@ -67,6 +67,33 @@ pub(crate) fn merge_git_bridge_env(
     Ok(())
 }
 
+/// Merge the bridging entries for a Forgejo run origin into `env`.
+///
+/// Forgejo origins authenticate through the same indexed Git config overlay
+/// as GitHub, with two differences: the credential helper reads
+/// `$FORGEJO_TOKEN`, and the helper's config key scopes the configured
+/// instance host (Forgejo is self-hosted, so there is no fixed domain to
+/// scope credentials to). No SSH `insteadOf` rewrites are emitted: SSH
+/// clones of the run origin are rewritten to HTTPS by clone-source
+/// normalization before any Git command runs.
+pub(crate) fn merge_forgejo_bridge_env(
+    env: &mut HashMap<String, String>,
+    base_url: &str,
+) -> Result<(), Error> {
+    let start = user_git_config_count(env)?;
+    let key = fabro_forgejo::credential_helper_key(base_url);
+    let index = start;
+    env.insert(format!("GIT_CONFIG_KEY_{index}"), key);
+    env.insert(
+        format!("GIT_CONFIG_VALUE_{index}"),
+        fabro_forgejo::FORGEJO_CREDENTIAL_HELPER.to_string(),
+    );
+    env.insert("GIT_CONFIG_COUNT".to_string(), (start + 1).to_string());
+    env.entry("GIT_TERMINAL_PROMPT".to_string())
+        .or_insert_with(|| "0".to_string());
+    Ok(())
+}
+
 /// The bridge's Git config entries in order: the credential helper, then two
 /// SSH-to-HTTPS rewrites per repository. `https_base` is
 /// [`GITHUB_HTTPS_BASE`] in production; contract tests substitute a local

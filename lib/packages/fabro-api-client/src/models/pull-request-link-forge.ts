@@ -15,13 +15,11 @@
 
 
 /**
- * Server integration provider.
+ * Present only for pull requests on a Forgejo instance.
  */
-
-export const IntegrationProvider = {
-    GITHUB: 'github',
-    FORGEJO: 'forgejo',
-    SLACK: 'slack'
-} as const;
-
-export type IntegrationProvider = typeof IntegrationProvider[keyof typeof IntegrationProvider];
+export interface PullRequestLinkForge {
+    /**
+     * Base URL of the self-hosted Forgejo instance.
+     */
+    'base_url': string;
+}

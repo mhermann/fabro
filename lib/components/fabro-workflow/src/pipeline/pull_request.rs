@@ -443,9 +443,19 @@ pub struct AutoMergeOptions {
     pub merge_strategy: MergeStrategy,
 }
 
+/// The remote forge a run publishes its pull request to.
+///
+/// Provider selection happens once, where credentials and the origin are both
+/// known; every later step branches on this value instead of re-parsing the
+/// origin.
+pub enum PullRequestRemote<'a> {
+    Github(github_app::GitHubContext<'a>),
+    Forgejo(fabro_forgejo::ForgejoContext<'a>),
+}
+
 /// Inputs for [`open_pull_request`].
 pub struct OpenPullRequestRequest<'a> {
-    pub github:            github_app::GitHubContext<'a>,
+    pub scm:               PullRequestRemote<'a>,
     pub origin_url:        &'a str,
     pub base_branch:       &'a str,
     pub head_branch:       &'a str,
@@ -481,21 +491,42 @@ async fn reconcile_existing_pull_request(
     repo: &str,
     context: &'static str,
 ) -> anyhow::Result<Option<CreatedPullRequest>> {
-    let Some(existing) = github_app::find_open_pull_request(
-        &req.github,
-        owner,
-        repo,
-        req.base_branch,
-        req.head_branch,
-        req.expected_head_sha,
-    )
-    .await?
-    else {
+    let existing = match &req.scm {
+        PullRequestRemote::Github(github) => {
+            github_app::find_open_pull_request(
+                github,
+                owner,
+                repo,
+                req.base_branch,
+                req.head_branch,
+                req.expected_head_sha,
+            )
+            .await?
+        }
+        // Forgejo has no node_id, so its reconciled pull request can never
+        // enable auto-merge; the config resolver already rejects that
+        // combination for Forgejo runs.
+        PullRequestRemote::Forgejo(forgejo) => fabro_forgejo::find_open_pull_request(
+            forgejo,
+            owner,
+            repo,
+            req.base_branch,
+            req.expected_head_sha,
+        )
+        .await?
+        .map(|existing| github_app::CreatedPullRequest {
+            html_url: existing.html_url,
+            number:   existing.number,
+            node_id:  String::new(),
+            title:    existing.title,
+        }),
+    };
+    let Some(existing) = existing else {
         return Ok(None);
     };
     info!(pr_url = %existing.html_url, pr_number = existing.number, context, "Existing pull request reconciled");
     enable_auto_merge_if_requested(
-        &req.github,
+        &req.scm,
         owner,
         repo,
         &existing.node_id,
@@ -504,19 +535,31 @@ async fn reconcile_existing_pull_request(
     )
     .await;
     Ok(Some(CreatedPullRequest {
-        link:        PullRequestLink {
-            owner:  owner.to_string(),
-            repo:   repo.to_string(),
-            number: existing.number,
-        },
+        link:        pull_request_link(&req.scm, owner, repo, existing.number),
         title:       existing.title,
         base_branch: req.base_branch.to_string(),
         head_branch: req.head_branch.to_string(),
     }))
 }
 
+/// Build the durable link for `owner/repo#number` on the request's forge.
+/// Forgejo links carry the instance base URL; GitHub links do not.
+fn pull_request_link(
+    scm: &PullRequestRemote<'_>,
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> PullRequestLink {
+    match scm {
+        PullRequestRemote::Github(_) => PullRequestLink::github(owner, repo, number),
+        PullRequestRemote::Forgejo(forgejo) => {
+            PullRequestLink::on_forge(forgejo.base_url(), owner, repo, number)
+        }
+    }
+}
+
 async fn enable_auto_merge_if_requested(
-    github: &github_app::GitHubContext<'_>,
+    scm: &PullRequestRemote<'_>,
     owner: &str,
     repo: &str,
     node_id: &str,
@@ -524,6 +567,13 @@ async fn enable_auto_merge_if_requested(
     options: Option<&AutoMergeOptions>,
 ) {
     let Some(options) = options else {
+        return;
+    };
+    let PullRequestRemote::Github(github) = scm else {
+        debug!(
+            pr_number = number,
+            "Auto-merge is not supported for Forgejo pull requests"
+        );
         return;
     };
     match github_app::enable_auto_merge(github, owner, repo, node_id, options.merge_strategy).await
@@ -556,7 +606,14 @@ async fn verify_remote_head(
 ) -> Result<(), String> {
     let mut last_seen = Ok(None);
     for attempt in 1..=BRANCH_HEAD_ATTEMPTS {
-        last_seen = github_app::branch_head_sha(&req.github, owner, repo, req.head_branch).await;
+        last_seen = match &req.scm {
+            PullRequestRemote::Github(github) => {
+                github_app::branch_head_sha(github, owner, repo, req.head_branch).await
+            }
+            PullRequestRemote::Forgejo(forgejo) => {
+                fabro_forgejo::branch_head_sha(forgejo, owner, repo, req.head_branch).await
+            }
+        };
         match &last_seen {
             Ok(Some(head)) if head == req.expected_head_sha => return Ok(()),
             Ok(head) => debug!(
@@ -592,9 +649,17 @@ async fn verify_remote_head(
 pub async fn open_pull_request(
     req: OpenPullRequestRequest<'_>,
 ) -> Result<CreatedPullRequest, String> {
-    let https_url = ssh_url_to_https(req.origin_url);
-    let (owner, repo) =
-        github_app::parse_github_owner_repo(&https_url).map_err(|err| format!("{err:#}"))?;
+    let (owner, repo) = match &req.scm {
+        PullRequestRemote::Github(_) => {
+            let https_url = ssh_url_to_https(req.origin_url);
+            github_app::parse_github_owner_repo(&https_url).map_err(|err| format!("{err:#}"))?
+        }
+        PullRequestRemote::Forgejo(forgejo) => fabro_forgejo::parse_forgejo_owner_repo(
+            &fabro_forgejo::normalize_repo_origin_url(req.origin_url),
+            forgejo.base_url(),
+        )
+        .map_err(|err| format!("{err:#}"))?,
+    };
 
     // Verify before generating content: this is the cheap check, and a stale
     // branch would otherwise cost a full LLM call before failing.
@@ -622,18 +687,44 @@ pub async fn open_pull_request(
     let body = truncate_pr_body(&content.body);
     let title = content.title;
 
-    let created = match github_app::create_pull_request(
-        &req.github,
-        &owner,
-        &repo,
-        req.base_branch,
-        req.head_branch,
-        &title,
-        &body,
-        req.draft,
-    )
-    .await
-    {
+    let created = match match &req.scm {
+        PullRequestRemote::Github(github) => github_app::create_pull_request(
+            github,
+            &owner,
+            &repo,
+            req.base_branch,
+            req.head_branch,
+            &title,
+            &body,
+            req.draft,
+        )
+        .await
+        .map(|created| github_app::CreatedPullRequest {
+            html_url: created.html_url,
+            number:   created.number,
+            node_id:  created.node_id,
+            title:    created.title,
+        }),
+        // Forgejo drafts are the `WIP:` title convention, handled inside the
+        // client; the returned title already carries the prefix.
+        PullRequestRemote::Forgejo(forgejo) => fabro_forgejo::create_pull_request(
+            forgejo,
+            &owner,
+            &repo,
+            req.base_branch,
+            req.head_branch,
+            &title,
+            &body,
+            req.draft,
+        )
+        .await
+        .map(|created| github_app::CreatedPullRequest {
+            html_url: created.html_url,
+            number:   created.number,
+            node_id:  String::new(),
+            title:    created.title,
+        }),
+    } {
         Ok(created) => created,
         Err(create_err) => {
             match reconcile_existing_pull_request(&req, &owner, &repo, "after a failed create")
@@ -652,7 +743,7 @@ pub async fn open_pull_request(
 
     info!(pr_url = %created.html_url, created.number, "Pull request created");
     enable_auto_merge_if_requested(
-        &req.github,
+        &req.scm,
         &owner,
         &repo,
         &created.node_id,
@@ -661,11 +752,7 @@ pub async fn open_pull_request(
     )
     .await;
 
-    let link = PullRequestLink {
-        owner,
-        repo,
-        number: created.number,
-    };
+    let link = pull_request_link(&req.scm, &owner, &repo, created.number);
 
     Ok(CreatedPullRequest {
         link,
@@ -1506,7 +1593,10 @@ mod tests {
         let harness = setup_fallback_test_harness_with_branch_sha(&payload, "stale-sha").await;
         let github_base_url = harness.github_server.url("");
         let error = open_pull_request(OpenPullRequestRequest {
-            github:            fabro_github::GitHubContext::new(&harness.creds, &github_base_url),
+            scm:               PullRequestRemote::Github(fabro_github::GitHubContext::new(
+                &harness.creds,
+                &github_base_url,
+            )),
             origin_url:        "https://github.com/owner/repo.git",
             base_branch:       "main",
             head_branch:       "fabro/run/123",
@@ -1932,9 +2022,10 @@ mod tests {
 
         let github_base_url = harness.github_server.url("");
         let github = github_app::GitHubContext::new(&harness.creds, &github_base_url);
+        let scm = PullRequestRemote::Github(github);
 
         let result = open_pull_request(OpenPullRequestRequest {
-            github,
+            scm,
             origin_url: "https://github.com/owner/repo.git",
             base_branch: "main",
             head_branch: "fabro/run/123",
@@ -1980,9 +2071,10 @@ mod tests {
 
         let github_base_url = harness.github_server.url("");
         let github = github_app::GitHubContext::new(&harness.creds, &github_base_url);
+        let scm = PullRequestRemote::Github(github);
 
         let result = open_pull_request(OpenPullRequestRequest {
-            github,
+            scm,
             origin_url: "https://github.com/owner/repo.git",
             base_branch: "main",
             head_branch: "fabro/run/123",
@@ -2014,12 +2106,13 @@ mod tests {
 
         let github_base_url = harness.github_server.url("");
         let github = github_app::GitHubContext::new(&harness.creds, &github_base_url);
+        let scm = PullRequestRemote::Github(github);
 
         // Single ~200-char line, no `Plan:` / heading prefix, no newlines.
         let goal = "x".repeat(200);
 
         let result = open_pull_request(OpenPullRequestRequest {
-            github,
+            scm,
             origin_url: "https://github.com/owner/repo.git",
             base_branch: "main",
             head_branch: "fabro/run/123",

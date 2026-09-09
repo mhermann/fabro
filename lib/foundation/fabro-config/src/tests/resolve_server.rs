@@ -123,6 +123,10 @@ fn resolved_server_integrations_disable_slack_when_config_is_absent() {
                 "slug": null,
                 "webhooks": null,
             },
+            "forgejo": {
+                "enabled": false,
+                "url": null,
+            },
             "slack": {
                 "enabled": false,
                 "default_channel": null,
@@ -143,6 +147,65 @@ _version = 1
 
     assert!(settings.integrations.slack.enabled);
     assert!(settings.integrations.slack.default_channel.is_none());
+}
+
+#[test]
+fn resolved_server_integrations_resolve_forgejo_instance_url() {
+    let settings = resolve_server(&parse(
+        r#"
+_version = 1
+
+[server.integrations.forgejo]
+enabled = true
+url = "https://forgejo.example.com/"
+"#,
+    ));
+
+    assert!(settings.integrations.forgejo.enabled);
+    // Trailing slashes are trimmed so origin matching stays exact.
+    assert_eq!(
+        settings.integrations.forgejo.url.as_deref(),
+        Some("https://forgejo.example.com")
+    );
+}
+
+#[test]
+fn resolve_rejects_non_https_forgejo_instance_url() {
+    let error = ServerSettingsBuilder::from_layer(&parse(
+        r#"
+_version = 1
+
+[server.integrations.forgejo]
+url = "http://forgejo.example.com"
+"#,
+    ))
+    .expect_err("http instance URL should be rejected");
+
+    let rendered = render_resolve_error_lines(error);
+    assert!(
+        rendered.contains("server.integrations.forgejo.url"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("https"), "{rendered}");
+}
+
+#[test]
+fn resolve_rejects_forgejo_instance_url_with_credentials() {
+    let error = ServerSettingsBuilder::from_layer(&parse(
+        r#"
+_version = 1
+
+[server.integrations.forgejo]
+url = "https://user:pass@forgejo.example.com"
+"#,
+    ))
+    .expect_err("credential-bearing instance URL should be rejected");
+
+    let rendered = render_resolve_error_lines(error);
+    assert!(
+        rendered.contains("must not embed credentials"),
+        "{rendered}"
+    );
 }
 
 #[test]

@@ -27,7 +27,7 @@ use fabro_types::{
 use fabro_vault::{SecretStore, Vault};
 use fabro_workflow::artifact_upload::{ArtifactSink, StageArtifactUploader};
 use fabro_workflow::event::{Emitter, RunEventSink};
-use fabro_workflow::operations::{self, StartServices};
+use fabro_workflow::operations::{self, ForgejoRunCreds, StartServices};
 use fabro_workflow::run_control::RunControlState;
 use fabro_workflow::runtime_store::{RunStoreBackend, RunStoreHandle};
 use fabro_workflow::services::FabroRunToolServices;
@@ -52,6 +52,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::RunWorkerMode;
 use crate::server_client;
+use crate::shared::forgejo::build_forgejo_credentials;
 use crate::shared::github::build_github_credentials;
 
 const RUN_STORE_RETRY_DELAYS: [Duration; 3] = [
@@ -141,6 +142,10 @@ pub(crate) async fn execute(
         let vault_guard = vault.read().await;
         maybe_build_github_credentials(&run_spec.settings, &vault_guard)?
     };
+    let forgejo = {
+        let vault_guard = vault.read().await;
+        maybe_build_forgejo_credentials(&vault_guard)?
+    };
     let services = StartServices {
         run_id,
         cancel_token: cancel_token.clone(),
@@ -161,6 +166,7 @@ pub(crate) async fn execute(
         artifact_sink,
         run_control: Some(run_control),
         github_app,
+        forgejo,
         github_integration: run_spec
             .settings
             .run
@@ -1097,6 +1103,13 @@ fn stamp_system_worker(mut event: RunEvent) -> RunEvent {
         });
     }
     event
+}
+
+/// Forgejo credentials for the run: `Ok(None)` when no instance is
+/// configured. Only origins on the configured instance consume them; the
+/// sandbox and publish layers classify per origin.
+fn maybe_build_forgejo_credentials(vault: &fabro_vault::Vault) -> Result<Option<ForgejoRunCreds>> {
+    build_forgejo_credentials(vault)
 }
 
 fn maybe_build_github_credentials(

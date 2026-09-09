@@ -13,16 +13,20 @@
  */
 
 
+// May contain unused imports in some cases
+// @ts-ignore
+import type { PullRequestLinkForge } from './pull-request-link-forge';
 
 /**
- * Minimal GitHub pull request link associated with a run.
+ * Minimal pull request link associated with a run. GitHub links carry only `owner`/`repo`/`number`; links on a Forgejo instance also carry a `forge` object with the instance base URL.
  */
 export interface PullRequestLink {
     'owner': string;
     'repo': string;
     'number': number;
     /**
-     * Computed GitHub web URL for the pull request.
+     * Computed web URL for the pull request. GitHub links use `https://github.com/{owner}/{repo}/pull/{number}`; Forgejo links use `{forge.base_url}/{owner}/{repo}/pulls/{number}`.
      */
     'html_url': string;
+    'forge'?: PullRequestLinkForge;
 }

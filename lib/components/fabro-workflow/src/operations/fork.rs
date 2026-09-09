@@ -123,9 +123,20 @@ fn validate_source_spec(spec: &RunSpec, checkpoint_sha: &str) -> std::result::Re
             "source run has no repo_origin_url; cannot validate fork origin".to_string(),
         ));
     };
-    if fabro_github::normalize_repo_origin_url(origin).is_empty() {
+    let normalized = fabro_github::normalize_repo_origin_url(origin);
+    if normalized.is_empty() {
         return Err(Error::Validation(
             "source run has an empty repo_origin_url; cannot validate fork origin".to_string(),
+        ));
+    }
+    // Forks re-clone through the source run's origin contract, which is
+    // GitHub-only (see AGENTS.md sandbox rules). A Forgejo origin is valid
+    // for clone/publish but has no fork path, so reject it explicitly instead
+    // of failing later with a GitHub parse error.
+    if !normalized.starts_with("https://github.com/") {
+        return Err(Error::Validation(
+            "fork is not supported for Forgejo runs; only github.com origins can be forked"
+                .to_string(),
         ));
     }
     Ok(())

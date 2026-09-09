@@ -28,14 +28,19 @@ export default function SettingsIntegrations() {
   const integrationsQuery = useSystemIntegrations();
   const integrations = integrationsQuery.data?.data;
   const github = integrations?.find((status) => status.provider === "github");
+  const forgejo = integrations?.find((status) => status.provider === "forgejo");
   const slack = integrations?.find((status) => status.provider === "slack");
 
+  // Older servers do not report a forgejo entry yet; render its panel only
+  // when the server knows about it.
+  const panelsReady = github && slack;
   return (
     <div className="space-y-6">
       <SettingsPageIntro description={DESCRIPTION} />
-      {github && slack ? (
+      {panelsReady ? (
         <>
           <GithubPanel status={github} />
+          {forgejo ? <ForgejoPanel status={forgejo} /> : null}
           <SlackPanel status={slack} />
         </>
       ) : (
@@ -79,6 +84,20 @@ function GithubPanel({ status }: { status: SystemIntegrationStatus }) {
         help="App for repo access, checks, and PR automation."
       >
         <IntegrationValue status={status} detail={githubDetail(status)} />
+      </IntegrationRow>
+    </Panel>
+  );
+}
+
+function ForgejoPanel({ status }: { status: SystemIntegrationStatus }) {
+  return (
+    <Panel title="Version Control">
+      <IntegrationRow
+        slug="forgejo"
+        name="Forgejo"
+        help="Instance token for repo access and PR automation."
+      >
+        <IntegrationValue status={status} detail={forgejoDetail(status)} />
       </IntegrationRow>
     </Panel>
   );
@@ -231,6 +250,12 @@ function githubDetail(status: SystemIntegrationStatus): string | undefined {
   if (metadata.slug) return `app: ${metadata.slug}`;
   if (metadata.app_id) return `app id: ${metadata.app_id}`;
   if (metadata.strategy) return `strategy: ${metadata.strategy}`;
+  return missingCredentialsDetail(status);
+}
+
+function forgejoDetail(status: SystemIntegrationStatus): string | undefined {
+  const metadata = status.metadata ?? {};
+  if (metadata.url) return `instance: ${metadata.url}`;
   return missingCredentialsDetail(status);
 }
 

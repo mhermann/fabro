@@ -110,15 +110,15 @@ pub use pair::{
 pub use parallel::ParallelBranchResult;
 pub use principal::{AuthMethod, Principal, SystemActorKind, UserPrincipal};
 pub use pull_request::{
-    CheckRun, CheckRunStatus, PullRequest, PullRequestCreation, PullRequestCreationId,
-    PullRequestCreationStatus, PullRequestDetails, PullRequestDetailsStatus,
+    CheckRun, CheckRunStatus, ForgeInstanceRef, PullRequest, PullRequestCreation,
+    PullRequestCreationId, PullRequestCreationStatus, PullRequestDetails, PullRequestDetailsStatus,
     PullRequestDetailsUnavailableReason, PullRequestGithubDetail, PullRequestLink, PullRequestMeta,
     PullRequestRef, PullRequestResponse, PullRequestTimestamps, PullRequestUser,
 };
 pub use reasoning::ReasoningOutput;
 pub use repository::{
     GitHubRepositorySlug, GitHubRepositorySlugError, RepositoryProvider, RepositoryRef,
-    is_valid_git_branch_name, is_valid_git_tag_name, normalize_git_commit_sha,
+    is_forgejo_origin, is_valid_git_branch_name, is_valid_git_tag_name, normalize_git_commit_sha,
 };
 pub use run::{
     DirtyStatus, ForkSourceRef, GitContext, RunClientProvenance, RunProvenance,

@@ -171,6 +171,7 @@ pub(super) fn demo_routes() -> Router<Arc<AppState>> {
                 .delete(demo::delete_secret_by_name),
         )
         .route("/repos/github/{owner}/{name}", get(demo::get_github_repo))
+        .route("/repos/forgejo/{owner}/{name}", get(demo::get_forgejo_repo))
         .route("/health/diagnostics", post(demo::run_diagnostics))
         .route("/settings", get(demo::get_server_settings))
         .route("/system/info", get(demo::get_system_info))

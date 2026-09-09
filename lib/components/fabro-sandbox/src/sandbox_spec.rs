@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 #[cfg(any(feature = "docker", feature = "daytona"))]
 use fabro_github::GitHubCredentials;
+use fabro_github::token_source::SecretString;
 #[allow(
     unused_imports,
     reason = "Daytona-enabled builds persist RunId in the sandbox spec."
@@ -20,6 +21,35 @@ use crate::docker::{self, DockerSandbox, DockerSandboxOptions};
 use crate::local::LocalSandbox;
 use crate::{Sandbox, SandboxEventCallback};
 
+/// Forgejo instance credentials for one clone-based sandbox.
+///
+/// Forgejo has no token minting: the PAT is static for the lifetime of the
+/// run, so `Debug` redacts it and `Clone` copies the wrapper without ever
+/// exposing the token outside explicit `expose()` call sites.
+#[derive(Clone)]
+pub struct ForgejoSandboxCreds {
+    pub base_url: String,
+    pub token:    SecretString,
+}
+
+impl ForgejoSandboxCreds {
+    pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            token:    SecretString::new(token.into()),
+        }
+    }
+}
+
+impl std::fmt::Debug for ForgejoSandboxCreds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForgejoSandboxCreds")
+            .field("base_url", &self.base_url)
+            .field("token", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Options for sandbox initialization and construction.
 pub enum SandboxSpec {
     Local {
@@ -29,6 +59,7 @@ pub enum SandboxSpec {
     Docker {
         config:           DockerSandboxOptions,
         github_app:       Option<GitHubCredentials>,
+        forgejo:          Option<ForgejoSandboxCreds>,
         run_id:           Option<RunId>,
         clone_origin_url: Option<String>,
         clone_branch:     Option<String>,
@@ -39,6 +70,7 @@ pub enum SandboxSpec {
     Daytona {
         config:           Box<DaytonaConfig>,
         github_app:       Option<GitHubCredentials>,
+        forgejo:          Option<ForgejoSandboxCreds>,
         run_id:           Option<RunId>,
         clone_origin_url: Option<String>,
         clone_branch:     Option<String>,
@@ -87,17 +119,21 @@ impl SandboxSpec {
             #[cfg(feature = "docker")]
             Self::Docker {
                 config,
+                forgejo,
                 clone_origin_url,
                 clone_branch,
                 ..
             } => {
+                let forgejo_base_url = forgejo.as_ref().map(|creds| creds.base_url.as_str());
                 let repo_cloned = clone_source::repo_cloned_for_record(
                     config.skip_clone,
                     clone_origin_url.as_deref(),
+                    forgejo_base_url,
                 );
                 let layout = runtime_layout_metadata(
                     repo_cloned,
                     clone_origin_url.as_deref(),
+                    forgejo_base_url,
                     docker::WORKING_DIRECTORY,
                     docker::REPOS_ROOT,
                 );
@@ -127,17 +163,21 @@ impl SandboxSpec {
             #[cfg(feature = "daytona")]
             Self::Daytona {
                 config,
+                forgejo,
                 clone_origin_url,
                 clone_branch,
                 ..
             } => {
+                let forgejo_base_url = forgejo.as_ref().map(|creds| creds.base_url.as_str());
                 let repo_cloned = clone_source::repo_cloned_for_record(
                     config.skip_clone,
                     clone_origin_url.as_deref(),
+                    forgejo_base_url,
                 );
                 let layout = runtime_layout_metadata(
                     repo_cloned,
                     clone_origin_url.as_deref(),
+                    forgejo_base_url,
                     daytona::WORKING_DIRECTORY,
                     daytona::REPOS_ROOT,
                 );
@@ -203,6 +243,7 @@ impl SandboxSpec {
             Self::Docker {
                 config,
                 github_app,
+                forgejo,
                 run_id,
                 clone_origin_url,
                 clone_branch,
@@ -212,6 +253,7 @@ impl SandboxSpec {
                 let mut sandbox = DockerSandbox::new(
                     config.clone(),
                     github_app.as_ref(),
+                    forgejo.as_ref(),
                     *run_id,
                     clone_origin_url.clone(),
                     clone_branch.clone(),
@@ -228,6 +270,7 @@ impl SandboxSpec {
             Self::Daytona {
                 config,
                 github_app,
+                forgejo,
                 run_id,
                 clone_origin_url,
                 clone_branch,
@@ -238,6 +281,7 @@ impl SandboxSpec {
                 let mut sandbox = DaytonaSandbox::new(
                     config.as_ref().clone(),
                     github_app.clone(),
+                    forgejo.clone(),
                     *run_id,
                     clone_origin_url.clone(),
                     clone_branch.clone(),
@@ -260,13 +304,20 @@ impl SandboxSpec {
 fn runtime_layout_metadata(
     repo_cloned: Option<bool>,
     clone_origin_url: Option<&str>,
+    forgejo_base_url: Option<&str>,
     workspace_root: &str,
     repos_root: &str,
 ) -> Option<clone_source::GitHubRepoLayout> {
     if repo_cloned != Some(true) {
         return None;
     }
-    clone_source::github_repo_layout(clone_origin_url?, workspace_root, repos_root).ok()
+    clone_source::repo_layout_for_origin(
+        clone_origin_url?,
+        forgejo_base_url,
+        workspace_root,
+        repos_root,
+    )
+    .ok()
 }
 
 #[cfg(test)]
@@ -285,6 +336,7 @@ mod tests {
         let spec = SandboxSpec::Docker {
             config:           DockerSandboxOptions::default(),
             github_app:       None,
+            forgejo:          None,
             run_id:           None,
             clone_origin_url: Some("git@github.com:brynary/rack-test.git".to_string()),
             clone_branch:     Some("main".to_string()),
@@ -324,6 +376,7 @@ mod tests {
         let spec = SandboxSpec::Docker {
             config:           DockerSandboxOptions::default(),
             github_app:       None,
+            forgejo:          None,
             run_id:           None,
             clone_origin_url: Some("https://github.com/acme/widgets".to_string()),
             clone_branch:     Some("main".to_string()),
@@ -354,6 +407,7 @@ mod tests {
                 ..DockerSandboxOptions::default()
             },
             github_app:       None,
+            forgejo:          None,
             run_id:           None,
             clone_origin_url: Some("https://gitlab.com/acme/widgets".to_string()),
             clone_branch:     None,

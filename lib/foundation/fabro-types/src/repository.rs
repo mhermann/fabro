@@ -18,9 +18,19 @@ impl RepositoryRef {
         origin_url: Option<String>,
         source_directory: Option<&str>,
     ) -> Self {
+        Self::from_origin_and_source_with_forge(origin_url, source_directory, None)
+    }
+
+    /// Classifies the origin, recognizing Forgejo origins against the
+    /// configured instance base URL when one is provided.
+    pub fn from_origin_and_source_with_forge(
+        origin_url: Option<String>,
+        source_directory: Option<&str>,
+        forgejo_base_url: Option<&str>,
+    ) -> Self {
         Self {
             name: repository_name(origin_url.as_deref(), source_directory),
-            provider: repository_provider(origin_url.as_deref()),
+            provider: repository_provider(origin_url.as_deref(), forgejo_base_url),
             origin_url,
         }
     }
@@ -260,16 +270,25 @@ fn has_lock_suffix(value: &str) -> bool {
 #[serde(rename_all = "snake_case")]
 pub enum RepositoryProvider {
     Github,
+    Forgejo,
     Git,
     Unknown,
 }
 
-fn repository_provider(origin_url: Option<&str>) -> RepositoryProvider {
+fn repository_provider(
+    origin_url: Option<&str>,
+    forgejo_base_url: Option<&str>,
+) -> RepositoryProvider {
     let Some(origin) = origin_url.filter(|origin| !origin.trim().is_empty()) else {
         return RepositoryProvider::Unknown;
     };
     if is_github_origin(origin) {
         RepositoryProvider::Github
+    } else if forgejo_base_url
+        .filter(|base| !base.trim().is_empty())
+        .is_some_and(|base| is_forgejo_origin(origin, base))
+    {
+        RepositoryProvider::Forgejo
     } else {
         RepositoryProvider::Git
     }
@@ -280,6 +299,54 @@ fn is_github_origin(origin: &str) -> bool {
         || origin.starts_with("https://github.com/")
         || origin.starts_with("http://github.com/")
         || origin.starts_with("ssh://git@github.com/")
+}
+
+/// Reports whether `origin` points at the configured Forgejo instance.
+///
+/// Forgejo is self-hosted, so there is no fixed host: the origin is a Forgejo
+/// origin only when its host (and optional base path for subpath installs)
+/// matches the configured instance base URL. Scheme is ignored so `https://`
+/// instance URLs also match `git@host:` / `ssh://` clone origins.
+#[must_use]
+pub fn is_forgejo_origin(origin: &str, forgejo_base_url: &str) -> bool {
+    let Some((origin_host, origin_path)) = origin_host_and_path(origin) else {
+        return false;
+    };
+    let Some((base_host, base_path)) = origin_host_and_path(forgejo_base_url) else {
+        return false;
+    };
+
+    if !origin_host.eq_ignore_ascii_case(&base_host) {
+        return false;
+    }
+    // An instance installed at the host root matches every path on that host;
+    // a subpath install matches only under its base path.
+    base_path.is_empty()
+        || origin_path == base_path
+        || origin_path
+            .strip_prefix(base_path.as_str())
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// `(lowercased host, trimmed path)` for an HTTPS, SSH, or scp-style origin.
+#[expect(
+    clippy::disallowed_types,
+    reason = "Origin matching parses clone URLs for host/path identity; credentials are stripped before comparison."
+)]
+fn origin_host_and_path(origin: &str) -> Option<(String, String)> {
+    let candidate = origin.trim();
+    let candidate = match candidate.strip_prefix("git@") {
+        Some(rest) if rest.contains(':') => {
+            let (host, path) = rest.split_once(':')?;
+            format!("ssh://{host}/{path}")
+        }
+        Some(_) => return None,
+        None => candidate.to_string(),
+    };
+    let parsed = url::Url::parse(&candidate).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let path = parsed.path().trim_matches('/').to_string();
+    Some((host, path))
 }
 
 fn repository_name(origin_url: Option<&str>, source_directory: Option<&str>) -> String {
@@ -491,5 +558,95 @@ mod tests {
 
         let over = "a".repeat(256);
         assert!(!is_valid_github_ref_selector(&over));
+    }
+
+    #[test]
+    fn forgejo_origins_match_the_configured_instance() {
+        let cases = [
+            (
+                "https://forgejo.example.com/owner/repo",
+                "https://forgejo.example.com",
+                true,
+            ),
+            (
+                "https://forgejo.example.com/owner/repo.git",
+                "https://forgejo.example.com",
+                true,
+            ),
+            (
+                "git@forgejo.example.com:owner/repo",
+                "https://forgejo.example.com",
+                true,
+            ),
+            (
+                "ssh://git@forgejo.example.com/owner/repo",
+                "https://forgejo.example.com",
+                true,
+            ),
+            // Subpath installs match with their base path.
+            (
+                "https://example.com/forgejo/owner/repo",
+                "https://example.com/forgejo",
+                true,
+            ),
+            // Different host never matches.
+            (
+                "https://other.example.com/owner/repo",
+                "https://forgejo.example.com",
+                false,
+            ),
+            // A prefix of another host is not a match.
+            (
+                "https://forgejo.example.com.evil.test/owner/repo",
+                "https://forgejo.example.com",
+                false,
+            ),
+            // github.com origins stay GitHub.
+            (
+                "https://github.com/owner/repo",
+                "https://github.example.com",
+                false,
+            ),
+            // Trailing slashes are tolerated on both sides.
+            (
+                "https://forgejo.example.com/",
+                "https://forgejo.example.com/",
+                true,
+            ),
+        ];
+        for (origin, base, expected) in cases {
+            assert_eq!(
+                is_forgejo_origin(origin, base),
+                expected,
+                "{origin} vs {base}"
+            );
+        }
+    }
+
+    #[test]
+    fn repository_ref_classifies_forgejo_origins_against_the_instance() {
+        let base = Some("https://forgejo.example.com");
+        let classified = RepositoryRef::from_origin_and_source_with_forge(
+            Some("https://forgejo.example.com/owner/repo.git".to_string()),
+            None,
+            base,
+        );
+        assert_eq!(classified.provider, RepositoryProvider::Forgejo);
+        assert_eq!(classified.name, "owner/repo");
+
+        // Without the configured instance the same origin is a plain git repo.
+        let unclassified = RepositoryRef::from_origin_and_source_with_forge(
+            Some("https://forgejo.example.com/owner/repo.git".to_string()),
+            None,
+            None,
+        );
+        assert_eq!(unclassified.provider, RepositoryProvider::Git);
+
+        let github = RepositoryRef::from_origin_and_source_with_forge(
+            Some("https://github.com/owner/repo".to_string()),
+            None,
+            base,
+        );
+        assert_eq!(github.provider, RepositoryProvider::Github);
     }
 }

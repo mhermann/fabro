@@ -725,6 +725,7 @@ mod tests {
                     expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
                 },
             )),
+            forgejo:          None,
             pre_run_git:      Some(GitContext {
                 origin_url: origin_url.to_string(),
                 branch:     "main".to_string(),

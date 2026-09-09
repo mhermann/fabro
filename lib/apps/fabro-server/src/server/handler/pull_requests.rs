@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::{HeaderValue, header};
+use fabro_types::settings::run::MergeStrategy;
 
 use super::super::{
     ApiError, AppState, CloseRunPullRequestResponse, CreateRunPullRequestRequest, IntoResponse,
@@ -105,6 +106,64 @@ pub(in crate::server) async fn load_server_github_credentials(
     }
 }
 
+/// Owned Forgejo API pieces for one request: the record's instance base URL,
+/// the configured token, and the shared server HTTP client. Handlers assemble
+/// a short-lived [`fabro_forgejo::ForgejoContext`] from these so nothing
+/// outlives the request.
+pub(in crate::server) struct ServerForgejoParts {
+    pub(in crate::server) base_url: String,
+    pub(in crate::server) creds:    fabro_forgejo::ForgejoCredentials,
+    pub(in crate::server) http:     fabro_http::HttpClient,
+}
+
+impl ServerForgejoParts {
+    pub(in crate::server) fn context(&self) -> fabro_forgejo::ForgejoContext<'_> {
+        fabro_forgejo::ForgejoContext::with_http_client(
+            &self.creds,
+            &self.base_url,
+            self.http.clone(),
+        )
+    }
+}
+
+/// Load the Forgejo pieces for `base_url` from the configured instance
+/// token. `Err` when the Forgejo integration is not configured for this
+/// instance or its token is missing.
+pub(in crate::server) async fn server_forgejo_parts(
+    state: &AppState,
+    base_url: &str,
+) -> Result<ServerForgejoParts, ApiError> {
+    let http = state.http_client().map_err(|err| {
+        ApiError::with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Forgejo integration unavailable on server: {err}"),
+            "integration_unavailable",
+        )
+    })?;
+    match state.forgejo_credentials().await {
+        Ok(Some((configured_base, creds))) if configured_base == base_url => {
+            Ok(ServerForgejoParts {
+                base_url: base_url.to_string(),
+                creds,
+                http,
+            })
+        }
+        Ok(_) => Err(ApiError::with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Forgejo integration is not configured for this pull request's instance.",
+            "integration_unavailable",
+        )),
+        Err(err) => {
+            warn!(error = %err, "Forgejo integration unavailable on server");
+            Err(ApiError::with_code(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Forgejo integration unavailable on server.",
+                "integration_unavailable",
+            ))
+        }
+    }
+}
+
 pub(in crate::server) fn server_github_context<'a>(
     state: &'a AppState,
     creds: &'a fabro_github::GitHubCredentials,
@@ -195,6 +254,7 @@ impl<'a> RunPrInputs<'a> {
     pub(in crate::server) fn extract(
         run_state: &'a fabro_store::RunProjection,
         force: bool,
+        forgejo_base_url: Option<&str>,
     ) -> Result<Self, ApiError> {
         if let Some(record) = run_state.pull_request.as_ref() {
             return Err(pull_request_exists_error(record));
@@ -266,7 +326,15 @@ impl<'a> RunPrInputs<'a> {
             ));
         }
         let normalized_origin = fabro_github::normalize_repo_origin_url(origin_url);
-        parse_github_owner_repo_from_url(&normalized_origin, "repo origin URL")?;
+        // GitHub origins re-validate against github.com; Forgejo origins
+        // validate against the configured instance. The provider client
+        // re-parses the origin with its own rules at creation time.
+        let is_forgejo_origin = forgejo_base_url
+            .as_ref()
+            .is_some_and(|base| fabro_types::is_forgejo_origin(&normalized_origin, base));
+        if !is_forgejo_origin {
+            parse_github_owner_repo_from_url(&normalized_origin, "repo origin URL")?;
+        }
         Ok(Self {
             goal: run_spec.graph.goal(),
             base_branch,
@@ -333,7 +401,9 @@ async fn create_run_pull_request(
     {
         return accepted_pull_request_creation_response(&id, creation.clone());
     }
-    if let Err(err) = RunPrInputs::extract(&run_state, body.force) {
+    if let Err(err) =
+        RunPrInputs::extract(&run_state, body.force, state.forgejo_base_url().as_deref())
+    {
         return err.into_response();
     }
     if let Err(err) = load_server_github_credentials(state.as_ref()).await {
@@ -495,6 +565,66 @@ async fn unlink_run_pull_request(
     Json(pull_request).into_response()
 }
 
+/// Merge a stored Forgejo pull request through its instance API.
+async fn merge_forgejo_run_pull_request(
+    state: &Arc<AppState>,
+    ctx: &PullRequestGithubContext,
+    forge: &fabro_types::ForgeInstanceRef,
+    method: MergeStrategy,
+) -> Response {
+    let parts = match server_forgejo_parts(state.as_ref(), &forge.base_url).await {
+        Ok(parts) => parts,
+        Err(err) => return err.into_response(),
+    };
+    match fabro_forgejo::merge_pull_request(
+        &parts.context(),
+        &ctx.owner,
+        &ctx.repo,
+        ctx.number,
+        method,
+    )
+    .await
+    {
+        Ok(()) => Json(MergeRunPullRequestResponse {
+            number: i64::try_from(ctx.number)
+                .expect("stored pull request number should fit in i64"),
+            html_url: ctx.record.html_url(),
+            method,
+        })
+        .into_response(),
+        Err(fabro_forgejo::PullRequestApiError::NotFound { .. }) => {
+            github_pull_request_not_found_error(ctx.number).into_response()
+        }
+        Err(err) => ApiError::new(StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+    }
+}
+
+/// Close a stored Forgejo pull request through its instance API.
+async fn close_forgejo_run_pull_request(
+    state: &Arc<AppState>,
+    ctx: &PullRequestGithubContext,
+    forge: &fabro_types::ForgeInstanceRef,
+) -> Response {
+    let parts = match server_forgejo_parts(state.as_ref(), &forge.base_url).await {
+        Ok(parts) => parts,
+        Err(err) => return err.into_response(),
+    };
+    match fabro_forgejo::close_pull_request(&parts.context(), &ctx.owner, &ctx.repo, ctx.number)
+        .await
+    {
+        Ok(()) => Json(CloseRunPullRequestResponse {
+            number:   i64::try_from(ctx.number)
+                .expect("stored pull request number should fit in i64"),
+            html_url: ctx.record.html_url(),
+        })
+        .into_response(),
+        Err(fabro_forgejo::PullRequestApiError::NotFound { .. }) => {
+            github_pull_request_not_found_error(ctx.number).into_response()
+        }
+        Err(err) => ApiError::new(StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+    }
+}
+
 async fn get_run_pull_request(
     RequireRunScoped(id): RequireRunScoped,
     State(state): State<Arc<AppState>>,
@@ -504,6 +634,11 @@ async fn get_run_pull_request(
         Err(err) => return err.into_response(),
     };
     let (owner, repo, number) = github_coordinates_for_record(&record);
+    // A stored Forgejo link names its instance; clone the forge reference so
+    // `record` can move into the response.
+    if let Some(forge) = record.forge.clone() {
+        return get_forgejo_run_pull_request(&state, record, &forge, &owner, &repo, number).await;
+    }
     let creds = match load_server_github_credentials(state.as_ref()).await {
         Ok(creds) => creds,
         Err(err) => {
@@ -548,6 +683,54 @@ async fn get_run_pull_request(
     }
 }
 
+/// Live details for a stored Forgejo pull request, routed through the
+/// instance API named by the record's `forge` reference.
+async fn get_forgejo_run_pull_request(
+    state: &Arc<AppState>,
+    record: PullRequestLink,
+    forge: &fabro_types::ForgeInstanceRef,
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> Response {
+    let parts = match server_forgejo_parts(state.as_ref(), &forge.base_url).await {
+        Ok(parts) => parts,
+        Err(err) => {
+            warn!(error = ?err, "Returning stored pull request without live Forgejo details");
+            return Json(unavailable_pull_request_response(
+                record,
+                fabro_types::PullRequestDetailsUnavailableReason::IntegrationUnavailable,
+            ))
+            .into_response();
+        }
+    };
+    match fabro_forgejo::get_pull_request(&parts.context(), owner, repo, number).await {
+        Ok(detail) => Json(available_pull_request_response(
+            record,
+            fabro_types::PullRequestDetails::from(detail),
+        ))
+        .into_response(),
+        Err(fabro_forgejo::PullRequestApiError::NotFound { .. }) => {
+            warn!(
+                "Returning stored pull request because the Forgejo instance no longer has the PR"
+            );
+            Json(unavailable_pull_request_response(
+                record,
+                fabro_types::PullRequestDetailsUnavailableReason::NotFound,
+            ))
+            .into_response()
+        }
+        Err(err) => {
+            warn!(error = %err, "Returning stored pull request without live Forgejo details");
+            Json(unavailable_pull_request_response(
+                record,
+                fabro_types::PullRequestDetailsUnavailableReason::FetchFailed,
+            ))
+            .into_response()
+        }
+    }
+}
+
 async fn merge_run_pull_request(
     RequireRunScoped(id): RequireRunScoped,
     State(state): State<Arc<AppState>>,
@@ -557,6 +740,9 @@ async fn merge_run_pull_request(
         Ok(ctx) => ctx,
         Err(err) => return err.into_response(),
     };
+    if let Some(forge) = ctx.record.forge.as_ref() {
+        return merge_forgejo_run_pull_request(&state, &ctx, forge, body.method).await;
+    }
     let github = match server_github_context(state.as_ref(), &ctx.creds) {
         Ok(github) => github,
         Err(err) => return err.into_response(),
@@ -587,6 +773,9 @@ async fn close_run_pull_request(
         Ok(ctx) => ctx,
         Err(err) => return err.into_response(),
     };
+    if let Some(forge) = ctx.record.forge.as_ref() {
+        return close_forgejo_run_pull_request(&state, &ctx, forge).await;
+    }
     let github = match server_github_context(state.as_ref(), &ctx.creds) {
         Ok(github) => github,
         Err(err) => return err.into_response(),

@@ -1993,3 +1993,67 @@ command = ["fs-server"]
         );
     }
 }
+
+#[test]
+fn forgejo_scm_rejects_pull_request_auto_merge() {
+    let error = workflow_settings_from_toml(
+        r#"
+_version = 1
+
+[run.scm]
+provider = "forgejo"
+owner = "acme"
+repository = "widgets"
+
+[run.run_branch]
+enabled = true
+push = true
+
+[run.pull_request]
+enabled = true
+auto_merge = true
+"#,
+    )
+    .expect_err("forgejo + auto_merge should not resolve");
+
+    let rendered = match error {
+        crate::Error::Resolve { errors, .. } => errors
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => panic!("expected structured resolve errors, got {other:#}"),
+    };
+    assert!(
+        rendered.contains("run.pull_request.auto_merge"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Forgejo"), "{rendered}");
+}
+
+#[test]
+fn github_scm_still_allows_pull_request_auto_merge() {
+    let settings = workflow_settings_from_toml(
+        r#"
+_version = 1
+
+[run.scm]
+provider = "github"
+owner = "acme"
+repository = "widgets"
+
+[run.run_branch]
+enabled = true
+push = true
+
+[run.pull_request]
+enabled = true
+auto_merge = true
+"#,
+    )
+    .expect("github + auto_merge should resolve")
+    .run;
+
+    assert!(settings.scm.provider.as_deref() == Some("github"));
+    assert!(settings.pull_request.expect("pull_request").auto_merge);
+}

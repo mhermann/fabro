@@ -9,7 +9,7 @@ use fabro_slack::config::{
     resolve_credentials_status_with_lookup as resolve_slack_credentials_status_with_lookup,
 };
 use fabro_static::EnvVars;
-use fabro_types::settings::server::GithubIntegrationSettings;
+use fabro_types::settings::server::{ForgejoIntegrationSettings, GithubIntegrationSettings};
 use fabro_vault::Vault;
 use tokio::time::timeout;
 
@@ -29,6 +29,7 @@ const SERVER_DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(25);
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/repos/github/{owner}/{name}", get(get_github_repo))
+        .route("/repos/forgejo/{owner}/{name}", get(get_forgejo_repo))
         .route("/health", get(health))
         .route("/health/diagnostics", post(run_diagnostics))
         .route("/settings", get(get_server_settings))
@@ -112,11 +113,55 @@ async fn get_system_integrations(
         Err(err) => return secret_store_failure(&err),
     };
     let github = github_integration_status(&settings.server.integrations.github, &vault);
+    let forgejo = forgejo_integration_status(&settings.server.integrations.forgejo, &vault);
     let slack = slack_integration_status(state.as_ref(), &vault);
     let response = SystemIntegrationsResponse {
-        data: vec![github, slack],
+        data: vec![github, forgejo, slack],
     };
     (StatusCode::OK, Json(response)).into_response()
+}
+
+fn forgejo_integration_status(
+    settings: &ForgejoIntegrationSettings,
+    vault: &Vault,
+) -> SystemIntegrationStatus {
+    let mut metadata = BTreeMap::new();
+    if let Some(url) = settings.url.as_ref() {
+        metadata.insert("url".to_string(), url.clone());
+    }
+
+    if !settings.enabled {
+        return integration_status(
+            IntegrationProvider::Forgejo,
+            false,
+            false,
+            IntegrationStatus::Disabled,
+            Vec::new(),
+            metadata,
+        );
+    }
+
+    let mut missing = Vec::new();
+    if settings.url.is_none() {
+        missing.push("server.integrations.forgejo.url".to_string());
+    }
+    if missing_vault_secret(vault, EnvVars::FORGEJO_TOKEN) {
+        missing.push(EnvVars::FORGEJO_TOKEN.to_string());
+    }
+
+    let configured = missing.is_empty();
+    integration_status(
+        IntegrationProvider::Forgejo,
+        true,
+        configured,
+        if configured {
+            IntegrationStatus::Configured
+        } else {
+            IntegrationStatus::MissingCredentials
+        },
+        missing,
+        metadata,
+    )
 }
 
 fn github_integration_status(
@@ -675,6 +720,96 @@ async fn get_github_repo(
         })),
     )
         .into_response()
+}
+
+/// Repository-access probe for the configured Forgejo instance. The shape
+/// mirrors `get_github_repo` minus GitHub-App-only fields (`permissions`,
+/// `install_url`): the token either reaches the repository or it does not.
+async fn get_forgejo_repo(
+    _auth: RequiredUser,
+    State(state): State<Arc<AppState>>,
+    Path((owner, name)): Path<(String, String)>,
+) -> Response {
+    if let Err(response) = validate_github_slug("owner", &owner, 39) {
+        return response;
+    }
+    if let Err(response) = validate_github_slug("repo", &name, 100) {
+        return response;
+    }
+    let Some(base_url) = state.forgejo_base_url() else {
+        return ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server.integrations.forgejo.url is not configured",
+        )
+        .into_response();
+    };
+    let creds = match state.forgejo_credentials().await {
+        Ok(Some((_, creds))) => creds,
+        Ok(None) => {
+            return ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "FORGEJO_TOKEN is not configured -- run fabro install or run fabro secret set FORGEJO_TOKEN",
+            )
+            .into_response();
+        }
+        Err(err) => {
+            tracing::error!(error = ?err, "Loading Forgejo credentials failed");
+            return ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Forgejo credentials are unavailable",
+            )
+            .into_response();
+        }
+    };
+    let client = match state.http_client() {
+        Ok(http) => http,
+        Err(err) => {
+            return ApiError::new(StatusCode::SERVICE_UNAVAILABLE, err.to_string()).into_response();
+        }
+    };
+    let context = fabro_forgejo::ForgejoContext::with_http_client(&creds, &base_url, client);
+
+    match fabro_forgejo::get_repo(&context, &owner, &name).await {
+        Ok(repo) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "owner": owner,
+                "name": name,
+                "accessible": true,
+                "default_branch": repo.default_branch,
+                "private": repo.private,
+                "permissions": null,
+                "install_url": serde_json::Value::Null,
+            })),
+        )
+            .into_response(),
+        Err(err) => {
+            let rendered = err.to_string();
+            if rendered.contains("not found") {
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "owner": owner,
+                        "name": name,
+                        "accessible": false,
+                        "default_branch": null,
+                        "private": null,
+                        "permissions": null,
+                        "install_url": serde_json::Value::Null,
+                    })),
+                )
+                    .into_response();
+            }
+            if rendered.contains("token rejected") {
+                return ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Stored Forgejo token is invalid -- run fabro install or run fabro secret set FORGEJO_TOKEN",
+                )
+                .into_response();
+            }
+            ApiError::new(StatusCode::BAD_GATEWAY, rendered).into_response()
+        }
+    }
 }
 
 async fn run_diagnostics(_auth: RequiredUser, State(state): State<Arc<AppState>>) -> Response {

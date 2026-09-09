@@ -14,14 +14,13 @@
 
 
 
-/**
- * Server integration provider.
- */
-
-export const IntegrationProvider = {
-    GITHUB: 'github',
-    FORGEJO: 'forgejo',
-    SLACK: 'slack'
-} as const;
-
-export type IntegrationProvider = typeof IntegrationProvider[keyof typeof IntegrationProvider];
+export interface ForgejoIntegrationSettings {
+    /**
+     * Whether the Forgejo integration is enabled on this server.
+     */
+    'enabled': boolean;
+    /**
+     * Base URL of the configured Forgejo instance.
+     */
+    'url': string | null;
+}
