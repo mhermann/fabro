@@ -1,0 +1,6 @@
+{
+  "outcome": "failed",
+  "notes": null,
+  "failure_reason": "Script failed with exit code: 1\n\n## output\nEverything up-to-date\nGraphQL: Pull Request has merge conflicts (mergePullRequest)\n",
+  "timestamp": "2026-09-09T12:33:06.258138Z"
+}
