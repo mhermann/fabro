@@ -1,0 +1,5 @@
+{
+  "script": "set -eu\nBRANCH=$(git branch --show-current)\ngit push origin $BRANCH\ngh pr merge $BRANCH --squash",
+  "command": "exec 2>&1\nset -eu\nBRANCH=$(git branch --show-current)\ngit push origin $BRANCH\ngh pr merge $BRANCH --squash",
+  "language": "shell"
+}
