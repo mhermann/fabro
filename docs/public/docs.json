@@ -104,7 +104,8 @@
               "integrations/fireworks",
               "integrations/slack",
               "integrations/brave-search",
-              "integrations/venice-search"
+              "integrations/venice-search",
+              "integrations/searxng-search"
             ]
           },
           {
@@ -309,6 +310,7 @@
             "group": "September 2026",
             "icon": "clock-rotate-left",
             "pages": [
+              "changelog/2026-09-09",
               "changelog/2026-09-04"
             ]
           },

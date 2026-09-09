@@ -58,7 +58,8 @@ pub const WEB_SEARCH_TOOL_NAME: &str = "web_search";
 
 /// Registers the core tools shared by all provider profiles: `read_file`,
 /// `write_file`, `shell`, `grep`, `glob`, and `web_fetch`. `web_search` is
-/// included when a Brave or Venice Search API key is configured.
+/// included when a SearXNG URL, Brave Search API key, or Venice Search API
+/// key is configured; a configured SearXNG URL wins.
 ///
 /// The shell tool captures its default and max timeouts from `options`.
 pub fn register_core_tools(

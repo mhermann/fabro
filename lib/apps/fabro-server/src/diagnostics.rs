@@ -758,6 +758,20 @@ fn check_storage_dir_path(path: &std::path::Path) -> CheckResult {
 }
 
 async fn check_web_search(state: &AppState) -> CheckResult {
+    // SearXNG wins when its URL is configured; paid keys stay dormant.
+    let searxng_base_url = state
+        .config_env_lookup(EnvVars::SEARXNG_URL)
+        .map(|url| url.trim().trim_end_matches('/').to_string())
+        .filter(|url| !url.is_empty());
+    if let Some(base_url) = searxng_base_url {
+        let api_key =
+            match diagnostic_secret(state, WEB_SEARCH_CHECK_NAME, EnvVars::SEARXNG_API_KEY).await {
+                Ok(value) => value,
+                Err(result) => return result,
+            };
+        return check_searxng_search(base_url, api_key).await;
+    }
+
     let brave_api_key = match diagnostic_secret(
         state,
         WEB_SEARCH_CHECK_NAME,
@@ -787,7 +801,7 @@ async fn check_web_search(state: &AppState) -> CheckResult {
         summary:     "optional, not configured".to_string(),
         details:     Vec::new(),
         remediation: Some(
-            "Run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY` to enable web search".to_string(),
+            "Set SEARXNG_URL, or run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY`, to enable web search".to_string(),
         ),
     }
 }
@@ -833,6 +847,26 @@ async fn check_venice_search(api_key: String) -> CheckResult {
     .await;
 
     match_web_search_probe(probe, "venice", "VENICE_API_KEY")
+}
+
+async fn check_searxng_search(base_url: String, api_key: Option<String>) -> CheckResult {
+    let http = match http_client_or_check(WEB_SEARCH_CHECK_NAME, CheckStatus::Warning) {
+        Ok(http) => http,
+        Err(result) => return result,
+    };
+
+    let probe = timeout(EXTERNAL_SERVICE_PROBE_TIMEOUT, async move {
+        let mut request = http
+            .get(format!("{base_url}/search?q=test&format=json&pageno=1"))
+            .header("Accept", "application/json");
+        if let Some(api_key) = api_key {
+            request = request.bearer_auth(api_key);
+        }
+        request.send().await.map_err(anyhow::Error::new)
+    })
+    .await;
+
+    match_web_search_probe(probe, "searxng", "SEARXNG_URL")
 }
 
 fn match_web_search_probe(
@@ -1263,7 +1297,7 @@ enabled = false
         assert_eq!(
             result.remediation.as_deref(),
             Some(
-                "Run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY` to enable web search"
+                "Set SEARXNG_URL, or run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY`, to enable web search"
             )
         );
     }
@@ -1284,14 +1318,17 @@ enabled = false
         assert_eq!(
             result.remediation.as_deref(),
             Some(
-                "Run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY` to enable web search"
+                "Set SEARXNG_URL, or run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY`, to enable web search"
             )
         );
     }
 
     #[tokio::test]
     async fn check_web_search_prefers_brave_when_both_vault_keys_exist() {
+        // Pin the env lookup so an ambient SEARXNG_URL in the developer's
+        // shell cannot flip this test to the searxng branch.
         let state = TestAppStateBuilder::new()
+            .env_lookup(|_| None)
             .vault_entries([
                 (EnvVars::BRAVE_SEARCH_API_KEY, "invalid\n"),
                 (EnvVars::VENICE_API_KEY, "invalid\n"),
@@ -1307,7 +1344,10 @@ enabled = false
 
     #[tokio::test]
     async fn check_web_search_uses_venice_when_brave_vault_key_is_absent() {
+        // Pin the env lookup so an ambient SEARXNG_URL in the developer's
+        // shell cannot flip this test to the searxng branch.
         let state = TestAppStateBuilder::new()
+            .env_lookup(|_| None)
             .vault_entries([(EnvVars::VENICE_API_KEY, "invalid\n")])
             .build();
 
@@ -1316,6 +1356,56 @@ enabled = false
         assert_eq!(result.name, "Web Search");
         assert_eq!(result.status, CheckStatus::Warning);
         assert_eq!(result.summary, "venice: connectivity error");
+    }
+
+    #[tokio::test]
+    async fn check_web_search_probes_searxng_when_url_is_configured() {
+        // Port 1 refuses connections, so the probe fails fast instead of
+        // reaching an external service.
+        let state = TestAppStateBuilder::new()
+            .env_lookup(|name| {
+                (name == EnvVars::SEARXNG_URL).then(|| "http://127.0.0.1:1".to_string())
+            })
+            .build();
+
+        let result = check_web_search(&state).await;
+
+        assert_eq!(result.name, "Web Search");
+        assert_eq!(result.status, CheckStatus::Warning);
+        assert_eq!(result.summary, "searxng: connectivity error");
+        assert_eq!(
+            result.remediation.as_deref(),
+            Some("Check SEARXNG_URL and network connectivity")
+        );
+    }
+
+    #[tokio::test]
+    async fn check_web_search_prefers_searxng_when_url_and_both_vault_keys_exist() {
+        let state = TestAppStateBuilder::new()
+            .env_lookup(|name| {
+                (name == EnvVars::SEARXNG_URL).then(|| "http://127.0.0.1:1".to_string())
+            })
+            .vault_entries([
+                (EnvVars::BRAVE_SEARCH_API_KEY, "invalid\n"),
+                (EnvVars::VENICE_API_KEY, "invalid\n"),
+            ])
+            .build();
+
+        let result = check_web_search(&state).await;
+
+        assert_eq!(result.summary, "searxng: connectivity error");
+    }
+
+    #[tokio::test]
+    async fn check_web_search_ignores_blank_searxng_url() {
+        let state = TestAppStateBuilder::new()
+            .env_lookup(|name| (name == EnvVars::SEARXNG_URL).then(|| "   ".to_string()))
+            .vault_entries([(EnvVars::BRAVE_SEARCH_API_KEY, "invalid\n")])
+            .build();
+
+        let result = check_web_search(&state).await;
+
+        assert_eq!(result.summary, "brave: connectivity error");
     }
 
     #[tokio::test]

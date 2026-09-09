@@ -1,0 +1,107 @@
+---
+title: "SearXNG Search"
+description: "Give Fabro agents free web search via a self-hosted SearXNG instance"
+---
+
+Fabro's [`web_search`](/agents/tools#web_search) tool lets agents search the web during workflow execution. Fabro uses your own [SearXNG](https://docs.searxng.org/) instance automatically when `SEARXNG_URL` is configured — no per-query API cost, unlike the paid [Brave Search](/integrations/brave-search) and [Venice Search](/integrations/venice-search) backends.
+
+A configured `SEARXNG_URL` wins over stored Brave and Venice keys. To use the paid backends again, unset `SEARXNG_URL`. There is no fallback between providers after selection: a failed SearXNG call returns an error rather than retrying through Brave or Venice.
+
+SearXNG is a metasearch engine: it forwards each query to upstream public engines (Google, Bing, DuckDuckGo, Wikipedia, and others) and merges the results. Fabro runs as a thin client — you operate the SearXNG service, Fabro only calls its JSON API. The queries still reach those upstream engines from your network, so "local" means locally operated, not hermetic.
+
+## Setup
+
+1. Run SearXNG with the JSON output format enabled. The official image works as-is once the format is allowed in `settings.yml`:
+
+```yaml title="docker-compose.yaml"
+services:
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./searxng:/etc/searxng
+    restart: unless-stopped
+```
+
+```yaml title="searxng/settings.yml"
+search:
+  formats:
+    - html
+    - json
+```
+
+The `json` entry in `search.formats` is required — without it SearXNG answers API requests with HTTP 403.
+
+2. Point the Fabro server at the instance:
+
+```bash
+export SEARXNG_URL=http://searxng.internal:8080
+```
+
+`SEARXNG_URL` is ordinary configuration, not a secret: the Fabro server reads it from its own process environment (or `server.env`), and it is forwarded to workflow workers.
+
+3. Optionally store a bearer token if your instance sits behind an authenticating proxy:
+
+```bash
+fabro secret set SEARXNG_API_KEY <token>
+```
+
+The token is forwarded as an `Authorization: Bearer` header on every search call. Instances on a trusted network need no key at all.
+
+4. Verify the setup:
+
+```bash
+fabro doctor
+```
+
+The doctor output should show **Web Search** as `searxng: configured and reachable`.
+
+## How it works
+
+Agents call the `web_search` tool with a query string. Fabro `GET`s `{SEARXNG_URL}/search?q=<query>&format=json&pageno=1` and returns numbered results with title, URL, description, and the publication date when SearXNG includes one:
+
+```
+1. Rust Lang
+   https://rust-lang.org
+   A systems language
+   2026-01-02
+```
+
+SearXNG has no result-count parameter, so Fabro slices the returned list to `max_results` client-side. SearXNG merges and ranks results across its enabled engines; tune which engines answer and how many results each returns in the instance's `settings.yml`.
+
+Calls time out after 30 seconds — metasearch waits on several upstream engines and is slower than a direct API.
+
+If `SEARXNG_URL` is not set, Fabro uses direct [Brave Search](/integrations/brave-search) when `BRAVE_SEARCH_API_KEY` is present, then [Venice Search](/integrations/venice-search) when `VENICE_API_KEY` is present. If none is configured, the tool is not registered.
+
+See the [`web_search` tool reference](/agents/tools#web_search) for parameters and details.
+
+## Permissions
+
+`web_search` is classified as a `shell` category tool, requiring the `full` [permission level](/agents/permissions) for auto-approval. At lower permission levels:
+
+- **Interactive mode** — the user is prompted to approve each call
+- **Non-interactive mode** (`--auto-approve`) — calls are denied
+
+## Troubleshooting
+
+**"SearXNG search returned status 403"** — The instance does not allow the JSON format. Add `json` to `search.formats` in the instance's `settings.yml` and restart it. If a token is stored, also verify `SEARXNG_API_KEY` matches what the proxy expects.
+
+**"SearXNG search returned status 401"** — The instance (or its proxy) requires a token. Set it with `fabro secret set SEARXNG_API_KEY <token>`.
+
+**"searxng: connectivity error" in `fabro doctor`** — The server cannot reach `SEARXNG_URL`. Check the URL, that the container is running, and that any firewall between the server and the instance allows the port.
+
+**Timeouts during runs** — Upstream engines may be slow or blocked from your network. Try fewer engines in the instance's `settings.yml` or a different network path.
+
+**Doctor shows SearXNG but runs use Brave** — `SEARXNG_URL` must be set in the *server process* environment. If it is only set in your shell where you launched a different process, runs started through the server never see it.
+
+## Further reading
+
+<Columns cols={2}>
+  <Card title="Tools" icon="wrench" href="/agents/tools#web_search">
+    Full `web_search` tool reference — parameters, output format, and error handling.
+  </Card>
+  <Card title="Brave Search" icon="globe" href="/integrations/brave-search">
+    Paid Brave Search backend, used when no SearXNG URL is configured.
+  </Card>
+</Columns>

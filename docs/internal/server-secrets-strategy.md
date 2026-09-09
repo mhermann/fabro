@@ -40,6 +40,7 @@ the vault:
 - `DAYTONA_API_KEY`
 - `BRAVE_SEARCH_API_KEY`
 - `VENICE_API_KEY`
+- `SEARXNG_API_KEY`
 
 `FABRO_JWT_PRIVATE_KEY` and `FABRO_JWT_PUBLIC_KEY` are removed. `SESSION_SECRET` is the single auth root.
 

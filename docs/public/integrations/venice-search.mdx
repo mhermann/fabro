@@ -3,7 +3,7 @@ title: "Venice Search"
 description: "Give Fabro agents web search capabilities via Venice's augment/search API"
 ---
 
-Fabro's [`web_search`](/agents/tools#web_search) tool lets agents search the web during workflow execution. Fabro uses [Venice Search](https://docs.venice.ai/api-reference/endpoint/augment/search) automatically when `VENICE_API_KEY` is available and a direct [Brave Search](/integrations/brave-search) key is not.
+Fabro's [`web_search`](/agents/tools#web_search) tool lets agents search the web during workflow execution. Fabro uses [Venice Search](https://docs.venice.ai/api-reference/endpoint/augment/search) automatically when `VENICE_API_KEY` is available and neither a SearXNG URL (`SEARXNG_URL`) nor a direct [Brave Search](/integrations/brave-search) key is configured.
 
 Venice Search reuses the same `VENICE_API_KEY` as the Venice LLM provider. Agents keep calling `web_search`; only the HTTP backend changes.
 
@@ -17,7 +17,7 @@ fabro provider login --provider venice
 fabro secret set VENICE_API_KEY venice-...
 ```
 
-Fabro prefers direct Brave Search whenever `BRAVE_SEARCH_API_KEY` is also present. To select Venice, leave that key unset or remove it:
+Selection order is SearXNG URL, then Brave key, then Venice key. Fabro prefers direct Brave Search whenever `BRAVE_SEARCH_API_KEY` is also present and `SEARXNG_URL` is not set. To select Venice, leave those unset or remove them:
 
 ```bash
 fabro secret rm BRAVE_SEARCH_API_KEY
@@ -29,7 +29,7 @@ fabro secret rm BRAVE_SEARCH_API_KEY
 fabro doctor
 ```
 
-The doctor output should show **Web Search** as `venice: configured and reachable`. If neither Venice nor Brave is configured, web search is reported as a warning. Workflows still run, but the `web_search` tool is omitted from the agent's tool set.
+The doctor output should show **Web Search** as `venice: configured and reachable`. If none of SearXNG, Venice, or Brave is configured, web search is reported as a warning. Workflows still run, but the `web_search` tool is omitted from the agent's tool set.
 
 The Fabro server reads this key from the vault only. It does not read `VENICE_API_KEY` from process env or `server.env`.
 
@@ -46,7 +46,7 @@ Agents call the `web_search` tool with a query string. Fabro `POST`s to Venice `
 
 Venice Search is billed by Venice at $0.01 per request and is rate-limited to 20 requests per minute on the Venice side. Queries longer than 400 characters are rejected before the HTTP call.
 
-If `VENICE_API_KEY` is absent but `BRAVE_SEARCH_API_KEY` exists, Fabro uses direct Brave Search. If neither key exists, the tool is not registered. After selecting Venice, a failed call returns an error; Fabro does not retry through direct Brave Search.
+If `VENICE_API_KEY` is absent but a SearXNG URL or `BRAVE_SEARCH_API_KEY` is configured, Fabro uses that backend instead. If none exists, the tool is not registered. After selecting Venice, a failed call returns an error; Fabro does not retry through another provider.
 
 See the [`web_search` tool reference](/agents/tools#web_search) for parameters and details.
 
@@ -73,7 +73,7 @@ See the [`web_search` tool reference](/agents/tools#web_search) for parameters a
   <Card title="Tools" icon="wrench" href="/agents/tools#web_search">
     Full `web_search` tool reference — parameters, output format, and error handling.
   </Card>
-  <Card title="Brave Search" icon="globe" href="/integrations/brave-search">
-    Direct Brave Search backend, preferred whenever its key is configured.
+  <Card title="SearXNG Search" icon="globe" href="/integrations/searxng-search">
+    Free self-hosted search backend, preferred whenever its URL is configured.
   </Card>
 </Columns>

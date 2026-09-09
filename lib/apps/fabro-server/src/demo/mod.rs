@@ -672,7 +672,7 @@ pub(crate) async fn run_diagnostics(
                         { "name": "GitHub App", "status": "pass", "summary": "demo configured", "details": [], "remediation": null },
                         { "name": "Docker Sandbox", "status": "pass", "summary": "disabled", "details": [{ "text": "server.sandbox.providers.docker.enabled = false", "warn": false }], "remediation": null },
                         { "name": "Cloud Sandbox", "status": "warning", "summary": "not configured", "details": [], "remediation": "Set DAYTONA_API_KEY to enable cloud sandbox execution" },
-                        { "name": "Web Search", "status": "warning", "summary": "optional, not configured", "details": [], "remediation": "Set BRAVE_SEARCH_API_KEY or VENICE_API_KEY to enable web search" }
+                        { "name": "Web Search", "status": "warning", "summary": "optional, not configured", "details": [], "remediation": "Set SEARXNG_URL, or set BRAVE_SEARCH_API_KEY or VENICE_API_KEY, to enable web search" }
                     ]
                 },
                 {

@@ -311,11 +311,18 @@ async fn build_registry(
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "The SearXNG URL is non-secret endpoint config that must come from the run process env; \
+              secrets still come from the vault."
+)]
 async fn tool_secrets_from_configured_sources(vault: &Arc<AsyncRwLock<Vault>>) -> ToolSecrets {
     let vault = vault.read().await;
     ToolSecrets {
         brave_search_api_key: vault.get(EnvVars::BRAVE_SEARCH_API_KEY).map(str::to_string),
         venice_api_key:       vault.get(EnvVars::VENICE_API_KEY).map(str::to_string),
+        searxng_url:          std::env::var(EnvVars::SEARXNG_URL).ok(),
+        searxng_api_key:      vault.get(EnvVars::SEARXNG_API_KEY).map(str::to_string),
     }
 }
 

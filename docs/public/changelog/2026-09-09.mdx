@@ -1,0 +1,10 @@
+---
+title: "SearXNG web search"
+date: "2026-09-09"
+---
+
+The built-in `web_search` tool now supports a self-hosted [SearXNG](https://docs.searxng.org/) instance as a free alternative to the paid Brave and Venice backends. Set `SEARXNG_URL` in the server process environment to point Fabro at your instance; a configured URL wins over stored `BRAVE_SEARCH_API_KEY` and `VENICE_API_KEY` keys, and unsetting the URL makes the paid keys active again. There is no fallback between providers on failure.
+
+SearXNG is a metasearch engine that aggregates public engines, so queries carry no per-query API cost. Fabro calls the instance's JSON API (`format=json`), slices results to `max_results` client-side, and forwards an optional `SEARXNG_API_KEY` from the vault as a bearer token for instances behind an authenticating proxy.
+
+See [SearXNG Search](/integrations/searxng-search) for setup, including the `settings.yml` change that enables the JSON format.

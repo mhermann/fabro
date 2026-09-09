@@ -18,6 +18,11 @@ const WORKER_ENV_ALLOWLIST: &[&str] = &[
     // reach the refresh-ahead loop in the ACP handler.
     EnvVars::FABRO_PUSH_CRED_REFRESH_AHEAD,
     EnvVars::FABRO_PUSH_CRED_REFRESH_INTERVAL_SECONDS,
+    // Non-secret SearXNG endpoint config. `tool_secrets_from_configured_sources`
+    // reads it from process env, so it must survive `env_clear()` in the worker.
+    // The optional SEARXNG_API_KEY is deliberately excluded — it reaches the
+    // worker through the server vault (read via FABRO_HOME).
+    EnvVars::SEARXNG_URL,
     #[cfg(feature = "test-support")]
     "FABRO_TEST_ASSUME_LLM_READY",
     EnvVars::TERM,
@@ -125,6 +130,11 @@ mod tests {
                 "FABRO_PUSH_CRED_REFRESH_INTERVAL_SECONDS".to_string(),
                 "1800".to_string(),
             ),
+            (
+                "SEARXNG_URL".to_string(),
+                "http://searxng.internal:8080".to_string(),
+            ),
+            ("SEARXNG_API_KEY".to_string(), "leak".to_string()),
             ("TERM".to_string(), "xterm-256color".to_string()),
             ("NO_COLOR".to_string(), "1".to_string()),
             ("CLICOLOR".to_string(), "0".to_string()),
@@ -173,6 +183,14 @@ mod tests {
                 .map(String::as_str),
             Some("1800")
         );
+        // SearXNG endpoint config is non-secret and must cross into the worker;
+        // its optional API key must not (vault-only, like other integration
+        // secrets).
+        assert_eq!(
+            actual.get("SEARXNG_URL").map(String::as_str),
+            Some("http://searxng.internal:8080")
+        );
+        assert!(!actual.contains_key("SEARXNG_API_KEY"));
         assert_eq!(
             actual.get("TERM").map(String::as_str),
             Some("xterm-256color")
