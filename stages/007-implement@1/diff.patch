@@ -1,0 +1,1179 @@
+diff --git a/.env.example b/.env.example
+index bdb08589..c301c656 100644
+--- a/.env.example
++++ b/.env.example
+@@ -15,6 +15,13 @@ OPENROUTER_API_KEY=
+ POOLSIDE_API_KEY=
+ ZAI_API_KEY=
+ 
++# Base URL of a self-hosted SearXNG instance backing the web_search tool.
++# A configured URL wins over the Brave and Venice keys. Requires the JSON
++# format to be enabled on the instance; see docs/public/integrations/searxng-search.mdx.
++SEARXNG_URL=
++# Optional bearer token for a SearXNG instance behind an authenticating proxy.
++SEARXNG_API_KEY=
++
+ SESSION_SECRET=
+ GITHUB_APP_CLIENT_SECRET=
+ GITHUB_APP_WEBHOOK_SECRET=
+diff --git a/docs/internal/server-secrets-strategy.md b/docs/internal/server-secrets-strategy.md
+index df416088..4f6ad758 100644
+--- a/docs/internal/server-secrets-strategy.md
++++ b/docs/internal/server-secrets-strategy.md
+@@ -40,6 +40,7 @@ the vault:
+ - `DAYTONA_API_KEY`
+ - `BRAVE_SEARCH_API_KEY`
+ - `VENICE_API_KEY`
++- `SEARXNG_API_KEY`
+ 
+ `FABRO_JWT_PRIVATE_KEY` and `FABRO_JWT_PUBLIC_KEY` are removed. `SESSION_SECRET` is the single auth root.
+ 
+diff --git a/docs/public/administration/deploy-railway.mdx b/docs/public/administration/deploy-railway.mdx
+index c26c845d..410476b4 100644
+--- a/docs/public/administration/deploy-railway.mdx
++++ b/docs/public/administration/deploy-railway.mdx
+@@ -41,7 +41,7 @@ Add variables in **Service → Variables** as needed. The [Server Configuration]
+ | `SESSION_SECRET` | 64-character hex string; required when the web UI is enabled |
+ | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | Optional static S3 object-store credentials |
+ 
+-Do not put optional integration secrets in Railway variables for server runtime. After the server is running, add LLM provider keys, Slack, Daytona, Brave Search, Venice Search, `GITHUB_TOKEN`, and GitHub App secrets to the server vault with `fabro secret set`, `fabro provider login`, or `fabro install`.
++Do not put optional integration secrets in Railway variables for server runtime. After the server is running, add LLM provider keys, Slack, Daytona, Brave Search, Venice Search, `SEARXNG_API_KEY`, `GITHUB_TOKEN`, and GitHub App secrets to the server vault with `fabro secret set`, `fabro provider login`, or `fabro install`. `SEARXNG_URL` is not a secret — set it in Railway variables (or `server.env`) so the server process can reach your SearXNG instance.
+ 
+ No `.env` file is auto-loaded inside the container; bootstrap variables come from Railway's environment.
+ 
+diff --git a/docs/public/administration/security.mdx b/docs/public/administration/security.mdx
+index b27fada6..9d24bd68 100644
+--- a/docs/public/administration/security.mdx
++++ b/docs/public/administration/security.mdx
+@@ -38,7 +38,7 @@ Fabro is single-tenant software designed for small, trusted teams. The following
+ ### Secrets
+ 
+ - **Keep API keys out of sandboxes.** The local sandbox strips environment variables ending in `_API_KEY`, `_SECRET`, `_TOKEN`, `_PASSWORD`, or `_CREDENTIAL`, but Docker and Daytona sandboxes provide stronger isolation — only explicitly configured variables are passed through.
+-- **Use the server vault for optional integration credentials.** For server-backed workflows, persist LLM provider keys, Slack, Daytona, Brave Search, Venice Search, GitHub token, and GitHub App secrets with `fabro provider login`, `fabro secret set`, or `fabro install`. Process env and `server.env` are reserved for bootstrap secrets such as `SESSION_SECRET`, `FABRO_DEV_TOKEN`, and object-store credentials. Do not commit secrets to version control.
++- **Use the server vault for optional integration credentials.** For server-backed workflows, persist LLM provider keys, Slack, Daytona, Brave Search, Venice Search, `SEARXNG_API_KEY`, GitHub token, and GitHub App secrets with `fabro provider login`, `fabro secret set`, or `fabro install`. Process env and `server.env` are reserved for bootstrap secrets such as `SESSION_SECRET`, `FABRO_DEV_TOKEN`, and object-store credentials, plus non-secret endpoint config such as `SEARXNG_URL`. Do not commit secrets to version control.
+ - **Rotate the session secret.** The `SESSION_SECRET` environment variable encrypts web app sessions. Rotate it periodically and use a strong random value.
+ 
+ ### Execution
+diff --git a/docs/public/administration/self-host-docker.mdx b/docs/public/administration/self-host-docker.mdx
+index ab022814..2acd7b95 100644
+--- a/docs/public/administration/self-host-docker.mdx
++++ b/docs/public/administration/self-host-docker.mdx
+@@ -108,7 +108,7 @@ Generate one with `openssl rand -hex 32`.
+ | `FABRO_DEV_TOKEN` | Optional — pre-set the dev token instead of reading the one written to `/storage` on first boot |
+ | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | Optional static S3 object-store credentials |
+ 
+-Do not put optional integration secrets in `.env` for server runtime. Configure LLM provider keys, Slack, Daytona, Brave Search, Venice Search, `GITHUB_TOKEN`, and GitHub App secrets in the vault with `fabro secret set`, `fabro provider login`, or `fabro install`.
++Do not put optional integration secrets in `.env` for server runtime. Configure LLM provider keys, Slack, Daytona, Brave Search, Venice Search, `SEARXNG_API_KEY`, `GITHUB_TOKEN`, and GitHub App secrets in the vault with `fabro secret set`, `fabro provider login`, or `fabro install`. `SEARXNG_URL` is not a secret — set it in `.env` or the container process env so the server can reach your SearXNG instance.
+ 
+ Optional:
+ 
+diff --git a/docs/public/administration/server-configuration.mdx b/docs/public/administration/server-configuration.mdx
+index d37b7223..e42de5bf 100644
+--- a/docs/public/administration/server-configuration.mdx
++++ b/docs/public/administration/server-configuration.mdx
+@@ -369,7 +369,7 @@ Fabro splits server-runtime secrets into two scopes:
+ - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` when a manual config uses
+   static S3 object-store credentials
+ 
+-`server.env` is not used for Slack, Daytona, Brave Search, Venice Search, LLM provider keys, `GITHUB_TOKEN`, or GitHub App private key/client secret/webhook secret. Configure those optional integrations with `fabro secret set`, `fabro provider login`, or `fabro install`.
++`server.env` is not used for Slack, Daytona, Brave Search, Venice Search, `SEARXNG_API_KEY`, LLM provider keys, `GITHUB_TOKEN`, or GitHub App private key/client secret/webhook secret. Configure those optional integrations with `fabro secret set`, `fabro provider login`, or `fabro install`. `SEARXNG_URL` is an exception by design: it is non-secret endpoint config read from the server process env (or `server.env`) and forwarded to workflow workers.
+ 
+ During startup, Fabro temporarily migrates recognized legacy optional integration secrets from process env or `server.env` into the vault. When a matching `server.env` entry can be safely removed, Fabro writes a hidden backup beside `server.env` first. Process env values cannot be cleaned up automatically, so remove those from your deployment environment after the vault contains the secret.
+ 
+@@ -412,15 +412,23 @@ These optional server integrations are vault-only:
+ fabro secret set DAYTONA_API_KEY dtn_...
+ fabro secret set BRAVE_SEARCH_API_KEY BSA...
+ fabro secret set VENICE_API_KEY venice-...
++fabro secret set SEARXNG_API_KEY <token>
+ ```
+ 
+-The built-in [`web_search`](/agents/tools#web_search) tool selects its backend from these credentials. It uses direct Brave Search when `BRAVE_SEARCH_API_KEY` exists. Otherwise it uses Venice Search when `VENICE_API_KEY` exists. When neither exists, the tool is not registered.
++The built-in [`web_search`](/agents/tools#web_search) tool selects its backend as follows: a configured `SEARXNG_URL` (process env, not the vault) wins; otherwise it uses direct Brave Search when `BRAVE_SEARCH_API_KEY` exists; otherwise it uses Venice Search when `VENICE_API_KEY` exists. When none exists, the tool is not registered.
+ 
+ | Variable | Description |
+ |---|---|
+ | `DAYTONA_API_KEY` | Daytona cloud sandbox API key |
+-| `BRAVE_SEARCH_API_KEY` | Brave Search API key; the preferred `web_search` backend when present |
+-| `VENICE_API_KEY` | Venice API key; used by the Venice LLM provider and by `web_search` when no Brave key exists |
++| `BRAVE_SEARCH_API_KEY` | Brave Search API key; the preferred `web_search` backend when no SearXNG URL is configured |
++| `VENICE_API_KEY` | Venice API key; used by the Venice LLM provider and by `web_search` when no SearXNG URL or Brave key exists |
++| `SEARXNG_API_KEY` | Optional bearer token for a SearXNG instance behind an authenticating proxy |
++
++`SEARXNG_URL` is resolved from process env like `DAYTONA_API_URL` — it is endpoint configuration, not a secret:
++
++| Variable | Description |
++|---|---|
++| `SEARXNG_URL` | Base URL of the SearXNG instance backing `web_search` (for example `http://searxng.internal:8080`) |
+ 
+ ### Server authentication
+ 
+diff --git a/docs/public/administration/troubleshooting.mdx b/docs/public/administration/troubleshooting.mdx
+index d3a59f05..4deea4c0 100644
+--- a/docs/public/administration/troubleshooting.mdx
++++ b/docs/public/administration/troubleshooting.mdx
+@@ -17,7 +17,7 @@ It checks:
+ 
+ - Local user config and storage directory health
+ - Server-reported LLM provider connectivity, with configured providers probed concurrently
+-- GitHub App, sandbox, and web search credentials (Brave or Venice), plus Docker daemon reachability when the Docker sandbox provider is enabled
++- GitHub App, sandbox, and web search credentials (a SearXNG URL, Brave, or Venice), plus Docker daemon reachability when the Docker sandbox provider is enabled
+ - Server authentication and crypto configuration
+ 
+ LLM provider probe failures are reported as errors. Use `--verbose` to see the underlying provider error chain when a key, network route, or model endpoint fails.
+diff --git a/docs/public/agents/prompts.mdx b/docs/public/agents/prompts.mdx
+index eed36c6d..818fe41a 100644
+--- a/docs/public/agents/prompts.mdx
++++ b/docs/public/agents/prompts.mdx
+@@ -145,7 +145,7 @@ The system prompt varies by LLM provider. Each provider has its own identity tex
+ <Accordion title="Example system prompt (Anthropic provider)">
+ This is the full system prompt sent to Claude as the LLM system message. The `<environment>` block is filled in at runtime.
+ 
+-Tool guidance tracks the tools actually registered for the session. The `web_search` section shown below is present when a [Brave Search API key](/integrations/brave-search) or [Venice API key](/integrations/venice-search) is configured. Without either key, both the tool and its guidance are omitted.
++Tool guidance tracks the tools actually registered for the session. The `web_search` section shown below is present when a [SearXNG URL](/integrations/searxng-search), [Brave Search API key](/integrations/brave-search), or [Venice API key](/integrations/venice-search) is configured. Without any of them, both the tool and its guidance are omitted.
+ 
+ ```
+ You are Claude, an AI coding assistant made by Anthropic. You help users with
+diff --git a/docs/public/agents/tools.mdx b/docs/public/agents/tools.mdx
+index d6df674e..42a3e4b1 100644
+--- a/docs/public/agents/tools.mdx
++++ b/docs/public/agents/tools.mdx
+@@ -20,7 +20,7 @@ These tools are registered for every provider profile:
+ | `write_file` | write | Create or overwrite a file |
+ | `grep` | read | Search file contents with regex patterns |
+ | `glob` | read | Find files by name pattern |
+-| `web_search` | shell | Search the web via Brave or Venice |
++| `web_search` | shell | Search the web via SearXNG, Brave, or Venice |
+ | `web_fetch` | shell | Fetch and optionally summarize a URL |
+ 
+ ## Provider-specific tools
+@@ -123,18 +123,18 @@ Patterns are case-sensitive and relative to `path`: `*` and `?` stay within one
+ 
+ ### web_search
+ 
+-Searches the web using Brave Search or Venice Search. Fabro selects the backend automatically from the available credentials.
++Searches the web using a SearXNG instance, Brave Search, or Venice Search. Fabro selects the backend automatically from the available configuration.
+ 
+ | Parameter | Type | Required | Description |
+ |---|---|---|---|
+ | `query` | string | yes | Search query. Venice rejects queries longer than 400 characters before the HTTP call. |
+ | `max_results` | integer | no | Maximum results (default: 5, max: 20) |
+ 
+-Fabro uses direct [Brave Search](/integrations/brave-search) when `BRAVE_SEARCH_API_KEY` is present. Otherwise it uses [Venice Search](/integrations/venice-search) when `VENICE_API_KEY` is present. If both credentials are present, Brave wins. Venice always uses its Brave search engine.
++Selection order: a configured `SEARXNG_URL` wins, then [Brave Search](/integrations/brave-search) when `BRAVE_SEARCH_API_KEY` is present, then [Venice Search](/integrations/venice-search) when `VENICE_API_KEY` is present. Venice always uses its Brave search engine.
+ 
+-Runs read both keys from the server vault. Workers start from a cleared environment, so exporting a key in the server's shell has no effect. The standalone agent CLI reads the keys from the invoking shell instead.
++Runs read `SEARXNG_URL` from the server process environment and both keys from the server vault. Workers start from a cleared environment, so exporting a key in the server's shell has no effect. The standalone agent CLI reads all three from the invoking shell instead.
+ 
+-The tool is registered when either credential is available. Once Fabro selects a backend, a failed call returns an error; it does not retry through the other backend. Results contain numbered titles, URLs, and descriptions. Venice includes `date` on a fourth line when present.
++The tool is registered when any of the three is configured. Once Fabro selects a backend, a failed call returns an error; it does not retry through another backend. Results contain numbered titles, URLs, and descriptions. SearXNG and Venice include a date on a fourth line when present.
+ 
+ ### web_fetch
+ 
+diff --git a/docs/public/changelog/2026-09-09.mdx b/docs/public/changelog/2026-09-09.mdx
+new file mode 100644
+index 00000000..a7634e30
+--- /dev/null
++++ b/docs/public/changelog/2026-09-09.mdx
+@@ -0,0 +1,10 @@
++---
++title: "SearXNG web search"
++date: "2026-09-09"
++---
++
++The built-in `web_search` tool now supports a self-hosted [SearXNG](https://docs.searxng.org/) instance as a free alternative to the paid Brave and Venice backends. Set `SEARXNG_URL` in the server process environment to point Fabro at your instance; a configured URL wins over stored `BRAVE_SEARCH_API_KEY` and `VENICE_API_KEY` keys, and unsetting the URL makes the paid keys active again. There is no fallback between providers on failure.
++
++SearXNG is a metasearch engine that aggregates public engines, so queries carry no per-query API cost. Fabro calls the instance's JSON API (`format=json`), slices results to `max_results` client-side, and forwards an optional `SEARXNG_API_KEY` from the vault as a bearer token for instances behind an authenticating proxy.
++
++See [SearXNG Search](/integrations/searxng-search) for setup, including the `settings.yml` change that enables the JSON format.
+diff --git a/docs/public/docs.json b/docs/public/docs.json
+index 72a42e5e..8cbe5c1c 100644
+--- a/docs/public/docs.json
++++ b/docs/public/docs.json
+@@ -104,7 +104,8 @@
+               "integrations/fireworks",
+               "integrations/slack",
+               "integrations/brave-search",
+-              "integrations/venice-search"
++              "integrations/venice-search",
++              "integrations/searxng-search"
+             ]
+           },
+           {
+@@ -309,6 +310,7 @@
+             "group": "September 2026",
+             "icon": "clock-rotate-left",
+             "pages": [
++              "changelog/2026-09-09",
+               "changelog/2026-09-04"
+             ]
+           },
+diff --git a/docs/public/integrations/brave-search.mdx b/docs/public/integrations/brave-search.mdx
+index 5b6ee247..01c8172c 100644
+--- a/docs/public/integrations/brave-search.mdx
++++ b/docs/public/integrations/brave-search.mdx
+@@ -5,7 +5,7 @@ description: "Give Fabro agents web search capabilities via the Brave Search API
+ 
+ Fabro's [`web_search`](/agents/tools#web_search) tool lets agents search the web during workflow execution. It uses the [Brave Search API](https://brave.com/search/api/) to return titles, URLs, and descriptions for any query.
+ 
+-Fabro selects the backend from the credentials in its vault. Direct Brave Search is preferred whenever `BRAVE_SEARCH_API_KEY` is present. When that key is absent, Fabro can use [Venice Search](/integrations/venice-search) with `VENICE_API_KEY` instead.
++Fabro selects the backend from its configuration. Direct Brave Search is preferred whenever `BRAVE_SEARCH_API_KEY` is present and no SearXNG URL (`SEARXNG_URL`) is configured. When the Brave key is absent, Fabro can use [Venice Search](/integrations/venice-search) with `VENICE_API_KEY`, or a self-hosted [SearXNG](/integrations/searxng-search) instance with `SEARXNG_URL`.
+ 
+ ## Setup
+ 
+@@ -23,7 +23,7 @@ fabro secret set BRAVE_SEARCH_API_KEY BSA...
+ fabro doctor
+ ```
+ 
+-The doctor output should show **Web Search** as `brave: configured and reachable`. If the Brave key is missing but a Venice key exists, Fabro checks Venice instead. If neither key exists, web search is reported as a warning. Workflows still run, but the `web_search` tool is omitted from the agent's tool set and its system prompt.
++The doctor output should show **Web Search** as `brave: configured and reachable`. If the Brave key is missing, Fabro checks a configured SearXNG URL, then Venice. If none is configured, web search is reported as a warning. Workflows still run, but the `web_search` tool is omitted from the agent's tool set and its system prompt.
+ 
+ The Fabro server reads this key from the vault only. It does not read `BRAVE_SEARCH_API_KEY` from process env or `server.env`.
+ 
+@@ -41,7 +41,7 @@ Agents call the `web_search` tool with a query string. Fabro sends the query to
+    The Rust book
+ ```
+ 
+-If `BRAVE_SEARCH_API_KEY` is not configured, Fabro uses Venice when `VENICE_API_KEY` is available. If neither key is configured, the tool is not registered.
++If `BRAVE_SEARCH_API_KEY` is not configured, Fabro uses a SearXNG instance when `SEARXNG_URL` is set, then Venice when `VENICE_API_KEY` is available. If none is configured, the tool is not registered.
+ 
+ See the [`web_search` tool reference](/agents/tools#web_search) for parameters and details.
+ 
+diff --git a/docs/public/integrations/searxng-search.mdx b/docs/public/integrations/searxng-search.mdx
+new file mode 100644
+index 00000000..4adeea0c
+--- /dev/null
++++ b/docs/public/integrations/searxng-search.mdx
+@@ -0,0 +1,107 @@
++---
++title: "SearXNG Search"
++description: "Give Fabro agents free web search via a self-hosted SearXNG instance"
++---
++
++Fabro's [`web_search`](/agents/tools#web_search) tool lets agents search the web during workflow execution. Fabro uses your own [SearXNG](https://docs.searxng.org/) instance automatically when `SEARXNG_URL` is configured — no per-query API cost, unlike the paid [Brave Search](/integrations/brave-search) and [Venice Search](/integrations/venice-search) backends.
++
++A configured `SEARXNG_URL` wins over stored Brave and Venice keys. To use the paid backends again, unset `SEARXNG_URL`. There is no fallback between providers after selection: a failed SearXNG call returns an error rather than retrying through Brave or Venice.
++
++SearXNG is a metasearch engine: it forwards each query to upstream public engines (Google, Bing, DuckDuckGo, Wikipedia, and others) and merges the results. Fabro runs as a thin client — you operate the SearXNG service, Fabro only calls its JSON API. The queries still reach those upstream engines from your network, so "local" means locally operated, not hermetic.
++
++## Setup
++
++1. Run SearXNG with the JSON output format enabled. The official image works as-is once the format is allowed in `settings.yml`:
++
++```yaml title="docker-compose.yaml"
++services:
++  searxng:
++    image: searxng/searxng:latest
++    ports:
++      - "8080:8080"
++    volumes:
++      - ./searxng:/etc/searxng
++    restart: unless-stopped
++```
++
++```yaml title="searxng/settings.yml"
++search:
++  formats:
++    - html
++    - json
++```
++
++The `json` entry in `search.formats` is required — without it SearXNG answers API requests with HTTP 403.
++
++2. Point the Fabro server at the instance:
++
++```bash
++export SEARXNG_URL=http://searxng.internal:8080
++```
++
++`SEARXNG_URL` is ordinary configuration, not a secret: the Fabro server reads it from its own process environment (or `server.env`), and it is forwarded to workflow workers.
++
++3. Optionally store a bearer token if your instance sits behind an authenticating proxy:
++
++```bash
++fabro secret set SEARXNG_API_KEY <token>
++```
++
++The token is forwarded as an `Authorization: Bearer` header on every search call. Instances on a trusted network need no key at all.
++
++4. Verify the setup:
++
++```bash
++fabro doctor
++```
++
++The doctor output should show **Web Search** as `searxng: configured and reachable`.
++
++## How it works
++
++Agents call the `web_search` tool with a query string. Fabro `GET`s `{SEARXNG_URL}/search?q=<query>&format=json&pageno=1` and returns numbered results with title, URL, description, and the publication date when SearXNG includes one:
++
++```
++1. Rust Lang
++   https://rust-lang.org
++   A systems language
++   2026-01-02
++```
++
++SearXNG has no result-count parameter, so Fabro slices the returned list to `max_results` client-side. SearXNG merges and ranks results across its enabled engines; tune which engines answer and how many results each returns in the instance's `settings.yml`.
++
++Calls time out after 30 seconds — metasearch waits on several upstream engines and is slower than a direct API.
++
++If `SEARXNG_URL` is not set, Fabro uses direct [Brave Search](/integrations/brave-search) when `BRAVE_SEARCH_API_KEY` is present, then [Venice Search](/integrations/venice-search) when `VENICE_API_KEY` is present. If none is configured, the tool is not registered.
++
++See the [`web_search` tool reference](/agents/tools#web_search) for parameters and details.
++
++## Permissions
++
++`web_search` is classified as a `shell` category tool, requiring the `full` [permission level](/agents/permissions) for auto-approval. At lower permission levels:
++
++- **Interactive mode** — the user is prompted to approve each call
++- **Non-interactive mode** (`--auto-approve`) — calls are denied
++
++## Troubleshooting
++
++**"SearXNG search returned status 403"** — The instance does not allow the JSON format. Add `json` to `search.formats` in the instance's `settings.yml` and restart it. If a token is stored, also verify `SEARXNG_API_KEY` matches what the proxy expects.
++
++**"SearXNG search returned status 401"** — The instance (or its proxy) requires a token. Set it with `fabro secret set SEARXNG_API_KEY <token>`.
++
++**"searxng: connectivity error" in `fabro doctor`** — The server cannot reach `SEARXNG_URL`. Check the URL, that the container is running, and that any firewall between the server and the instance allows the port.
++
++**Timeouts during runs** — Upstream engines may be slow or blocked from your network. Try fewer engines in the instance's `settings.yml` or a different network path.
++
++**Doctor shows SearXNG but runs use Brave** — `SEARXNG_URL` must be set in the *server process* environment. If it is only set in your shell where you launched a different process, runs started through the server never see it.
++
++## Further reading
++
++<Columns cols={2}>
++  <Card title="Tools" icon="wrench" href="/agents/tools#web_search">
++    Full `web_search` tool reference — parameters, output format, and error handling.
++  </Card>
++  <Card title="Brave Search" icon="globe" href="/integrations/brave-search">
++    Paid Brave Search backend, used when no SearXNG URL is configured.
++  </Card>
++</Columns>
+diff --git a/docs/public/integrations/venice-search.mdx b/docs/public/integrations/venice-search.mdx
+index ac37cafb..2c137929 100644
+--- a/docs/public/integrations/venice-search.mdx
++++ b/docs/public/integrations/venice-search.mdx
+@@ -3,7 +3,7 @@ title: "Venice Search"
+ description: "Give Fabro agents web search capabilities via Venice's augment/search API"
+ ---
+ 
+-Fabro's [`web_search`](/agents/tools#web_search) tool lets agents search the web during workflow execution. Fabro uses [Venice Search](https://docs.venice.ai/api-reference/endpoint/augment/search) automatically when `VENICE_API_KEY` is available and a direct [Brave Search](/integrations/brave-search) key is not.
++Fabro's [`web_search`](/agents/tools#web_search) tool lets agents search the web during workflow execution. Fabro uses [Venice Search](https://docs.venice.ai/api-reference/endpoint/augment/search) automatically when `VENICE_API_KEY` is available and neither a SearXNG URL (`SEARXNG_URL`) nor a direct [Brave Search](/integrations/brave-search) key is configured.
+ 
+ Venice Search reuses the same `VENICE_API_KEY` as the Venice LLM provider. Agents keep calling `web_search`; only the HTTP backend changes.
+ 
+@@ -17,7 +17,7 @@ fabro provider login --provider venice
+ fabro secret set VENICE_API_KEY venice-...
+ ```
+ 
+-Fabro prefers direct Brave Search whenever `BRAVE_SEARCH_API_KEY` is also present. To select Venice, leave that key unset or remove it:
++Selection order is SearXNG URL, then Brave key, then Venice key. Fabro prefers direct Brave Search whenever `BRAVE_SEARCH_API_KEY` is also present and `SEARXNG_URL` is not set. To select Venice, leave those unset or remove them:
+ 
+ ```bash
+ fabro secret rm BRAVE_SEARCH_API_KEY
+@@ -29,7 +29,7 @@ fabro secret rm BRAVE_SEARCH_API_KEY
+ fabro doctor
+ ```
+ 
+-The doctor output should show **Web Search** as `venice: configured and reachable`. If neither Venice nor Brave is configured, web search is reported as a warning. Workflows still run, but the `web_search` tool is omitted from the agent's tool set.
++The doctor output should show **Web Search** as `venice: configured and reachable`. If none of SearXNG, Venice, or Brave is configured, web search is reported as a warning. Workflows still run, but the `web_search` tool is omitted from the agent's tool set.
+ 
+ The Fabro server reads this key from the vault only. It does not read `VENICE_API_KEY` from process env or `server.env`.
+ 
+@@ -46,7 +46,7 @@ Agents call the `web_search` tool with a query string. Fabro `POST`s to Venice `
+ 
+ Venice Search is billed by Venice at $0.01 per request and is rate-limited to 20 requests per minute on the Venice side. Queries longer than 400 characters are rejected before the HTTP call.
+ 
+-If `VENICE_API_KEY` is absent but `BRAVE_SEARCH_API_KEY` exists, Fabro uses direct Brave Search. If neither key exists, the tool is not registered. After selecting Venice, a failed call returns an error; Fabro does not retry through direct Brave Search.
++If `VENICE_API_KEY` is absent but a SearXNG URL or `BRAVE_SEARCH_API_KEY` is configured, Fabro uses that backend instead. If none exists, the tool is not registered. After selecting Venice, a failed call returns an error; Fabro does not retry through another provider.
+ 
+ See the [`web_search` tool reference](/agents/tools#web_search) for parameters and details.
+ 
+@@ -73,7 +73,7 @@ See the [`web_search` tool reference](/agents/tools#web_search) for parameters a
+   <Card title="Tools" icon="wrench" href="/agents/tools#web_search">
+     Full `web_search` tool reference — parameters, output format, and error handling.
+   </Card>
+-  <Card title="Brave Search" icon="globe" href="/integrations/brave-search">
+-    Direct Brave Search backend, preferred whenever its key is configured.
++  <Card title="SearXNG Search" icon="globe" href="/integrations/searxng-search">
++    Free self-hosted search backend, preferred whenever its URL is configured.
+   </Card>
+ </Columns>
+diff --git a/lib/apps/fabro-server/src/demo/mod.rs b/lib/apps/fabro-server/src/demo/mod.rs
+index 7a8b1b34..dd7adc30 100644
+--- a/lib/apps/fabro-server/src/demo/mod.rs
++++ b/lib/apps/fabro-server/src/demo/mod.rs
+@@ -672,7 +672,7 @@ pub(crate) async fn run_diagnostics(
+                         { "name": "GitHub App", "status": "pass", "summary": "demo configured", "details": [], "remediation": null },
+                         { "name": "Docker Sandbox", "status": "pass", "summary": "disabled", "details": [{ "text": "server.sandbox.providers.docker.enabled = false", "warn": false }], "remediation": null },
+                         { "name": "Cloud Sandbox", "status": "warning", "summary": "not configured", "details": [], "remediation": "Set DAYTONA_API_KEY to enable cloud sandbox execution" },
+-                        { "name": "Web Search", "status": "warning", "summary": "optional, not configured", "details": [], "remediation": "Set BRAVE_SEARCH_API_KEY or VENICE_API_KEY to enable web search" }
++                        { "name": "Web Search", "status": "warning", "summary": "optional, not configured", "details": [], "remediation": "Set SEARXNG_URL, or set BRAVE_SEARCH_API_KEY or VENICE_API_KEY, to enable web search" }
+                     ]
+                 },
+                 {
+diff --git a/lib/apps/fabro-server/src/diagnostics.rs b/lib/apps/fabro-server/src/diagnostics.rs
+index 297ee334..ee9ea085 100644
+--- a/lib/apps/fabro-server/src/diagnostics.rs
++++ b/lib/apps/fabro-server/src/diagnostics.rs
+@@ -758,6 +758,20 @@ fn check_storage_dir_path(path: &std::path::Path) -> CheckResult {
+ }
+ 
+ async fn check_web_search(state: &AppState) -> CheckResult {
++    // SearXNG wins when its URL is configured; paid keys stay dormant.
++    let searxng_base_url = state
++        .config_env_lookup(EnvVars::SEARXNG_URL)
++        .map(|url| url.trim().trim_end_matches('/').to_string())
++        .filter(|url| !url.is_empty());
++    if let Some(base_url) = searxng_base_url {
++        let api_key =
++            match diagnostic_secret(state, WEB_SEARCH_CHECK_NAME, EnvVars::SEARXNG_API_KEY).await {
++                Ok(value) => value,
++                Err(result) => return result,
++            };
++        return check_searxng_search(base_url, api_key).await;
++    }
++
+     let brave_api_key = match diagnostic_secret(
+         state,
+         WEB_SEARCH_CHECK_NAME,
+@@ -787,7 +801,7 @@ async fn check_web_search(state: &AppState) -> CheckResult {
+         summary:     "optional, not configured".to_string(),
+         details:     Vec::new(),
+         remediation: Some(
+-            "Run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY` to enable web search".to_string(),
++            "Set SEARXNG_URL, or run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY`, to enable web search".to_string(),
+         ),
+     }
+ }
+@@ -835,6 +849,26 @@ async fn check_venice_search(api_key: String) -> CheckResult {
+     match_web_search_probe(probe, "venice", "VENICE_API_KEY")
+ }
+ 
++async fn check_searxng_search(base_url: String, api_key: Option<String>) -> CheckResult {
++    let http = match http_client_or_check(WEB_SEARCH_CHECK_NAME, CheckStatus::Warning) {
++        Ok(http) => http,
++        Err(result) => return result,
++    };
++
++    let probe = timeout(EXTERNAL_SERVICE_PROBE_TIMEOUT, async move {
++        let mut request = http
++            .get(format!("{base_url}/search?q=test&format=json&pageno=1"))
++            .header("Accept", "application/json");
++        if let Some(api_key) = api_key {
++            request = request.bearer_auth(api_key);
++        }
++        request.send().await.map_err(anyhow::Error::new)
++    })
++    .await;
++
++    match_web_search_probe(probe, "searxng", "SEARXNG_URL")
++}
++
+ fn match_web_search_probe(
+     probe: Result<anyhow::Result<Response>, Elapsed>,
+     provider: &str,
+@@ -1263,7 +1297,7 @@ enabled = false
+         assert_eq!(
+             result.remediation.as_deref(),
+             Some(
+-                "Run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY` to enable web search"
++                "Set SEARXNG_URL, or run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY`, to enable web search"
+             )
+         );
+     }
+@@ -1284,14 +1318,17 @@ enabled = false
+         assert_eq!(
+             result.remediation.as_deref(),
+             Some(
+-                "Run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY` to enable web search"
++                "Set SEARXNG_URL, or run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY`, to enable web search"
+             )
+         );
+     }
+ 
+     #[tokio::test]
+     async fn check_web_search_prefers_brave_when_both_vault_keys_exist() {
++        // Pin the env lookup so an ambient SEARXNG_URL in the developer's
++        // shell cannot flip this test to the searxng branch.
+         let state = TestAppStateBuilder::new()
++            .env_lookup(|_| None)
+             .vault_entries([
+                 (EnvVars::BRAVE_SEARCH_API_KEY, "invalid\n"),
+                 (EnvVars::VENICE_API_KEY, "invalid\n"),
+@@ -1307,7 +1344,10 @@ enabled = false
+ 
+     #[tokio::test]
+     async fn check_web_search_uses_venice_when_brave_vault_key_is_absent() {
++        // Pin the env lookup so an ambient SEARXNG_URL in the developer's
++        // shell cannot flip this test to the searxng branch.
+         let state = TestAppStateBuilder::new()
++            .env_lookup(|_| None)
+             .vault_entries([(EnvVars::VENICE_API_KEY, "invalid\n")])
+             .build();
+ 
+@@ -1318,6 +1358,56 @@ enabled = false
+         assert_eq!(result.summary, "venice: connectivity error");
+     }
+ 
++    #[tokio::test]
++    async fn check_web_search_probes_searxng_when_url_is_configured() {
++        // Port 1 refuses connections, so the probe fails fast instead of
++        // reaching an external service.
++        let state = TestAppStateBuilder::new()
++            .env_lookup(|name| {
++                (name == EnvVars::SEARXNG_URL).then(|| "http://127.0.0.1:1".to_string())
++            })
++            .build();
++
++        let result = check_web_search(&state).await;
++
++        assert_eq!(result.name, "Web Search");
++        assert_eq!(result.status, CheckStatus::Warning);
++        assert_eq!(result.summary, "searxng: connectivity error");
++        assert_eq!(
++            result.remediation.as_deref(),
++            Some("Check SEARXNG_URL and network connectivity")
++        );
++    }
++
++    #[tokio::test]
++    async fn check_web_search_prefers_searxng_when_url_and_both_vault_keys_exist() {
++        let state = TestAppStateBuilder::new()
++            .env_lookup(|name| {
++                (name == EnvVars::SEARXNG_URL).then(|| "http://127.0.0.1:1".to_string())
++            })
++            .vault_entries([
++                (EnvVars::BRAVE_SEARCH_API_KEY, "invalid\n"),
++                (EnvVars::VENICE_API_KEY, "invalid\n"),
++            ])
++            .build();
++
++        let result = check_web_search(&state).await;
++
++        assert_eq!(result.summary, "searxng: connectivity error");
++    }
++
++    #[tokio::test]
++    async fn check_web_search_ignores_blank_searxng_url() {
++        let state = TestAppStateBuilder::new()
++            .env_lookup(|name| (name == EnvVars::SEARXNG_URL).then(|| "   ".to_string()))
++            .vault_entries([(EnvVars::BRAVE_SEARCH_API_KEY, "invalid\n")])
++            .build();
++
++        let result = check_web_search(&state).await;
++
++        assert_eq!(result.summary, "brave: connectivity error");
++    }
++
+     #[tokio::test]
+     async fn check_crypto_requires_github_client_secret_from_vault() {
+         let settings = fabro_config::ServerSettingsBuilder::from_toml(
+diff --git a/lib/apps/fabro-server/src/spawn_env.rs b/lib/apps/fabro-server/src/spawn_env.rs
+index bfea6b03..e1479360 100644
+--- a/lib/apps/fabro-server/src/spawn_env.rs
++++ b/lib/apps/fabro-server/src/spawn_env.rs
+@@ -18,6 +18,11 @@ const WORKER_ENV_ALLOWLIST: &[&str] = &[
+     // reach the refresh-ahead loop in the ACP handler.
+     EnvVars::FABRO_PUSH_CRED_REFRESH_AHEAD,
+     EnvVars::FABRO_PUSH_CRED_REFRESH_INTERVAL_SECONDS,
++    // Non-secret SearXNG endpoint config. `tool_secrets_from_configured_sources`
++    // reads it from process env, so it must survive `env_clear()` in the worker.
++    // The optional SEARXNG_API_KEY is deliberately excluded — it reaches the
++    // worker through the server vault (read via FABRO_HOME).
++    EnvVars::SEARXNG_URL,
+     #[cfg(feature = "test-support")]
+     "FABRO_TEST_ASSUME_LLM_READY",
+     EnvVars::TERM,
+@@ -125,6 +130,11 @@ mod tests {
+                 "FABRO_PUSH_CRED_REFRESH_INTERVAL_SECONDS".to_string(),
+                 "1800".to_string(),
+             ),
++            (
++                "SEARXNG_URL".to_string(),
++                "http://searxng.internal:8080".to_string(),
++            ),
++            ("SEARXNG_API_KEY".to_string(), "leak".to_string()),
+             ("TERM".to_string(), "xterm-256color".to_string()),
+             ("NO_COLOR".to_string(), "1".to_string()),
+             ("CLICOLOR".to_string(), "0".to_string()),
+@@ -173,6 +183,14 @@ mod tests {
+                 .map(String::as_str),
+             Some("1800")
+         );
++        // SearXNG endpoint config is non-secret and must cross into the worker;
++        // its optional API key must not (vault-only, like other integration
++        // secrets).
++        assert_eq!(
++            actual.get("SEARXNG_URL").map(String::as_str),
++            Some("http://searxng.internal:8080")
++        );
++        assert!(!actual.contains_key("SEARXNG_API_KEY"));
+         assert_eq!(
+             actual.get("TERM").map(String::as_str),
+             Some("xterm-256color")
+diff --git a/lib/components/fabro-agent/src/cli.rs b/lib/components/fabro-agent/src/cli.rs
+index f7cfdd7f..e318a866 100644
+--- a/lib/components/fabro-agent/src/cli.rs
++++ b/lib/components/fabro-agent/src/cli.rs
+@@ -45,6 +45,8 @@ fn cli_tool_secrets() -> ToolSecrets {
+     ToolSecrets {
+         brave_search_api_key: std::env::var(EnvVars::BRAVE_SEARCH_API_KEY).ok(),
+         venice_api_key:       std::env::var(EnvVars::VENICE_API_KEY).ok(),
++        searxng_url:          std::env::var(EnvVars::SEARXNG_URL).ok(),
++        searxng_api_key:      std::env::var(EnvVars::SEARXNG_API_KEY).ok(),
+     }
+ }
+ 
+diff --git a/lib/components/fabro-agent/src/config.rs b/lib/components/fabro-agent/src/config.rs
+index cc207c3f..93dd6132 100644
+--- a/lib/components/fabro-agent/src/config.rs
++++ b/lib/components/fabro-agent/src/config.rs
+@@ -104,6 +104,10 @@ impl ToolHookCallback for ToolApprovalAdapter {
+ pub struct ToolSecrets {
+     pub brave_search_api_key: Option<String>,
+     pub venice_api_key:       Option<String>,
++    /// Base URL of an operator-run SearXNG instance. Non-secret config, but it
++    /// rides along here so every run path sees the same backend selection.
++    pub searxng_url:          Option<String>,
++    pub searxng_api_key:      Option<String>,
+ }
+ 
+ impl std::fmt::Debug for ToolSecrets {
+@@ -114,6 +118,8 @@ impl std::fmt::Debug for ToolSecrets {
+                 &self.brave_search_api_key.is_some(),
+             )
+             .field("venice_search_configured", &self.venice_api_key.is_some())
++            .field("searxng_url_configured", &self.searxng_url.is_some())
++            .field("searxng_key_configured", &self.searxng_api_key.is_some())
+             .finish()
+     }
+ }
+@@ -353,14 +359,20 @@ mod tests {
+         let secrets = ToolSecrets {
+             brave_search_api_key: Some("brave-secret-value".to_string()),
+             venice_api_key:       Some("venice-secret-value".to_string()),
++            searxng_url:          Some("http://searxng.internal:8080".to_string()),
++            searxng_api_key:      Some("searxng-secret-value".to_string()),
+         };
+ 
+         let debug = format!("{secrets:?}");
+ 
+         assert!(debug.contains("brave_search_configured: true"));
+         assert!(debug.contains("venice_search_configured: true"));
++        assert!(debug.contains("searxng_url_configured: true"));
++        assert!(debug.contains("searxng_key_configured: true"));
+         assert!(!debug.contains("brave-secret-value"));
+         assert!(!debug.contains("venice-secret-value"));
++        assert!(!debug.contains("searxng.internal"));
++        assert!(!debug.contains("searxng-secret-value"));
+     }
+ 
+     #[test]
+diff --git a/lib/components/fabro-agent/src/tools.rs b/lib/components/fabro-agent/src/tools.rs
+index 24ad2c80..8acccf65 100644
+--- a/lib/components/fabro-agent/src/tools.rs
++++ b/lib/components/fabro-agent/src/tools.rs
+@@ -58,7 +58,8 @@ pub const WEB_SEARCH_TOOL_NAME: &str = "web_search";
+ 
+ /// Registers the core tools shared by all provider profiles: `read_file`,
+ /// `write_file`, `shell`, `grep`, `glob`, and `web_fetch`. `web_search` is
+-/// included when a Brave or Venice Search API key is configured.
++/// included when a SearXNG URL, Brave Search API key, or Venice Search API
++/// key is configured; a configured SearXNG URL wins.
+ ///
+ /// The shell tool captures its default and max timeouts from `options`.
+ pub fn register_core_tools(
+diff --git a/lib/components/fabro-agent/src/web_search.rs b/lib/components/fabro-agent/src/web_search.rs
+index 08c23863..70d4ac55 100644
+--- a/lib/components/fabro-agent/src/web_search.rs
++++ b/lib/components/fabro-agent/src/web_search.rs
+@@ -1,7 +1,8 @@
+ //! Built-in `web_search` backends.
+ //!
+-//! Agents always call the same tool. Brave is preferred when its credential
+-//! is present; otherwise Venice is used when its credential is present.
++//! Agents always call the same tool. A configured SearXNG URL wins; otherwise
++//! Brave is used when its credential is present, and Venice when its
++//! credential is present.
+ 
+ use std::fmt::Write;
+ use std::sync::OnceLock;
+@@ -17,6 +18,9 @@ const BRAVE_SEARCH_URL: &str = "https://api.search.brave.com/res/v1/web/search";
+ const VENICE_SEARCH_URL: &str = "https://api.venice.ai/api/v1/augment/search";
+ const VENICE_QUERY_MAX_CHARS: usize = 400;
+ const VENICE_REQUEST_TIMEOUT: Duration = Duration::from_mins(1);
++// SearXNG fans out to upstream engines before answering, so it is slower than
++// a direct API call.
++const SEARXNG_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+ const DEFAULT_MAX_RESULTS: u64 = 5;
+ const MAX_RESULTS: u64 = 20;
+ 
+@@ -30,11 +34,26 @@ pub(crate) enum SearchBackend {
+         api_key:    String,
+         search_url: String,
+     },
++    Searxng {
++        api_key:    Option<String>,
++        search_url: String,
++    },
+ }
+ 
+ impl SearchBackend {
++    /// Selects the active backend: a configured SearXNG URL wins, then the
++    /// Brave key, then the Venice key. There is no fallback between providers
++    /// once a backend is selected.
+     #[must_use]
+     pub(crate) fn from_secrets(secrets: &ToolSecrets) -> Option<Self> {
++        if let Some(base_url) = secrets
++            .searxng_url
++            .as_deref()
++            .map(str::trim)
++            .filter(|url| !url.is_empty())
++        {
++            return Some(Self::searxng(base_url, secrets.searxng_api_key.clone()));
++        }
+         match (
+             secrets.brave_search_api_key.as_ref(),
+             secrets.venice_api_key.as_ref(),
+@@ -61,6 +80,14 @@ impl SearchBackend {
+         }
+     }
+ 
++    #[must_use]
++    pub(crate) fn searxng(base_url: &str, api_key: Option<String>) -> Self {
++        Self::Searxng {
++            api_key,
++            search_url: format!("{}/search", base_url.trim_end_matches('/')),
++        }
++    }
++
+     async fn search(&self, query: &str, max_results: u64) -> Result<String, String> {
+         match self {
+             Self::Brave {
+@@ -78,6 +105,10 @@ impl SearchBackend {
+                 }
+                 search_venice(api_key, search_url, query, max_results).await
+             }
++            Self::Searxng {
++                api_key,
++                search_url,
++            } => search_searxng(api_key.as_deref(), search_url, query, max_results).await,
+         }
+     }
+ }
+@@ -173,6 +204,49 @@ fn venice_status_error(status: u16, resp: &fabro_http::Response) -> String {
+     message
+ }
+ 
++async fn search_searxng(
++    api_key: Option<&str>,
++    search_url: &str,
++    query: &str,
++    max_results: u64,
++) -> Result<String, String> {
++    let mut request = search_http_client()
++        .get(search_url)
++        .timeout(SEARXNG_REQUEST_TIMEOUT)
++        .header("Accept", "application/json")
++        // SearXNG has no count parameter, so results are sliced client-side.
++        .query(&[("q", query), ("format", "json"), ("pageno", "1")]);
++    if let Some(api_key) = api_key {
++        request = request.bearer_auth(api_key);
++    }
++    let resp = request
++        .send()
++        .await
++        .map_err(|e| format!("HTTP request failed: {e}"))?;
++
++    let status = resp.status();
++    if !status.is_success() {
++        return Err(searxng_status_error(status.as_u16()));
++    }
++
++    let body: serde_json::Value = resp
++        .json()
++        .await
++        .map_err(|e| format!("Failed to parse response: {e}"))?;
++    Ok(format_searxng_results(&body, max_results))
++}
++
++fn searxng_status_error(status: u16) -> String {
++    let mut message = format!("SearXNG search returned status {status}");
++    if status == 401 || status == 403 {
++        let _ = write!(
++            message,
++            " (check SEARXNG_API_KEY and that the instance enables the JSON format)"
++        );
++    }
++    message
++}
++
+ fn header_str(resp: &fabro_http::Response, name: &str) -> Option<String> {
+     resp.headers()
+         .get(name)
+@@ -213,6 +287,23 @@ fn format_venice_results(body: &serde_json::Value) -> String {
+     }))
+ }
+ 
++fn format_searxng_results(body: &serde_json::Value, max_results: u64) -> String {
++    let count = max_results.min(MAX_RESULTS) as usize;
++    let results = body.get("results").and_then(serde_json::Value::as_array);
++    format_hits(results.map(|results| {
++        results
++            .iter()
++            .take(count)
++            .map(|result| SearchHit {
++                title:       json_str(result, "title"),
++                url:         json_str(result, "url"),
++                description: json_str(result, "content"),
++                date:        optional_json_str(result, "publishedDate"),
++            })
++            .collect()
++    }))
++}
++
+ struct SearchHit {
+     title:       String,
+     url:         String,
+@@ -312,10 +403,17 @@ mod tests {
+     use crate::test_support::MockSandbox;
+     use crate::tool_registry::ToolContext;
+ 
+-    fn secrets(brave: Option<&str>, venice: Option<&str>) -> ToolSecrets {
++    fn secrets(
++        brave: Option<&str>,
++        venice: Option<&str>,
++        searxng_url: Option<&str>,
++        searxng_api_key: Option<&str>,
++    ) -> ToolSecrets {
+         ToolSecrets {
+             brave_search_api_key: brave.map(str::to_string),
+             venice_api_key:       venice.map(str::to_string),
++            searxng_url:          searxng_url.map(str::to_string),
++            searxng_api_key:      searxng_api_key.map(str::to_string),
+         }
+     }
+ 
+@@ -333,27 +431,82 @@ mod tests {
+         .await
+     }
+ 
++    #[test]
++    fn from_secrets_prefers_searxng_when_url_and_both_keys_are_present() {
++        let backend = SearchBackend::from_secrets(&secrets(
++            Some("brave-key"),
++            Some("venice-key"),
++            Some("http://searxng.internal:8080"),
++            None,
++        ));
++        assert!(matches!(backend, Some(SearchBackend::Searxng { .. })));
++    }
++
++    #[test]
++    fn from_secrets_registers_searxng_when_only_url_is_present() {
++        let backend = SearchBackend::from_secrets(&secrets(
++            None,
++            None,
++            Some("http://searxng.internal:8080"),
++            None,
++        ));
++        assert!(matches!(backend, Some(SearchBackend::Searxng { .. })));
++    }
++
++    #[test]
++    fn from_secrets_ignores_blank_searxng_url() {
++        for url in ["", "   "] {
++            let backend = SearchBackend::from_secrets(&secrets(None, None, Some(url), None));
++            assert!(backend.is_none(), "blank URL {url:?} should not register");
++        }
++    }
++
++    #[test]
++    fn from_secrets_appends_search_path_and_strips_trailing_slash() {
++        let backend = SearchBackend::from_secrets(&secrets(
++            None,
++            None,
++            Some("http://searxng.internal:8080/"),
++            Some("searxng-key"),
++        ));
++        match backend {
++            Some(SearchBackend::Searxng {
++                api_key,
++                search_url,
++            }) => {
++                assert_eq!(search_url, "http://searxng.internal:8080/search");
++                assert_eq!(api_key.as_deref(), Some("searxng-key"));
++            }
++            other => panic!("expected searxng backend, got {other:?}"),
++        }
++    }
++
+     #[test]
+     fn from_secrets_prefers_brave_when_both_keys_are_present() {
+-        let backend = SearchBackend::from_secrets(&secrets(Some("brave-key"), Some("venice-key")));
++        let backend = SearchBackend::from_secrets(&secrets(
++            Some("brave-key"),
++            Some("venice-key"),
++            None,
++            None,
++        ));
+         assert!(matches!(backend, Some(SearchBackend::Brave { .. })));
+     }
+ 
+     #[test]
+     fn from_secrets_registers_brave_when_only_brave_key_is_present() {
+-        let backend = SearchBackend::from_secrets(&secrets(Some("brave-key"), None));
++        let backend = SearchBackend::from_secrets(&secrets(Some("brave-key"), None, None, None));
+         assert!(matches!(backend, Some(SearchBackend::Brave { .. })));
+     }
+ 
+     #[test]
+     fn from_secrets_registers_venice_when_only_venice_key_is_present() {
+-        let backend = SearchBackend::from_secrets(&secrets(None, Some("venice-key")));
++        let backend = SearchBackend::from_secrets(&secrets(None, Some("venice-key"), None, None));
+         assert!(matches!(backend, Some(SearchBackend::Venice { .. })));
+     }
+ 
+     #[test]
+-    fn from_secrets_omits_search_when_both_keys_are_missing() {
+-        assert!(SearchBackend::from_secrets(&secrets(None, None)).is_none());
++    fn from_secrets_omits_search_when_nothing_is_configured() {
++        assert!(SearchBackend::from_secrets(&secrets(None, None, None, None)).is_none());
+     }
+ 
+     #[test]
+@@ -400,10 +553,40 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn brave_and_venice_use_the_same_tool_schema() {
++    fn format_searxng_results_includes_published_date_when_present() {
++        let body = serde_json::json!({
++            "query": "rust",
++            "results": [
++                {
++                    "title": "Rust Lang",
++                    "url": "https://rust-lang.org",
++                    "content": "A systems language",
++                    "publishedDate": "2026-01-02T00:00:00Z"
++                }
++            ]
++        });
++        let output = format_searxng_results(&body, 5);
++        assert!(output.contains("1. Rust Lang"));
++        assert!(output.contains("https://rust-lang.org"));
++        assert!(output.contains("A systems language"));
++        assert!(output.contains("2026-01-02"));
++    }
++
++    #[test]
++    fn format_searxng_results_no_results() {
++        let body = serde_json::json!({"results": []});
++        assert_eq!(format_searxng_results(&body, 5), "No results found.");
++    }
++
++    #[test]
++    fn all_backends_use_the_same_tool_schema() {
+         let brave = make_web_search_tool(SearchBackend::brave("key".into()));
+         let venice = make_web_search_tool(SearchBackend::venice("key".into()));
++        let searxng =
++            make_web_search_tool(SearchBackend::searxng("http://searxng.internal:8080", None));
+         assert_eq!(brave.definition.parameters, venice.definition.parameters);
++        assert_eq!(brave.definition.parameters, searxng.definition.parameters);
++        assert_eq!(brave.definition.description, searxng.definition.description);
+     }
+ 
+     #[tokio::test]
+@@ -542,4 +725,133 @@ mod tests {
+         assert!(output.contains("1. Rust"));
+         assert!(output.contains("A language"));
+     }
++
++    #[tokio::test]
++    async fn searxng_search_gets_json_format_with_bearer_token() {
++        let server = MockServer::start();
++        let mock = server.mock(|when, then| {
++            when.method(GET)
++                .path("/search")
++                .query_param("q", "rust")
++                .query_param("format", "json")
++                .query_param("pageno", "1")
++                .header("accept", "application/json")
++                .header("authorization", "Bearer searxng-key");
++            then.status(200).json_body(serde_json::json!({
++                "query": "rust",
++                "results": [{
++                    "title": "Rust Lang",
++                    "url": "https://rust-lang.org",
++                    "content": "A systems language",
++                    "publishedDate": "2026-01-02T00:00:00Z"
++                }]
++            }));
++        });
++
++        let mut backend =
++            SearchBackend::searxng("http://searxng.internal:8080", Some("searxng-key".into()));
++        if let SearchBackend::Searxng { search_url, .. } = &mut backend {
++            *search_url = format!("{}/search", server.base_url());
++        }
++        let tool = make_web_search_tool(backend);
++        let output = execute(&tool, serde_json::json!({ "query": "rust" }))
++            .await
++            .expect("searxng search should succeed");
++
++        mock.assert();
++        assert!(output.contains("1. Rust Lang"));
++        assert!(output.contains("https://rust-lang.org"));
++        assert!(output.contains("A systems language"));
++        assert!(output.contains("2026-01-02"));
++    }
++
++    #[tokio::test]
++    async fn searxng_search_omits_bearer_header_when_no_key_is_set() {
++        let server = MockServer::start();
++        let mock = server.mock(|when, then| {
++            when.method(GET)
++                .path("/search")
++                .header_missing("authorization");
++            then.status(200).json_body(serde_json::json!({
++                "results": [{
++                    "title": "Fabro",
++                    "url": "https://fabro.sh",
++                    "content": "Agent runtime"
++                }]
++            }));
++        });
++
++        let mut backend = SearchBackend::searxng("http://searxng.internal:8080", None);
++        if let SearchBackend::Searxng { search_url, .. } = &mut backend {
++            *search_url = format!("{}/search", server.base_url());
++        }
++        let tool = make_web_search_tool(backend);
++        let output = execute(&tool, serde_json::json!({ "query": "fabro" }))
++            .await
++            .expect("keyless searxng search should succeed");
++
++        mock.assert();
++        assert!(output.contains("1. Fabro"));
++    }
++
++    #[tokio::test]
++    async fn searxng_slices_results_client_side_to_max_results() {
++        let server = MockServer::start();
++        let mock = server.mock(|when, then| {
++            when.method(GET).path("/search");
++            then.status(200).json_body(serde_json::json!({
++                "results": [
++                    {"title": "One", "url": "https://one.test", "content": "first"},
++                    {"title": "Two", "url": "https://two.test", "content": "second"},
++                    {"title": "Three", "url": "https://three.test", "content": "third"}
++                ]
++            }));
++        });
++
++        let mut backend = SearchBackend::searxng("http://searxng.internal:8080", None);
++        if let SearchBackend::Searxng { search_url, .. } = &mut backend {
++            *search_url = format!("{}/search", server.base_url());
++        }
++        let tool = make_web_search_tool(backend);
++        let output = execute(
++            &tool,
++            serde_json::json!({ "query": "fabro", "max_results": 2 }),
++        )
++        .await
++        .expect("searxng search should succeed");
++
++        mock.assert();
++        assert!(output.contains("1. One"));
++        assert!(output.contains("2. Two"));
++        assert!(!output.contains("Three"));
++    }
++
++    #[tokio::test]
++    async fn searxng_maps_non_2xx_to_tool_errors_with_auth_hint() {
++        async fn assert_status(status: u16, expected: &str) {
++            let server = MockServer::start();
++            let mock = server.mock(|when, then| {
++                when.method(GET).path("/search");
++                then.status(status).body("error");
++            });
++            let mut backend =
++                SearchBackend::searxng("http://searxng.internal:8080", Some("searxng-key".into()));
++            if let SearchBackend::Searxng { search_url, .. } = &mut backend {
++                *search_url = format!("{}/search", server.base_url());
++            }
++            let tool = make_web_search_tool(backend);
++            let err = execute(&tool, serde_json::json!({ "query": "fabro" }))
++                .await
++                .expect_err("status should become a tool error");
++            assert_eq!(err, expected);
++            mock.assert();
++        }
++
++        assert_status(
++            401,
++            "SearXNG search returned status 401 (check SEARXNG_API_KEY and that the instance enables the JSON format)",
++        )
++        .await;
++        assert_status(500, "SearXNG search returned status 500").await;
++    }
+ }
+diff --git a/lib/components/fabro-workflow/src/pipeline/initialize.rs b/lib/components/fabro-workflow/src/pipeline/initialize.rs
+index d05d9acd..9942f061 100644
+--- a/lib/components/fabro-workflow/src/pipeline/initialize.rs
++++ b/lib/components/fabro-workflow/src/pipeline/initialize.rs
+@@ -311,11 +311,18 @@ async fn build_registry(
+     }
+ }
+ 
++#[expect(
++    clippy::disallowed_methods,
++    reason = "The SearXNG URL is non-secret endpoint config that must come from the run process env; \
++              secrets still come from the vault."
++)]
+ async fn tool_secrets_from_configured_sources(vault: &Arc<AsyncRwLock<Vault>>) -> ToolSecrets {
+     let vault = vault.read().await;
+     ToolSecrets {
+         brave_search_api_key: vault.get(EnvVars::BRAVE_SEARCH_API_KEY).map(str::to_string),
+         venice_api_key:       vault.get(EnvVars::VENICE_API_KEY).map(str::to_string),
++        searxng_url:          std::env::var(EnvVars::SEARXNG_URL).ok(),
++        searxng_api_key:      vault.get(EnvVars::SEARXNG_API_KEY).map(str::to_string),
+     }
+ }
+ 
+diff --git a/lib/foundation/fabro-static/src/env_vars.rs b/lib/foundation/fabro-static/src/env_vars.rs
+index 477f5c26..d0e1830c 100644
+--- a/lib/foundation/fabro-static/src/env_vars.rs
++++ b/lib/foundation/fabro-static/src/env_vars.rs
+@@ -48,6 +48,8 @@ impl EnvVars {
+     pub const BEDROCK_API_KEY: &'static str = "BEDROCK_API_KEY";
+     pub const BRAVE_SEARCH_API_KEY: &'static str = "BRAVE_SEARCH_API_KEY";
+     pub const VENICE_API_KEY: &'static str = "VENICE_API_KEY";
++    pub const SEARXNG_URL: &'static str = "SEARXNG_URL";
++    pub const SEARXNG_API_KEY: &'static str = "SEARXNG_API_KEY";
+     pub const CHATGPT_ACCOUNT_ID: &'static str = "CHATGPT_ACCOUNT_ID";
+     pub const DEEPSEEK_API_KEY: &'static str = "DEEPSEEK_API_KEY";
+     pub const FIREWORKS_API_KEY: &'static str = "FIREWORKS_API_KEY";
+diff --git a/lib/foundation/fabro-static/src/secret_registry.rs b/lib/foundation/fabro-static/src/secret_registry.rs
+index 4fb715b6..eaa65f5c 100644
+--- a/lib/foundation/fabro-static/src/secret_registry.rs
++++ b/lib/foundation/fabro-static/src/secret_registry.rs
+@@ -20,6 +20,7 @@ const OPTIONAL_VAULT_SECRETS: &[&str] = &[
+     EnvVars::BEDROCK_API_KEY,
+     EnvVars::BRAVE_SEARCH_API_KEY,
+     EnvVars::VENICE_API_KEY,
++    EnvVars::SEARXNG_API_KEY,
+     EnvVars::DEEPSEEK_API_KEY,
+     EnvVars::FABRO_SLACK_APP_TOKEN,
+     EnvVars::FABRO_SLACK_BOT_TOKEN,
+@@ -93,6 +94,7 @@ mod tests {
+             EnvVars::DAYTONA_API_KEY,
+             EnvVars::BRAVE_SEARCH_API_KEY,
+             EnvVars::VENICE_API_KEY,
++            EnvVars::SEARXNG_API_KEY,
+             EnvVars::ANTHROPIC_API_KEY,
+             EnvVars::AWS_BEARER_TOKEN_BEDROCK,
+             EnvVars::BEDROCK_API_KEY,
