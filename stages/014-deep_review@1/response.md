@@ -1,0 +1,15 @@
+My independent review is complete. Findings:
+
+**Goal alignment (the dimension no narrow reviewer checked end-to-end):** The change delivers exactly what was asked — a free, locally-run web search provider — and honors all four human decisions: SearXNG engine, vault-based `SEARXNG_URL` config, local-wins precedence, and a shipped compose service. The full flow works end-to-end: vault/env → `ToolSecrets` → `SearchBackend::from_secrets` → tool registration → doctor probe. Both production `ToolSecrets` construction sites are covered (`initialize.rs` for server runs, `cli.rs` for CLI runs); `handler/llm/api.rs` receives rather than constructs, so nothing is missed.
+
+**Correctness:** The 3-tuple precedence match is exhaustive (SearXNG > Brave > Venice > none). URL hygiene is handled at both construction and probe (whitespace + trailing slash). Client-side truncation guards against SearXNG ignoring `limit`. The 403→JSON-format hint addresses the one error every fresh SearXNG deploy hits (JSON off by default), and the shipped `settings.yml` pre-enables it. Error handling matches the existing `Result<String, String>` tool-error style.
+
+**Would the tests fail if the code were wrong?** Yes, at every layer: precedence tests assert variant identity; the httpmock test asserts GET + `q`/`format=json`/`limit` params via `mock.assert()` (any wire drift fails); parsing tests pin the exact SearXNG field names (`content`, `publishedDate`); the 403 test is an exact string match; diagnostics tests distinguish backends by summary string and pin env-isolation; the Debug test asserts the URL value never prints. Re-ran at HEAD: 31 web_search + 7 diagnostics + 5 static tests green; full-crate runs earlier: agent 654/0, workflow 1444/0, server 889 pass with 6 failures verified byte-identical at the pre-change baseline via stash (missing graphviz, storage-path env issues — unrelated).
+
+**Security:** No new secret material. The vault-stored URL never reaches Debug output or logs beyond the pre-existing query-in-error behavior shared with Brave/Venice. The compose service binds its host port to `127.0.0.1` only; the `settings.yml` `secret_key` is the standard throwaway for private instances (mirrors upstream searxng-docker practice) with a comment to rotate if exposed. The URL is operator-controlled vault config — same trust level as provider `base_url`s.
+
+**Untouched-code checks:** No web-UI, evals, or installer coupling exists (grepped). Remaining `BRAVE_SEARCH_API_KEY` mentions are all legitimate setup instructions or definitions. The demo fixture string matches the diagnostics remediation byte-for-byte (the Rust side is additionally pinned by exact-equality tests). The later `synth` commit is empty — HEAD is the implementation exactly as reviewed.
+
+**Non-blocking nits:** one blank line removed inside an existing test (fmt-clean, cosmetic); "also present" phrasing in `venice-search.mdx` reads slightly awkwardly; no live e2e against a real SearXNG instance (deliberate — Docker unavailable here, wire contract pinned by httpmock, manual verification documented in the integration page).
+
+{"preferred_next_label": "approve"}
