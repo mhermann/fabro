@@ -39,7 +39,7 @@ The `json` entry in `search.formats` is required — without it SearXNG answers 
 export SEARXNG_URL=http://searxng.internal:8080
 ```
 
-`SEARXNG_URL` is ordinary configuration, not a secret: the Fabro server reads it from its own process environment (or `server.env`), and it is forwarded to workflow workers.
+`SEARXNG_URL` is ordinary configuration, not a secret: the Fabro server reads it from its own process environment — never from `server.env` — and forwards it to workflow workers. Get it into the server process by exporting it before starting `fabro serve`, a systemd `Environment=` line, or a line in `.env` when you deploy with the packaged Docker Compose setup (its `env_file` entry loads `.env` into the container's process environment).
 
 3. Optionally store a bearer token if your instance sits behind an authenticating proxy:
 
