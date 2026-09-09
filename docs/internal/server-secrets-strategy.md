@@ -40,6 +40,12 @@ the vault:
 - `DAYTONA_API_KEY`
 - `BRAVE_SEARCH_API_KEY`
 - `VENICE_API_KEY`
+- `SEARXNG_URL`
+
+`SEARXNG_URL` is an endpoint URL rather than a credential. It is provisioned into
+the vault anyway so the local `web_search` backend flows through the same
+vault-to-run plumbing as the search API keys, with identical server/CLI
+semantics. Treat the value as opaque metadata, not a secret worth rotating.
 
 `FABRO_JWT_PRIVATE_KEY` and `FABRO_JWT_PUBLIC_KEY` are removed. `SESSION_SECRET` is the single auth root.
 

@@ -1,5 +1,5 @@
 ---
-title: "GLM 5.3 and GLM 5.3 Flash"
+title: "GLM 5.3, GLM 5.3 Flash, and local SearXNG search"
 date: "2026-09-09"
 ---
 
@@ -18,3 +18,15 @@ The portable `glm`, `glm5`, `glm53`, and `glm5.3` aliases now resolve to GLM 5.3
 GLM 5.3 Flash joins the same providers as the small-default Z.ai model. It is natively multimodal — image, video, and file input alongside text — with the same 1M context, 128K max output, tool use, prompt caching, and reasoning effort controls.
 
 Z.ai, OpenRouter, and Fireworks all serve GLM 5.3 Flash at list rates: $0.15 input / $0.50 output per million tokens.
+
+## Local web search with SearXNG
+
+The `web_search` agent tool now supports a self-hosted [SearXNG](/integrations/searxng) instance as a free, local alternative to the Brave and Venice APIs. Set a single vault entry pointing at your instance:
+
+```bash
+fabro secret set SEARXNG_URL http://searxng:8080
+```
+
+`docker-compose.local.yaml` ships an optional SearXNG service behind the `search` profile (`docker compose -f docker-compose.local.yaml --profile search up -d`) with JSON output pre-enabled. The instance must have `json` in its `search.formats` for Fabro to query it.
+
+When `SEARXNG_URL` is set, SearXNG becomes the preferred `web_search` backend; the Brave and Venice keys act as fallbacks, in that order. `fabro doctor` probes the instance and reports it as `searxng: configured and reachable`. As before, `web_search` is omitted from the agent's tool set when no backend is configured.

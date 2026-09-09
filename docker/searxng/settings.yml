@@ -1,0 +1,18 @@
+# Minimal SearXNG settings for Fabro's local `web_search` backend.
+#
+# `use_default_settings` merges this file over the image defaults. The only
+# change Fabro needs is the JSON output format, which SearXNG disables by
+# default; without it the `/search?format=json` endpoint answers 403.
+use_default_settings: true
+
+server:
+  # Change this if you ever expose the instance beyond the compose network.
+  secret_key: "fabro-local-searxng"
+  # Bot protection is for public instances; this service is a private
+  # sibling of the Fabro server and would only block its own queries.
+  limiter: false
+
+search:
+  formats:
+    - html
+    - json

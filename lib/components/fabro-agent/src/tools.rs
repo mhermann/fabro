@@ -58,7 +58,8 @@ pub const WEB_SEARCH_TOOL_NAME: &str = "web_search";
 
 /// Registers the core tools shared by all provider profiles: `read_file`,
 /// `write_file`, `shell`, `grep`, `glob`, and `web_fetch`. `web_search` is
-/// included when a Brave or Venice Search API key is configured.
+/// included when a SearXNG URL or a Brave or Venice Search API key is
+/// configured.
 ///
 /// The shell tool captures its default and max timeouts from `options`.
 pub fn register_core_tools(
@@ -84,7 +85,8 @@ pub(crate) fn register_discovery_and_web_tools(
     registry.register(make_web_fetch_tool(summarizer));
 }
 
-/// Register `web_search` when a search provider credential is configured.
+/// Register `web_search` when a search backend is configured. SearXNG is
+/// preferred when its URL is set; otherwise Brave, then Venice.
 ///
 /// Separate from [`register_discovery_and_web_tools`] for profiles that offer
 /// search without fabro's discovery tools.

@@ -1,0 +1,107 @@
+---
+title: "SearXNG"
+description: "Give Fabro agents free, local web search via a self-hosted SearXNG instance"
+---
+
+Fabro's [`web_search`](/agents/tools#web_search) tool lets agents search the web during workflow execution. With a self-hosted [SearXNG](https://docs.searxng.org/) instance, searches run through your own local metasearch service — no API key, no per-query cost.
+
+Fabro selects the backend from its vault. A local SearXNG instance is preferred whenever `SEARXNG_URL` is present; otherwise [Brave Search](/integrations/brave-search) is used when `BRAVE_SEARCH_API_KEY` is present, then [Venice Search](/integrations/venice-search) when `VENICE_API_KEY` is present.
+
+## Setup
+
+1. Run a SearXNG instance with JSON output enabled. JSON is disabled by default in SearXNG, so mount a `settings.yml` that adds it:
+
+```yaml title="settings.yml"
+use_default_settings: true
+
+server:
+  secret_key: "change-me"
+  limiter: false
+
+search:
+  formats:
+    - html
+    - json
+```
+
+```bash title="docker run"
+docker run -d --name searxng \
+  -p 127.0.0.1:8888:8080 \
+  -v ./settings.yml:/etc/searxng/settings.yml:ro \
+  docker.io/searxng/searxng:latest
+```
+
+The repository's `docker-compose.local.yaml` ships the same service behind the `search` profile:
+
+```bash
+docker compose -f docker-compose.local.yaml --profile search up -d
+```
+
+2. Point Fabro at the instance:
+
+```bash
+# standalone docker run
+fabro secret set SEARXNG_URL http://localhost:8888
+
+# compose profile (server resolves the service name)
+fabro secret set SEARXNG_URL http://searxng:8080
+```
+
+3. Verify the instance is reachable:
+
+```bash
+fabro doctor
+```
+
+The doctor output should show **Web Search** as `searxng: configured and reachable`. If no search backend is configured, web search is reported as a warning. Workflows still run, but the `web_search` tool is omitted from the agent's tool set and its system prompt.
+
+The Fabro server reads this URL from the vault only. It does not read `SEARXNG_URL` from process env or `server.env`. Direct `fabro exec` runs do read it from process env, matching the Brave and Venice keys.
+
+## How it works
+
+Agents call the `web_search` tool with a query string. Fabro `GET`s `{SEARXNG_URL}/search?q=...&format=json` and returns numbered results with title, URL, description, and date when SearXNG includes one:
+
+```
+1. Rust Lang
+   https://rust-lang.org
+   A systems language
+   2026-01-02
+
+2. Rust Book
+   https://doc.rust-lang.org/book
+   The Rust book
+```
+
+SearXNG is a metasearch engine: the instance still queries upstream search engines (Google, Bing, DuckDuckGo, and others) from wherever it runs, so it needs internet access. The searches are free because your instance performs them directly rather than through a paid API.
+
+Because SearXNG is preferred when configured, a Brave or Venice key acts as a fallback. To go back to a paid provider, remove the URL:
+
+```bash
+fabro secret rm SEARXNG_URL
+```
+
+## Permissions
+
+`web_search` is classified as a `shell` category tool, requiring the `full` [permission level](/agents/permissions) for auto-approval. At lower permission levels:
+
+- **Interactive mode** — the user is prompted to approve each call
+- **Non-interactive mode** (`--auto-approve`) — calls are denied
+
+## Troubleshooting
+
+**"SearXNG returned status 403 (is the JSON format enabled? …)"** — Your instance has JSON output disabled. Add `json` to `search.formats` in its `settings.yml` and restart the container.
+
+**"searxng: connectivity error"** — The URL is wrong or the instance is down. `web_search` executes in the Fabro server process, so the URL must be reachable *from the server*, not from run containers. With the compose profile, use `http://searxng:8080`; with a standalone container, use `http://localhost:8888` only if the server runs on the same host.
+
+**Fewer results than requested** — SearXNG decides how many results each engine returns; Fabro asks for `max_results` and truncates to it, but the instance may return fewer.
+
+## Further reading
+
+<Columns cols={2}>
+  <Card title="Tools" icon="wrench" href="/agents/tools#web_search">
+    Full `web_search` tool reference — parameters, output format, and error handling.
+  </Card>
+  <Card title="Permissions" icon="lock" href="/agents/permissions">
+    How tool permissions control web search access.
+  </Card>
+</Columns>

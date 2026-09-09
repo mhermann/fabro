@@ -1,7 +1,9 @@
 //! Built-in `web_search` backends.
 //!
-//! Agents always call the same tool. Brave is preferred when its credential
-//! is present; otherwise Venice is used when its credential is present.
+//! Agents always call the same tool. A self-hosted SearXNG instance is
+//! preferred when its base URL is present; otherwise Brave is used when its
+//! credential is present; otherwise Venice is used when its credential is
+//! present.
 
 use std::fmt::Write;
 use std::sync::OnceLock;
@@ -22,6 +24,9 @@ const MAX_RESULTS: u64 = 20;
 
 #[derive(Clone, Debug)]
 pub(crate) enum SearchBackend {
+    SearXng {
+        base_url: String,
+    },
     Brave {
         api_key:    String,
         search_url: String,
@@ -36,12 +41,21 @@ impl SearchBackend {
     #[must_use]
     pub(crate) fn from_secrets(secrets: &ToolSecrets) -> Option<Self> {
         match (
+            secrets.searxng_url.as_ref(),
             secrets.brave_search_api_key.as_ref(),
             secrets.venice_api_key.as_ref(),
         ) {
-            (Some(api_key), _) => Some(Self::brave(api_key.clone())),
-            (None, Some(api_key)) => Some(Self::venice(api_key.clone())),
-            (None, None) => None,
+            (Some(base_url), _, _) => Some(Self::searxng(base_url)),
+            (None, Some(api_key), _) => Some(Self::brave(api_key.clone())),
+            (None, None, Some(api_key)) => Some(Self::venice(api_key.clone())),
+            (None, None, None) => None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn searxng(base_url: &str) -> Self {
+        Self::SearXng {
+            base_url: base_url.trim().trim_end_matches('/').to_string(),
         }
     }
 
@@ -63,6 +77,7 @@ impl SearchBackend {
 
     async fn search(&self, query: &str, max_results: u64) -> Result<String, String> {
         match self {
+            Self::SearXng { base_url } => search_searxng(base_url, query, max_results).await,
             Self::Brave {
                 api_key,
                 search_url,
@@ -96,6 +111,47 @@ fn search_http_client() -> fabro_http::HttpClient {
             }
         })
         .clone()
+}
+
+async fn search_searxng(base_url: &str, query: &str, max_results: u64) -> Result<String, String> {
+    let limit = max_results.clamp(1, MAX_RESULTS);
+    let resp = search_http_client()
+        .get(format!("{base_url}/search"))
+        .header("Accept", "application/json")
+        .query(&[
+            ("q", query),
+            ("format", "json"),
+            ("limit", &limit.to_string()),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {e}"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(searxng_status_error(status.as_u16()));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {e}"))?;
+    Ok(format_searxng_results(&body, limit))
+}
+
+fn searxng_status_error(status: u16) -> String {
+    let mut message = format!("SearXNG returned status {status}");
+    if status == 403 {
+        // SearXNG answers 403 when the requested output format is disabled.
+        // JSON is off by default, so this is the error every fresh instance
+        // serves until the operator enables it.
+        let _ = write!(
+            message,
+            " (is the JSON format enabled? add 'json' to 'search.formats' in your SearXNG \
+             settings.yml)"
+        );
+    }
+    message
 }
 
 async fn search_brave(
@@ -193,6 +249,24 @@ fn format_brave_results(body: &serde_json::Value) -> String {
                 url:         json_str(result, "url"),
                 description: json_str(result, "description"),
                 date:        None,
+            })
+            .collect()
+    }))
+}
+
+fn format_searxng_results(body: &serde_json::Value, limit: u64) -> String {
+    let results = body.get("results").and_then(serde_json::Value::as_array);
+    // SearXNG does not guarantee that a `limit` request parameter is honored,
+    // so the result count is enforced client-side as well.
+    format_hits(results.map(|results| {
+        results
+            .iter()
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
+            .map(|result| SearchHit {
+                title:       json_str(result, "title"),
+                url:         json_str(result, "url"),
+                description: json_str(result, "content"),
+                date:        optional_json_str(result, "publishedDate"),
             })
             .collect()
     }))
@@ -312,8 +386,9 @@ mod tests {
     use crate::test_support::MockSandbox;
     use crate::tool_registry::ToolContext;
 
-    fn secrets(brave: Option<&str>, venice: Option<&str>) -> ToolSecrets {
+    fn secrets(searxng: Option<&str>, brave: Option<&str>, venice: Option<&str>) -> ToolSecrets {
         ToolSecrets {
+            searxng_url:          searxng.map(str::to_string),
             brave_search_api_key: brave.map(str::to_string),
             venice_api_key:       venice.map(str::to_string),
         }
@@ -334,26 +409,53 @@ mod tests {
     }
 
     #[test]
+    fn from_secrets_prefers_searxng_when_all_backends_are_configured() {
+        let backend = SearchBackend::from_secrets(&secrets(
+            Some("http://searxng:8888"),
+            Some("brave-key"),
+            Some("venice-key"),
+        ));
+        assert!(matches!(backend, Some(SearchBackend::SearXng { .. })));
+    }
+
+    #[test]
+    fn from_secrets_registers_searxng_when_only_url_is_present() {
+        let backend =
+            SearchBackend::from_secrets(&secrets(Some("http://searxng:8888"), None, None));
+        assert!(matches!(backend, Some(SearchBackend::SearXng { .. })));
+    }
+
+    #[test]
     fn from_secrets_prefers_brave_when_both_keys_are_present() {
-        let backend = SearchBackend::from_secrets(&secrets(Some("brave-key"), Some("venice-key")));
+        let backend =
+            SearchBackend::from_secrets(&secrets(None, Some("brave-key"), Some("venice-key")));
         assert!(matches!(backend, Some(SearchBackend::Brave { .. })));
     }
 
     #[test]
     fn from_secrets_registers_brave_when_only_brave_key_is_present() {
-        let backend = SearchBackend::from_secrets(&secrets(Some("brave-key"), None));
+        let backend = SearchBackend::from_secrets(&secrets(None, Some("brave-key"), None));
         assert!(matches!(backend, Some(SearchBackend::Brave { .. })));
     }
 
     #[test]
     fn from_secrets_registers_venice_when_only_venice_key_is_present() {
-        let backend = SearchBackend::from_secrets(&secrets(None, Some("venice-key")));
+        let backend = SearchBackend::from_secrets(&secrets(None, None, Some("venice-key")));
         assert!(matches!(backend, Some(SearchBackend::Venice { .. })));
     }
 
     #[test]
-    fn from_secrets_omits_search_when_both_keys_are_missing() {
-        assert!(SearchBackend::from_secrets(&secrets(None, None)).is_none());
+    fn from_secrets_omits_search_when_no_backend_is_configured() {
+        assert!(SearchBackend::from_secrets(&secrets(None, None, None)).is_none());
+    }
+
+    #[test]
+    fn searxng_trims_whitespace_and_trailing_slash_from_base_url() {
+        let backend = SearchBackend::searxng("  http://searxng:8888/ ");
+        let SearchBackend::SearXng { base_url } = backend else {
+            panic!("expected SearXng backend");
+        };
+        assert_eq!(base_url, "http://searxng:8888");
     }
 
     #[test]
@@ -380,6 +482,47 @@ mod tests {
     }
 
     #[test]
+    fn format_searxng_results_includes_date_when_present() {
+        let body = serde_json::json!({
+            "query": "rust",
+            "results": [
+                {
+                    "title": "Rust Lang",
+                    "url": "https://rust-lang.org",
+                    "content": "A systems language",
+                    "publishedDate": "2026-01-02"
+                }
+            ]
+        });
+        let output = format_searxng_results(&body, 5);
+        assert!(output.contains("1. Rust Lang"));
+        assert!(output.contains("https://rust-lang.org"));
+        assert!(output.contains("A systems language"));
+        assert!(output.contains("2026-01-02"));
+    }
+
+    #[test]
+    fn format_searxng_results_truncates_to_limit_client_side() {
+        let body = serde_json::json!({
+            "results": [
+                {"title": "One", "url": "https://one.example", "content": "first"},
+                {"title": "Two", "url": "https://two.example", "content": "second"},
+                {"title": "Three", "url": "https://three.example", "content": "third"}
+            ]
+        });
+        let output = format_searxng_results(&body, 2);
+        assert!(output.contains("1. One"));
+        assert!(output.contains("2. Two"));
+        assert!(!output.contains("Three"));
+    }
+
+    #[test]
+    fn format_searxng_results_no_results() {
+        let body = serde_json::json!({"results": []});
+        assert_eq!(format_searxng_results(&body, 5), "No results found.");
+    }
+
+    #[test]
     fn format_venice_results_includes_date_when_present() {
         let body = serde_json::json!({
             "query": "rust",
@@ -400,10 +543,94 @@ mod tests {
     }
 
     #[test]
-    fn brave_and_venice_use_the_same_tool_schema() {
+    fn all_backends_use_the_same_tool_schema() {
+        let searxng = make_web_search_tool(SearchBackend::searxng("http://searxng:8888"));
         let brave = make_web_search_tool(SearchBackend::brave("key".into()));
         let venice = make_web_search_tool(SearchBackend::venice("key".into()));
+        assert_eq!(searxng.definition.parameters, brave.definition.parameters);
         assert_eq!(brave.definition.parameters, venice.definition.parameters);
+    }
+
+    #[tokio::test]
+    async fn searxng_search_gets_format_json_and_parses_results() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/search")
+                .query_param("q", "fabro")
+                .query_param("format", "json")
+                .query_param("limit", "3");
+            then.status(200).json_body(serde_json::json!({
+                "query": "fabro",
+                "results": [{
+                    "title": "Fabro",
+                    "url": "https://docs.fabro.sh",
+                    "content": "Agent runtime",
+                    "publishedDate": "2026-08-21"
+                }]
+            }));
+        });
+
+        let backend = SearchBackend::searxng(&server.base_url());
+        let tool = make_web_search_tool(backend);
+        let output = execute(
+            &tool,
+            serde_json::json!({
+                "query": "fabro",
+                "max_results": 3
+            }),
+        )
+        .await
+        .expect("searxng search should succeed");
+
+        mock.assert();
+        assert!(output.contains("1. Fabro"));
+        assert!(output.contains("https://docs.fabro.sh"));
+        assert!(output.contains("Agent runtime"));
+        assert!(output.contains("2026-08-21"));
+    }
+
+    #[tokio::test]
+    async fn searxng_handles_trailing_slash_in_base_url() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/search")
+                .query_param("format", "json");
+            then.status(200)
+                .json_body(serde_json::json!({"results": []}));
+        });
+
+        let backend = SearchBackend::searxng(&format!("{}/", server.base_url()));
+        let tool = make_web_search_tool(backend);
+        let output = execute(&tool, serde_json::json!({ "query": "fabro" }))
+            .await
+            .expect("searxng search should succeed");
+
+        mock.assert();
+        assert_eq!(output, "No results found.");
+    }
+
+    #[tokio::test]
+    async fn searxng_maps_403_to_json_format_hint() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/search");
+            then.status(403).body("Forbidden");
+        });
+
+        let backend = SearchBackend::searxng(&server.base_url());
+        let tool = make_web_search_tool(backend);
+        let err = execute(&tool, serde_json::json!({ "query": "fabro" }))
+            .await
+            .expect_err("403 should become a tool error with a formats hint");
+
+        mock.assert();
+        assert_eq!(
+            err,
+            "SearXNG returned status 403 (is the JSON format enabled? add 'json' to \
+             'search.formats' in your SearXNG settings.yml)"
+        );
     }
 
     #[tokio::test]

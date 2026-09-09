@@ -78,8 +78,9 @@ Built-in profiles:
 - **`GeminiProfile`** -- 1M context, safety settings, plus `read_many_files` and `list_dir`
 
 All profiles include the common file, shell, search, and `web_fetch` tools.
-`web_search` is included only when a Brave Search API key is supplied while
-building the profile.
+`web_search` is included when a search backend is configured while building
+the profile: a SearXNG base URL is preferred, then a Brave Search API key,
+then a Venice API key.
 
 ### `Sandbox`
 
