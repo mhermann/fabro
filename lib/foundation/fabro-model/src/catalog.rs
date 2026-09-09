@@ -7431,13 +7431,13 @@ sampling_params = false
             },
             costs: ModelCosts {
                 input_cost_per_mtok: Some(
-                    0.075,
+                    0.15,
                 ),
                 output_cost_per_mtok: Some(
-                    0.25,
+                    0.5,
                 ),
                 cache_input_cost_per_mtok: Some(
-                    0.015,
+                    0.03,
                 ),
             },
             estimated_output_tps: None,
