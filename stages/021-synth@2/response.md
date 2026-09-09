@@ -1,0 +1,1 @@
+I'll start by reading the full parallel review results from the blob file, and get oriented on what the change actually touched.
