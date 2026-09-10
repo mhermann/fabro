@@ -410,17 +410,19 @@ These optional server integrations are vault-only:
 
 ```bash
 fabro secret set DAYTONA_API_KEY dtn_...
+fabro secret set SEARXNG_URL http://searxng:8080
 fabro secret set BRAVE_SEARCH_API_KEY BSA...
 fabro secret set VENICE_API_KEY venice-...
 ```
 
-The built-in [`web_search`](/agents/tools#web_search) tool selects its backend from these credentials. It uses direct Brave Search when `BRAVE_SEARCH_API_KEY` exists. Otherwise it uses Venice Search when `VENICE_API_KEY` exists. When neither exists, the tool is not registered.
+The built-in [`web_search`](/agents/tools#web_search) tool selects its backend from these credentials. It uses a self-hosted [SearXNG](/integrations/searxng) instance when `SEARXNG_URL` exists — the preferred backend because it is free to query. Otherwise it uses direct Brave Search when `BRAVE_SEARCH_API_KEY` exists, then Venice Search when `VENICE_API_KEY` exists. When none exists, the tool is not registered.
 
 | Variable | Description |
 |---|---|
 | `DAYTONA_API_KEY` | Daytona cloud sandbox API key |
-| `BRAVE_SEARCH_API_KEY` | Brave Search API key; the preferred `web_search` backend when present |
-| `VENICE_API_KEY` | Venice API key; used by the Venice LLM provider and by `web_search` when no Brave key exists |
+| `SEARXNG_URL` | Base URL of a self-hosted SearXNG instance; the preferred (free) `web_search` backend when present |
+| `BRAVE_SEARCH_API_KEY` | Brave Search API key; used by `web_search` when no SearXNG URL exists |
+| `VENICE_API_KEY` | Venice API key; used by the Venice LLM provider and by `web_search` when no SearXNG URL or Brave key exists |
 
 ### Server authentication
 
