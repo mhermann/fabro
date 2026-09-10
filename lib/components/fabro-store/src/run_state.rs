@@ -1138,10 +1138,13 @@ fn sandbox_plan(settings: &RunEnvironmentSettings) -> RunSandboxPlan {
     let provider = SandboxProviderKind::from(settings.provider);
     RunSandboxPlan {
         provider,
-        image: (settings.provider == EnvironmentProvider::Docker)
-            .then(|| settings.image.docker.clone())
-            .flatten()
-            .filter(|image| !image.is_empty()),
+        image: (matches!(
+            settings.provider,
+            EnvironmentProvider::Docker | EnvironmentProvider::Kubernetes
+        ))
+        .then(|| settings.image.docker.clone())
+        .flatten()
+        .filter(|image| !image.is_empty()),
         snapshot: None,
     }
 }

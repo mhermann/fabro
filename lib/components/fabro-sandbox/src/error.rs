@@ -48,6 +48,21 @@ pub enum Error {
         source: BollardError,
     },
 
+    #[cfg(feature = "kubernetes")]
+    #[error("Failed to connect to the Kubernetes cluster")]
+    KubernetesConnect {
+        #[source]
+        source: Box<kube::Error>,
+    },
+
+    #[cfg(feature = "kubernetes")]
+    #[error("Failed to create Kubernetes {resource}")]
+    KubernetesApi {
+        resource: String,
+        #[source]
+        source:   Box<kube::Error>,
+    },
+
     #[error(
         "{label} failed (exit {exit}, termination={termination}, duration_ms={duration_ms}) - hint: {hint}",
         exit = format_exit_code(result.exit_code),
@@ -111,6 +126,21 @@ impl Error {
         Self::DockerImagePull {
             image: image.into(),
             source,
+        }
+    }
+
+    #[cfg(feature = "kubernetes")]
+    pub fn kubernetes_connect(source: kube::Error) -> Self {
+        Self::KubernetesConnect {
+            source: Box::new(source),
+        }
+    }
+
+    #[cfg(feature = "kubernetes")]
+    pub fn kubernetes_api(resource: impl Into<String>, source: kube::Error) -> Self {
+        Self::KubernetesApi {
+            resource: resource.into(),
+            source:   Box::new(source),
         }
     }
 

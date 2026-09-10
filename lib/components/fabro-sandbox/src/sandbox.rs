@@ -31,11 +31,11 @@ pub const DEFAULT_EXEC_OUTPUT_TAIL_BYTES: usize = 8 * 1024;
 pub(crate) const BASH_PROBE_TIMEOUT_MS: u64 = 10_000;
 
 /// Bash path required by Linux-backed remote sandbox providers.
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 pub(crate) const REMOTE_BASH: &str = "/bin/bash";
 
 /// Timeout for provider-neutral remote file traversal.
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 pub(crate) const REMOTE_WALK_TIMEOUT_MS: u64 = 30_000;
 
 /// Environment variable Bash consults for non-interactive startup source.
@@ -44,6 +44,24 @@ pub(crate) const REMOTE_WALK_TIMEOUT_MS: u64 = 30_000;
 /// otherwise ambient worker or image configuration can execute code before the
 /// requested command.
 pub(crate) const BASH_ENV_VAR: &str = "BASH_ENV";
+
+fn env_entry_name(entry: &str) -> &str {
+    entry.split_once('=').map_or(entry, |(name, _)| name)
+}
+
+/// Remove caller/image startup-file injection and explicitly override any
+/// inherited image value for sandbox-created processes.
+///
+/// Shared by every exec-based remote provider so a caller-supplied
+/// `BASH_ENV` can never source code ahead of the requested command.
+pub(crate) fn scrub_bash_env_entries(entries: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut clean: Vec<String> = entries
+        .into_iter()
+        .filter(|entry| env_entry_name(entry) != BASH_ENV_VAR)
+        .collect();
+    clean.push(format!("{BASH_ENV_VAR}="));
+    clean
+}
 
 /// Marker a successful [`BASH_PROBE_SCRIPT`] run prints on stdout.
 ///
@@ -1550,8 +1568,8 @@ pub trait Sandbox: Send + Sync {
 }
 
 /// Resolve a path: relative paths are prepended with the working directory.
-/// Used by the Daytona sandbox implementation.
-#[cfg(any(feature = "docker", feature = "daytona"))]
+/// Used by the remote sandbox implementations.
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 pub(crate) fn resolve_path(path: &str, working_dir: &str) -> String {
     if std::path::Path::new(path).is_absolute() {
         path.to_string()
@@ -1560,7 +1578,7 @@ pub(crate) fn resolve_path(path: &str, working_dir: &str) -> String {
     }
 }
 
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 pub(crate) fn join_sandbox_path(base: &str, relative_path: &str) -> String {
     if relative_path.is_empty() {
         return base.to_string();
@@ -1574,7 +1592,7 @@ pub(crate) fn join_sandbox_path(base: &str, relative_path: &str) -> String {
     format!("{}/{relative_path}", base.trim_end_matches('/'))
 }
 
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 pub(crate) fn build_remote_walk_command(
     base: &str,
     relative_start: &str,
@@ -1608,7 +1626,7 @@ pub(crate) fn build_remote_walk_command(
     command
 }
 
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 pub(crate) fn parse_remote_walk_output(
     base: &str,
     relative_start: &str,

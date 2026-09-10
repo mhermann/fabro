@@ -2,13 +2,15 @@
 pub mod daytona;
 #[cfg(feature = "docker")]
 pub mod docker;
+#[cfg(feature = "kubernetes")]
+pub mod kubernetes;
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 use fabro_github::GitHubCredentials;
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 use fabro_types::RunId;
 use fabro_types::{
     SandboxInfo, SandboxListMeta, SandboxListResponse, SandboxProviderKind,
@@ -21,6 +23,8 @@ use futures::future::join_all;
 use crate::daytona::DaytonaConfig;
 #[cfg(feature = "docker")]
 use crate::docker::DockerSandboxOptions;
+#[cfg(feature = "kubernetes")]
+use crate::kubernetes::KubernetesSandboxOptions;
 
 pub enum SandboxCreateSpec {
     Local,
@@ -40,6 +44,15 @@ pub enum SandboxCreateSpec {
         clone_origin_url: Option<String>,
         clone_branch:     Option<String>,
         api_key:          Option<String>,
+    },
+    #[cfg(feature = "kubernetes")]
+    Kubernetes {
+        config:           Box<KubernetesSandboxOptions>,
+        github_app:       Option<GitHubCredentials>,
+        run_id:           Option<RunId>,
+        clone_origin_url: Option<String>,
+        clone_branch:     Option<String>,
+        agent_token_key:  Option<String>,
     },
 }
 

@@ -96,3 +96,35 @@ fn environment_request_schema_rejects_dockerfile_path_sources() {
         "unexpected error: {err}"
     );
 }
+
+#[test]
+fn environment_response_round_trips_kubernetes_json_shape() {
+    let value = json!({
+        "id": "kubernetes-cluster",
+        "revision": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "provider": "kubernetes",
+        "image": {
+            "docker": "registry.internal/team/sandbox:2026.1",
+            "dockerfile": null
+        },
+        "resources": {
+            "cpu": 2,
+            "memory": "4GB",
+            "disk": null
+        },
+        "network": {
+            "mode": "allow_all",
+            "allow": []
+        },
+        "lifecycle": {
+            "preserve": false,
+            "stop_on_terminal": true,
+            "auto_stop": null
+        },
+        "labels": {},
+        "env": {}
+    });
+
+    let api: ApiEnvironment = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(api).unwrap(), value);
+}

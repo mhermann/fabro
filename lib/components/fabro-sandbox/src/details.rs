@@ -41,6 +41,13 @@ pub async fn sandbox_details(
             "Sandbox provider '{}' has no details implementation",
             record.provider
         )),
+        #[cfg(feature = "kubernetes")]
+        SandboxProviderKind::Kubernetes => kubernetes::kubernetes_details(record).await,
+        #[cfg(not(feature = "kubernetes"))]
+        SandboxProviderKind::Kubernetes => Err(anyhow::anyhow!(
+            "Sandbox provider '{}' has no details implementation",
+            record.provider
+        )),
     }
 }
 
@@ -860,5 +867,262 @@ mod tests {
         assert_eq!(details.resources, SandboxResources::default());
         assert_eq!(details.network, SandboxNetwork::unknown());
         assert_eq!(details.timestamps, SandboxTimestamps::default());
+    }
+}
+
+#[cfg(feature = "kubernetes")]
+pub(crate) mod kubernetes {
+    use std::collections::BTreeMap;
+
+    use anyhow::{Result, anyhow};
+    use fabro_types::{
+        RunSandboxInstance, SandboxDetails, SandboxInfo, SandboxNetwork, SandboxProviderKind,
+        SandboxResources, SandboxState, SandboxTimestamps,
+    };
+    use k8s_openapi::api::core::v1::Pod;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+
+    use crate::kubernetes::WORKING_DIRECTORY;
+
+    pub(super) async fn kubernetes_details(record: &RunSandboxInstance) -> Result<SandboxDetails> {
+        let client = kube::Client::try_default()
+            .await
+            .map_err(anyhow::Error::new)?;
+        let pods: kube::Api<Pod> = kube::Api::default_namespaced(client);
+        let pod = pods.get(&record.runtime.id).await.map_err(|err| {
+            anyhow!(
+                "Failed to get Kubernetes pod '{}': {err}",
+                record.runtime.id
+            )
+        })?;
+        Ok(map_kubernetes_pod(&pod, record))
+    }
+
+    pub(crate) fn kubernetes_info_from_pod(pod: &Pod) -> SandboxInfo {
+        let fields = kubernetes_fields_from_pod(pod);
+        SandboxInfo {
+            provider:          SandboxProviderKind::Kubernetes,
+            display_name:      Some(fields.id.clone()).filter(|name| !name.is_empty()),
+            id:                fields.id,
+            state:             fields.state,
+            native_state:      fields.native_state,
+            image:             fields.image,
+            snapshot:          None,
+            region:            None,
+            web_url:           None,
+            working_directory: Some(WORKING_DIRECTORY.to_string()),
+            resources:         fields.resources,
+            network:           SandboxNetwork::unknown(),
+            labels:            fields.labels,
+            timestamps:        fields.timestamps,
+        }
+    }
+
+    pub(super) fn map_kubernetes_pod(pod: &Pod, record: &RunSandboxInstance) -> SandboxDetails {
+        let fields = kubernetes_fields_from_pod(pod);
+        let image = fields.image.clone().or_else(|| record.image.clone());
+
+        SandboxDetails {
+            sandbox:      RunSandboxInstance {
+                image,
+                ..record.clone()
+            },
+            state:        fields.state,
+            native_state: fields.native_state,
+            region:       None,
+            web_url:      None,
+            resources:    fields.resources,
+            network:      SandboxNetwork::unknown(),
+            labels:       fields.labels,
+            timestamps:   fields.timestamps,
+        }
+    }
+
+    struct KubernetesFields {
+        id:           String,
+        state:        SandboxState,
+        native_state: Option<String>,
+        image:        Option<String>,
+        resources:    SandboxResources,
+        labels:       BTreeMap<String, String>,
+        timestamps:   SandboxTimestamps,
+    }
+
+    fn kubernetes_fields_from_pod(pod: &Pod) -> KubernetesFields {
+        let metadata = &pod.metadata;
+        let id = metadata.name.clone().unwrap_or_default();
+        let labels: BTreeMap<String, String> = metadata
+            .labels
+            .clone()
+            .map(|labels| labels.into_iter().collect())
+            .unwrap_or_default();
+
+        let status = pod.status.as_ref();
+        let phase = status.and_then(|status| status.phase.as_deref());
+        let native_state = phase
+            .filter(|phase| !phase.is_empty())
+            .map(ToString::to_string);
+        let normalized_state = phase.map_or(SandboxState::Unknown, normalize_pod_phase);
+
+        let sandbox_container = pod.spec.as_ref().and_then(|spec| spec.containers.first());
+        let image = sandbox_container
+            .and_then(|container| container.image.clone())
+            .filter(|image| !image.is_empty());
+        let requirements = sandbox_container
+            .and_then(|container| container.resources.as_ref())
+            .and_then(|resources| resources.requests.as_ref().or(resources.limits.as_ref()));
+        let parse_quantity = |name: &str| -> Option<f64> {
+            requirements
+                .and_then(|quantities| quantities.get(name))
+                .and_then(|quantity| parse_cores(&quantity.0))
+        };
+        let parse_bytes = |name: &str| -> Option<u64> {
+            requirements
+                .and_then(|quantities| quantities.get(name))
+                .and_then(|quantity| parse_bytes_quantity(&quantity.0))
+        };
+        let resources = SandboxResources {
+            cpu_cores:    parse_quantity("cpu"),
+            memory_bytes: parse_bytes("memory"),
+            disk_bytes:   parse_bytes("ephemeral-storage"),
+        };
+
+        let created_at = metadata
+            .creation_timestamp
+            .clone()
+            .and_then(|time| kubernetes_timestamp(&time));
+
+        KubernetesFields {
+            id,
+            state: normalized_state,
+            native_state,
+            image,
+            resources,
+            labels,
+            timestamps: SandboxTimestamps {
+                created_at,
+                last_activity_at: None,
+            },
+        }
+    }
+
+    pub(super) fn normalize_pod_phase(phase: &str) -> SandboxState {
+        match phase {
+            "Pending" => SandboxState::Provisioning,
+            "Running" => SandboxState::Running,
+            "Succeeded" => SandboxState::Stopped,
+            "Failed" => SandboxState::Error,
+            _ => SandboxState::Unknown,
+        }
+    }
+
+    /// Parse a Kubernetes CPU quantity (`"500m"`, `"2"`) into cores.
+    fn parse_cores(raw: &str) -> Option<f64> {
+        if let Some(millis) = raw.strip_suffix('m') {
+            return millis.parse::<f64>().ok().map(|millis| millis / 1_000.0);
+        }
+        raw.parse::<f64>().ok()
+    }
+
+    /// Parse a Kubernetes storage quantity (`"4194304Ki"`, `"4Gi"`, bytes)
+    /// into bytes.
+    fn parse_bytes_quantity(raw: &str) -> Option<u64> {
+        let (value, multiplier) = if let Some(kibi) = raw.strip_suffix("Ki") {
+            (kibi, 1_024u64)
+        } else if let Some(mebi) = raw.strip_suffix("Mi") {
+            (mebi, 1_024 * 1_024)
+        } else if let Some(gibi) = raw.strip_suffix("Gi") {
+            (gibi, 1_024 * 1_024 * 1_024)
+        } else {
+            return raw.parse::<u64>().ok();
+        };
+        value
+            .parse::<u64>()
+            .ok()
+            .and_then(|value| value.checked_mul(multiplier))
+    }
+
+    /// Convert the API server's creation timestamp into the neutral record
+    /// type.
+    fn kubernetes_timestamp(time: &Time) -> Option<chrono::DateTime<chrono::Utc>> {
+        chrono::DateTime::from_timestamp(
+            time.0.as_second(),
+            u32::try_from(time.0.subsec_nanosecond()).unwrap_or(0),
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use k8s_openapi::api::core::v1::{Container, PodSpec, PodStatus, ResourceRequirements};
+        use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
+        use super::*;
+
+        fn pod_with_phase(phase: &str) -> Pod {
+            Pod {
+                metadata: ObjectMeta {
+                    name: Some("fabro-run-test".to_string()),
+                    creation_timestamp: None,
+                    ..ObjectMeta::default()
+                },
+                spec:     Some(PodSpec {
+                    containers: vec![Container {
+                        name: "sandbox".to_string(),
+                        image: Some("buildpack-deps:noble".to_string()),
+                        ..Container::default()
+                    }],
+                    ..PodSpec::default()
+                }),
+                status:   Some(PodStatus {
+                    phase: Some(phase.to_string()),
+                    ..PodStatus::default()
+                }),
+            }
+        }
+
+        #[test]
+        fn pending_normalizes_to_provisioning_and_running_to_running() {
+            assert_eq!(normalize_pod_phase("Pending"), SandboxState::Provisioning);
+            assert_eq!(normalize_pod_phase("Running"), SandboxState::Running);
+            assert_eq!(normalize_pod_phase("Succeeded"), SandboxState::Stopped);
+            assert_eq!(normalize_pod_phase("Failed"), SandboxState::Error);
+            assert_eq!(normalize_pod_phase("Other"), SandboxState::Unknown);
+        }
+
+        #[test]
+        fn pod_maps_into_inventory_info() {
+            let info = kubernetes_info_from_pod(&pod_with_phase("Running"));
+            assert_eq!(info.provider, SandboxProviderKind::Kubernetes);
+            assert_eq!(info.id, "fabro-run-test");
+            assert_eq!(info.state, SandboxState::Running);
+            assert_eq!(info.native_state.as_deref(), Some("Running"));
+            assert_eq!(info.image.as_deref(), Some("buildpack-deps:noble"));
+            assert_eq!(info.working_directory.as_deref(), Some(WORKING_DIRECTORY));
+        }
+
+        #[test]
+        fn resource_quantities_map_to_neutral_resources() {
+            let mut pod = pod_with_phase("Running");
+            let info = kubernetes_info_from_pod(&pod);
+            assert_eq!(info.resources, SandboxResources::default());
+            let container = &mut pod.spec.as_mut().unwrap().containers[0];
+            let mut quantities = std::collections::BTreeMap::new();
+            quantities.insert("cpu".to_string(), Quantity("500m".to_string()));
+            quantities.insert("memory".to_string(), Quantity("4194304Ki".to_string()));
+            quantities.insert(
+                "ephemeral-storage".to_string(),
+                Quantity("10Gi".to_string()),
+            );
+            container.resources = Some(ResourceRequirements {
+                requests: Some(quantities),
+                ..ResourceRequirements::default()
+            });
+
+            let info = kubernetes_info_from_pod(&pod);
+            assert!((info.resources.cpu_cores.unwrap() - 0.5).abs() < f64::EPSILON);
+            assert_eq!(info.resources.memory_bytes, Some(4 * 1024 * 1024 * 1024));
+            assert_eq!(info.resources.disk_bytes, Some(10 * 1024 * 1024 * 1024));
+        }
     }
 }

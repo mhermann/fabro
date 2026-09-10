@@ -21,7 +21,8 @@
 export const SandboxProviderKind = {
     LOCAL: 'local',
     DOCKER: 'docker',
-    DAYTONA: 'daytona'
+    DAYTONA: 'daytona',
+    KUBERNETES: 'kubernetes'
 } as const;
 
 export type SandboxProviderKind = typeof SandboxProviderKind[keyof typeof SandboxProviderKind];

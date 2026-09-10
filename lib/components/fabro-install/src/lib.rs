@@ -485,6 +485,7 @@ fn write_sandbox_provider_policy(
         SandboxProviderKind::Local,
         SandboxProviderKind::Docker,
         SandboxProviderKind::Daytona,
+        SandboxProviderKind::Kubernetes,
     ] {
         // Only enable the providers the operator configured or allowed in the
         // install wizard: the chosen runtime, plus local when allowed.
@@ -492,6 +493,9 @@ fn write_sandbox_provider_policy(
             SandboxProviderKind::Local => allow_local,
             SandboxProviderKind::Docker => selection == InstallSandboxSelection::Docker,
             SandboxProviderKind::Daytona => selection == InstallSandboxSelection::Daytona,
+            // The wizard cannot validate cluster access, so Kubernetes stays
+            // explicit-but-disabled until the operator opts in.
+            SandboxProviderKind::Kubernetes => false,
         };
         let entry = ensure_table(providers, &provider.to_string())?;
         entry.insert("enabled".to_string(), toml::Value::Boolean(enabled));

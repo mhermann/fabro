@@ -82,6 +82,20 @@ preserve = false
 stop_on_terminal = true
 "#;
 
+const KUBERNETES_DEFAULT_ENVIRONMENT_TOML: &str = r#"provider = "kubernetes"
+
+[image]
+docker = "buildpack-deps:noble"
+
+[resources]
+cpu = 2
+memory = "4GB"
+
+[lifecycle]
+preserve = false
+stop_on_terminal = true
+"#;
+
 #[derive(Debug)]
 pub struct EnvironmentStore {
     pool:      DbPool,
@@ -608,6 +622,7 @@ pub async fn seed_default_environment(
     let content = match provider {
         EnvironmentProvider::Docker => DEFAULT_ENVIRONMENT_TOML,
         EnvironmentProvider::Daytona => DAYTONA_DEFAULT_ENVIRONMENT_TOML,
+        EnvironmentProvider::Kubernetes => KUBERNETES_DEFAULT_ENVIRONMENT_TOML,
         EnvironmentProvider::Local => LOCAL_ENVIRONMENT_TOML,
     };
     let layer: EnvironmentLayer = toml::from_str(content).map_err(|source| {

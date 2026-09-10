@@ -21,7 +21,8 @@
 export const EnvironmentProvider = {
     LOCAL: 'local',
     DOCKER: 'docker',
-    DAYTONA: 'daytona'
+    DAYTONA: 'daytona',
+    KUBERNETES: 'kubernetes'
 } as const;
 
 export type EnvironmentProvider = typeof EnvironmentProvider[keyof typeof EnvironmentProvider];

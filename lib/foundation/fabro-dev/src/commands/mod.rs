@@ -1,3 +1,4 @@
+mod agent_image;
 mod bench_tests;
 mod build;
 mod docker_build;
@@ -12,6 +13,7 @@ mod spa_refresh;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+pub(crate) use agent_image::{AgentImageArgs, agent_image};
 use anyhow::{Context, Result};
 pub(crate) use bench_tests::{BenchTestsArgs, bench_tests};
 pub(crate) use build::{BuildArgs, build};

@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use fabro_auth::{CredentialSource, VaultCredentialSource};
+use fabro_config::Storage;
+use fabro_config::envfile::read_env_file;
 use fabro_interview::{AutoApproveInterviewer, Interviewer};
 use fabro_llm::client::Client as LlmClient;
 use fabro_mcp::config::McpServerSettings;
@@ -12,9 +14,9 @@ use fabro_model::{Catalog, ProviderId};
 use fabro_sandbox::daytona::DaytonaConfig;
 use fabro_sandbox::from_environment::{
     daytona_config_from_environment, docker_config_from_environment_with_secrets,
-    local_working_directory_from_environment,
+    kubernetes_config_from_environment_with_secrets, local_working_directory_from_environment,
 };
-use fabro_sandbox::{DockerSandboxOptions, SandboxSpec};
+use fabro_sandbox::{DockerSandboxOptions, KubernetesSandboxOptions, SandboxSpec};
 use fabro_static::EnvVars;
 #[cfg(test)]
 use fabro_types::GitRunTarget;
@@ -559,6 +561,26 @@ impl RunSession {
                     api_key,
                 }
             }
+            SandboxProviderKind::Kubernetes => {
+                let agent_token_key = resolve_kubernetes_agent_key().map_err(|err| {
+                    Error::engine_with_source(
+                        "failed to resolve the Kubernetes sandbox agent token secret",
+                        err,
+                    )
+                })?;
+                let mut config = resolve_kubernetes_config(resolved, secret_lookup)?;
+                config.skip_clone |= clone_source.skip_clone;
+                SandboxSpec::Kubernetes {
+                    config:           Box::new(config),
+                    github_app:       services.github_app.clone(),
+                    run_id:           Some(record.run_id),
+                    clone_origin_url: clone_source.origin_url,
+                    clone_branch:     clone_source.branch,
+                    clone_tag:        clone_source.tag,
+                    clone_commit_sha: clone_source.commit_sha,
+                    agent_token_key:  Some(agent_token_key),
+                }
+            }
         };
 
         let toml_env = resolved
@@ -829,6 +851,80 @@ fn resolve_docker_config(
         secrets_lookup,
     )
     .map_err(|err| Error::engine_with_source("failed to resolve Docker environment config", err))
+}
+
+fn resolve_kubernetes_config(
+    settings: &ResolvedRunSettings,
+    secrets_lookup: impl FnMut(&str) -> Option<String>,
+) -> Result<KubernetesSandboxOptions, Error> {
+    kubernetes_config_from_environment_with_secrets(
+        &settings.environment,
+        &settings.clone,
+        secrets_lookup,
+    )
+    .map_err(|err| {
+        Error::engine_with_source("failed to resolve Kubernetes environment config", err)
+    })
+}
+
+/// Resolve the secret the sandbox agent token is derived from.
+///
+/// The server writes `SESSION_SECRET` into its storage-root env file, and the
+/// worker receives `FABRO_STORAGE_ROOT` through the fail-closed allowlist, so
+/// the worker re-derives the same token the server does without the secret
+/// ever crossing the run boundary. In-cluster servers also keep it in process
+/// env, which is checked first.
+pub(crate) fn resolve_kubernetes_agent_key() -> Result<String, Error> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "intentional ambient lookup: servers expose the session secret through \\
+                  process env, which spawned worker processes also inherit"
+    )]
+    fn session_secret_from_env() -> Option<String> {
+        std::env::var(EnvVars::SESSION_SECRET).ok()
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the worker's storage root is only communicated through process env; \\
+                  spawn_env.rs allowlists FABRO_STORAGE_ROOT precisely for this path"
+    )]
+    fn storage_root_from_env() -> Option<String> {
+        std::env::var(EnvVars::FABRO_STORAGE_ROOT).ok()
+    }
+
+    if let Some(secret) = session_secret_from_env() {
+        if !secret.trim().is_empty() {
+            return Ok(secret);
+        }
+    }
+    let storage_root = storage_root_from_env().ok_or_else(|| {
+        Error::engine(
+            "Kubernetes sandboxes require the server session secret (SESSION_SECRET) to \
+             derive the sandbox agent token; set it or run on a server with a configured \
+             storage root",
+        )
+    })?;
+    let env_path = Storage::new(storage_root).runtime_directory().env_path();
+    let entries = read_env_file(&env_path).map_err(|err| {
+        Error::engine_with_source(
+            format!(
+                "failed to read the server env file at {}",
+                env_path.display()
+            ),
+            Error::engine(err.to_string()),
+        )
+    })?;
+    entries
+        .get(EnvVars::SESSION_SECRET)
+        .filter(|secret| !secret.trim().is_empty())
+        .cloned()
+        .ok_or_else(|| {
+            Error::engine(
+                "the server env file has no SESSION_SECRET entry; Kubernetes sandboxes need \
+                 it to derive the sandbox agent token",
+            )
+        })
 }
 
 fn resolve_start_llm(
@@ -1428,6 +1524,36 @@ mod tests {
             .root()
             .to_path_buf();
         (storage_root, run_dir)
+    }
+
+    /// Set an env var for one test and clear it on drop. Single-var use at a
+    /// time; workflow tests otherwise leave the process env untouched, so
+    /// clearing is always correct here.
+    struct EnvSecretGuard {
+        name: &'static str,
+    }
+
+    impl EnvSecretGuard {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test-only: resolve_kubernetes_agent_key reads the process env, so the \
+                      fixture injects the secret there and clears it on drop"
+        )]
+        fn set(value: &'static str) -> Self {
+            let name = EnvVars::SESSION_SECRET;
+            std::env::set_var(name, value);
+            Self { name }
+        }
+    }
+
+    impl Drop for EnvSecretGuard {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test-only cleanup paired with EnvSecretGuard::set"
+        )]
+        fn drop(&mut self) {
+            std::env::remove_var(self.name);
+        }
     }
 
     fn settings_from_run_layer(run: RunLayer) -> WorkflowSettings {
@@ -2033,6 +2159,71 @@ reasoning = false
     }
 
     #[tokio::test]
+    async fn run_session_new_none_target_forces_empty_kubernetes_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let (storage_root, _run_dir) = storage_root_and_run_dir(&temp);
+        let mut settings = settings_from_run_layer(RunLayer {
+            clone: Some(RunCloneLayer {
+                enabled: Some(true),
+                depth:   None,
+            }),
+            ..RunLayer::default()
+        });
+        settings.run.environment.provider = EnvironmentProvider::Kubernetes;
+        settings.run.environment.image.docker =
+            Some("registry.internal/team/sandbox:2026.1".to_string());
+        let (persisted, store) = persisted_workflow_with_settings_and_target(
+            MINIMAL_DOT,
+            &storage_root,
+            settings,
+            Some(RunTarget::None {}),
+        )
+        .await;
+        let emitter = Arc::new(Emitter::new(fixtures::RUN_1));
+        let registry = Arc::new(test_registry());
+        // The agent token derives from the session secret; the worker resolves
+        // it through FABRO_STORAGE_ROOT's server env file or, as here, the
+        // in-cluster process env.
+        let secret_guard = EnvSecretGuard::set("test-session-secret");
+
+        let session = RunSession::new(&persisted, StartServices {
+            vault: Arc::new(AsyncRwLock::new(start_vault(&[]))),
+            ..test_start_services(&store, &storage_root, emitter, registry).await
+        })
+        .await
+        .unwrap();
+        drop(secret_guard);
+
+        let RunSession {
+            sandbox,
+            sandbox_env,
+            ..
+        } = session;
+        let SandboxSpec::Kubernetes {
+            config,
+            agent_token_key,
+            clone_origin_url,
+            clone_branch,
+            clone_commit_sha,
+            ..
+        } = sandbox
+        else {
+            panic!("none target should retain the selected Kubernetes provider");
+        };
+        assert!(config.skip_clone);
+        assert_eq!(config.image, "registry.internal/team/sandbox:2026.1");
+        assert_eq!(
+            agent_token_key.as_deref(),
+            Some("test-session-secret"),
+            "the worker should re-derive the agent token key from the session secret"
+        );
+        assert_eq!(clone_origin_url, None);
+        assert_eq!(clone_branch, None);
+        assert_eq!(clone_commit_sha, None);
+        assert_eq!(sandbox_env.origin_url, None);
+    }
+
+    #[tokio::test]
     async fn run_session_new_rejects_persisted_none_target_with_local_provider() {
         let temp = tempfile::tempdir().unwrap();
         let (storage_root, _run_dir) = storage_root_and_run_dir(&temp);
@@ -2233,6 +2424,9 @@ reasoning = false
             settings.run.environment.provider = provider;
             settings.run.environment.image.docker = match provider {
                 EnvironmentProvider::Docker => Some("buildpack-deps:noble".to_string()),
+                EnvironmentProvider::Kubernetes => {
+                    Some("registry.internal/team/sandbox:2026.1".to_string())
+                }
                 EnvironmentProvider::Daytona | EnvironmentProvider::Local => None,
             };
             let (persisted, store) =

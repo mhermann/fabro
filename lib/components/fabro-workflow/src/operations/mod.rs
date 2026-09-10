@@ -25,6 +25,7 @@ pub use resume::resume;
 pub use retry::{RetryOutcome, RetryRunInput, retry_run};
 pub use rewind::{RewindInput, RewindOutcome, rewind};
 pub use source::WorkflowInput;
+pub(crate) use start::resolve_kubernetes_agent_key;
 pub use start::{StartServices, Started, start};
 pub use timeline::{ForkTarget, RunTimeline, TimelineEntry, build_timeline, timeline};
 pub use validate::{ValidateInput, validate, validate_with_catalog, validate_with_ready_providers};

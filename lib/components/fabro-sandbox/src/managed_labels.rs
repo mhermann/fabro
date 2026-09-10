@@ -19,7 +19,7 @@ pub(crate) fn for_run(run_id: Option<&RunId>) -> HashMap<String, String> {
     labels
 }
 
-#[cfg(any(feature = "daytona", test))]
+#[cfg(any(feature = "daytona", feature = "kubernetes", test))]
 pub(crate) fn merge_for_run(
     user_labels: Option<&HashMap<String, String>>,
     run_id: Option<&RunId>,

@@ -25,6 +25,7 @@ use std::sync::Arc;
 use fabro_agent::Sandbox;
 use fabro_graphviz::graph::{AttrValue, Edge, Graph, Node};
 use fabro_sandbox::daytona::{DaytonaConfig, DaytonaSandbox};
+use fabro_sandbox::reconnect::ReconnectCredentials;
 use fabro_static::EnvVars;
 use fabro_store::{ArtifactKey, ArtifactStore};
 use fabro_types::{RunId, StageId, WorkflowSettings, parse_blob_ref};
@@ -1547,7 +1548,7 @@ async fn daytona_cp_upload_download_round_trip() {
 
     // 3. Reconnect via the real cp::reconnect path
     let tmp = tempfile::tempdir().unwrap();
-    let reconnected = reconnect(&record, None)
+    let reconnected = reconnect(&record, ReconnectCredentials::default())
         .await
         .expect("reconnect should succeed");
 

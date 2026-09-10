@@ -12,22 +12,30 @@ use crate::SandboxEventCallback;
 use crate::daytona::DaytonaSandbox;
 #[cfg(feature = "docker")]
 use crate::docker::DockerSandbox;
+#[cfg(feature = "kubernetes")]
+use crate::kubernetes::KubernetesSandbox;
 use crate::local::LocalSandbox;
 
-/// Reconnect to a sandbox from a saved record.
+/// Provider credentials a caller resolves once and hands to every reconnect
+/// in a request path.
 ///
 /// `daytona_api_key` is forwarded to the Daytona SDK when the provider is
-/// `"daytona"`. Pass `None` to fall back to the `DAYTONA_API_KEY` env var.
-#[allow(
-    clippy::unused_async,
-    unused_variables,
-    reason = "Feature-gated sandbox backends leave some parameters unused on partial builds."
-)]
+/// `"daytona"`. `kubernetes_agent_key` is the secret the agent bearer token is
+/// derived from when the provider is `"kubernetes"` (the server session
+/// secret; only the derived token reaches the pod). Pass `None` fields to fall
+/// back to each provider's ambient resolution.
+#[derive(Debug, Clone, Default)]
+pub struct ReconnectCredentials {
+    pub daytona_api_key:      Option<String>,
+    pub kubernetes_agent_key: Option<String>,
+}
+
+/// Reconnect to a sandbox from a saved record.
 pub async fn reconnect(
     record: &RunSandboxInstance,
-    daytona_api_key: Option<String>,
+    credentials: ReconnectCredentials,
 ) -> Result<Box<dyn crate::Sandbox>> {
-    reconnect_for_run(record, daytona_api_key, None).await
+    reconnect_for_run(record, credentials, None).await
 }
 
 #[allow(
@@ -36,10 +44,10 @@ pub async fn reconnect(
 )]
 pub async fn reconnect_for_run(
     record: &RunSandboxInstance,
-    daytona_api_key: Option<String>,
+    credentials: ReconnectCredentials,
     run_id: Option<RunId>,
 ) -> Result<Box<dyn crate::Sandbox>> {
-    reconnect_for_run_with_callback(record, daytona_api_key, run_id, None).await
+    reconnect_for_run_with_callback(record, credentials, run_id, None).await
 }
 
 #[allow(
@@ -48,7 +56,7 @@ pub async fn reconnect_for_run(
 )]
 pub async fn reconnect_for_run_with_callback(
     record: &RunSandboxInstance,
-    daytona_api_key: Option<String>,
+    credentials: ReconnectCredentials,
     run_id: Option<RunId>,
     event_callback: Option<SandboxEventCallback>,
 ) -> Result<Box<dyn crate::Sandbox>> {
@@ -91,7 +99,7 @@ pub async fn reconnect_for_run_with_callback(
 
             let mut sandbox = DaytonaSandbox::reconnect(
                 &runtime.id,
-                daytona_api_key,
+                credentials.daytona_api_key,
                 repo_cloned,
                 runtime.working_directory.clone(),
                 runtime.clone_origin_url.clone(),
@@ -106,5 +114,29 @@ pub async fn reconnect_for_run_with_callback(
         }
         #[cfg(not(feature = "daytona"))]
         SandboxProviderKind::Daytona => bail!("Daytona sandbox support is not enabled"),
+        #[cfg(feature = "kubernetes")]
+        SandboxProviderKind::Kubernetes => {
+            let repo_cloned = runtime
+                .repo_cloned
+                .context("Kubernetes run sandbox missing repo_cloned metadata")?;
+
+            let mut sandbox = KubernetesSandbox::reconnect(
+                &runtime.id,
+                credentials.kubernetes_agent_key,
+                repo_cloned,
+                runtime.working_directory.clone(),
+                runtime.clone_origin_url.clone(),
+                runtime.clone_branch.clone(),
+                run_id,
+            )
+            .await
+            .map_err(anyhow::Error::new)?;
+            if let Some(callback) = event_callback {
+                sandbox.set_event_callback(callback);
+            }
+            Ok(Box::new(sandbox))
+        }
+        #[cfg(not(feature = "kubernetes"))]
+        SandboxProviderKind::Kubernetes => bail!("Kubernetes sandbox support is not enabled"),
     }
 }

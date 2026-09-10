@@ -18,6 +18,7 @@ impl EnvVars {
     pub const FABRO_GIT_SHA: &'static str = "FABRO_GIT_SHA";
     pub const FABRO_HOME: &'static str = "FABRO_HOME";
     pub const FABRO_HTTP_PROXY_POLICY: &'static str = "FABRO_HTTP_PROXY_POLICY";
+    pub const FABRO_KUBERNETES_AGENT_IMAGE: &'static str = "FABRO_KUBERNETES_AGENT_IMAGE";
     pub const FABRO_JSON: &'static str = "FABRO_JSON";
     pub const FABRO_LOG: &'static str = "FABRO_LOG";
     pub const FABRO_LOG_DESTINATION: &'static str = "FABRO_LOG_DESTINATION";
@@ -123,6 +124,7 @@ impl EnvVars {
     pub const FORCE_COLOR: &'static str = "FORCE_COLOR";
     pub const HOME: &'static str = "HOME";
     pub const KUBERNETES_SERVICE_HOST: &'static str = "KUBERNETES_SERVICE_HOST";
+    pub const KUBERNETES_SERVICE_PORT: &'static str = "KUBERNETES_SERVICE_PORT";
     pub const LANG: &'static str = "LANG";
     pub const LLVM_PROFILE_FILE: &'static str = "LLVM_PROFILE_FILE";
     pub const NEXTEST_PROFILE: &'static str = "NEXTEST_PROFILE";
@@ -175,6 +177,7 @@ mod tests {
             EnvVars::FABRO_HOME,
             EnvVars::FABRO_HTTP_PROXY_POLICY,
             EnvVars::FABRO_JSON,
+            EnvVars::FABRO_KUBERNETES_AGENT_IMAGE,
             EnvVars::FABRO_LOG,
             EnvVars::FABRO_LOG_DESTINATION,
             EnvVars::FABRO_NO_UPGRADE_CHECK,
@@ -265,6 +268,7 @@ mod tests {
             EnvVars::FORCE_COLOR,
             EnvVars::HOME,
             EnvVars::KUBERNETES_SERVICE_HOST,
+            EnvVars::KUBERNETES_SERVICE_PORT,
             EnvVars::LANG,
             EnvVars::LLVM_PROFILE_FILE,
             EnvVars::NEXTEST_PROFILE,

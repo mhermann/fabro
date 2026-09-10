@@ -17,6 +17,8 @@ pub enum SandboxProviderKind {
     Docker,
     /// Run tools inside a Daytona cloud sandbox.
     Daytona,
+    /// Run tools inside a pod scheduled on a Kubernetes cluster.
+    Kubernetes,
 }
 
 impl SandboxProviderKind {
@@ -31,7 +33,7 @@ impl SandboxProviderKind {
     /// True for providers that clone repository sources into their workspace.
     #[must_use]
     pub fn is_clone_based(&self) -> bool {
-        matches!(self, Self::Docker | Self::Daytona)
+        matches!(self, Self::Docker | Self::Daytona | Self::Kubernetes)
     }
 
     /// Coerce non-local providers to `Local` under dry-run; otherwise
@@ -70,6 +72,10 @@ mod tests {
             SandboxProviderKind::Daytona
         );
         assert_eq!(
+            "kubernetes".parse::<SandboxProviderKind>().unwrap(),
+            SandboxProviderKind::Kubernetes
+        );
+        assert_eq!(
             "LOCAL".parse::<SandboxProviderKind>().unwrap(),
             SandboxProviderKind::Local
         );
@@ -81,5 +87,6 @@ mod tests {
         assert_eq!(SandboxProviderKind::Local.to_string(), "local");
         assert_eq!(SandboxProviderKind::Docker.to_string(), "docker");
         assert_eq!(SandboxProviderKind::Daytona.to_string(), "daytona");
+        assert_eq!(SandboxProviderKind::Kubernetes.to_string(), "kubernetes");
     }
 }

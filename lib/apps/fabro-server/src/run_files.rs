@@ -35,7 +35,7 @@ use fabro_api::types::{
     RunFilesMeta, RunFilesMetaDegradedReason, RunFilesMetaScope, RunFilesMetaSource,
     RunFilesMetaToSha,
 };
-use fabro_sandbox::reconnect::reconnect_for_run;
+use fabro_sandbox::reconnect::{ReconnectCredentials, reconnect_for_run};
 use fabro_sandbox::shell_quote;
 use fabro_static::EnvVars;
 use fabro_types::RunId;
@@ -1213,7 +1213,11 @@ async fn reconnect_run_sandbox(
         .vault_secret(EnvVars::DAYTONA_API_KEY)
         .await
         .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
-    let sandbox = reconnect_for_run(&record, daytona_api_key, Some(*run_id))
+    let credentials = ReconnectCredentials {
+        daytona_api_key,
+        kubernetes_agent_key: state.kubernetes_agent_key(),
+    };
+    let sandbox = reconnect_for_run(&record, credentials, Some(*run_id))
         .await
         .map_err(|err| ApiError::new(StatusCode::CONFLICT, err.to_string()))?;
     sandbox

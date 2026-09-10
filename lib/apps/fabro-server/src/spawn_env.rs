@@ -50,6 +50,13 @@ const WORKER_ENV_ALLOWLIST: &[&str] = &[
     EnvVars::AWS_CONTAINER_CREDENTIALS_RELATIVE_URI,
     EnvVars::AWS_CONTAINER_CREDENTIALS_FULL_URI,
     EnvVars::AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE,
+    // In-cluster Kubernetes discovery is env-gated: kube-rs resolves the
+    // cluster's API endpoint from these two variables plus the mounted
+    // service-account files (read at startup, so no new secrets cross into
+    // the worker). Workers construct sandboxes for runs, so a server that
+    // runs inside a pod must pass discovery through `env_clear()`.
+    EnvVars::KUBERNETES_SERVICE_HOST,
+    EnvVars::KUBERNETES_SERVICE_PORT,
 ];
 
 const RENDER_GRAPH_ENV_ALLOWLIST: &[&str] = &[EnvVars::PATH, EnvVars::HOME, EnvVars::TMPDIR];
@@ -132,6 +139,19 @@ mod tests {
             ("AWS_ACCESS_KEY_ID".to_string(), "AKIAEXAMPLE".to_string()),
             ("AWS_SECRET_ACCESS_KEY".to_string(), "secret".to_string()),
             ("AWS_SESSION_TOKEN".to_string(), "session".to_string()),
+            (
+                "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI".to_string(),
+                "/path".to_string(),
+            ),
+            (
+                "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE".to_string(),
+                "/token".to_string(),
+            ),
+            (
+                "KUBERNETES_SERVICE_HOST".to_string(),
+                "10.96.0.1".to_string(),
+            ),
+            ("KUBERNETES_SERVICE_PORT".to_string(), "443".to_string()),
             ("AWS_BEARER_TOKEN_BEDROCK".to_string(), "bearer".to_string()),
             ("BEDROCK_API_KEY".to_string(), "alias-bearer".to_string()),
             ("AWS_REGION".to_string(), "us-east-2".to_string()),
@@ -198,6 +218,16 @@ mod tests {
         assert_eq!(
             actual.get("AWS_REGION").map(String::as_str),
             Some("us-east-2")
+        );
+        // In-cluster kube discovery inputs must reach the worker so sandbox
+        // construction resolves the cluster; unrelated AWS vars still don't.
+        assert_eq!(
+            actual.get("KUBERNETES_SERVICE_HOST").map(String::as_str),
+            Some("10.96.0.1")
+        );
+        assert_eq!(
+            actual.get("KUBERNETES_SERVICE_PORT").map(String::as_str),
+            Some("443")
         );
         assert!(!actual.contains_key("AWS_BEARER_TOKEN_BEDROCK"));
         assert!(!actual.contains_key("BEDROCK_API_KEY"));

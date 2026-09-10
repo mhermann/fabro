@@ -70,10 +70,10 @@ use fabro_model::{BilledTokenCounts, Catalog, ModelRef, ModelTestMode, ProviderI
 use fabro_redact::redact_jsonl_line;
 use fabro_sandbox::daytona::{self, DaytonaSandbox};
 use fabro_sandbox::details::sandbox_details;
-use fabro_sandbox::reconnect::reconnect_for_run;
+use fabro_sandbox::reconnect::{ReconnectCredentials, reconnect_for_run};
 use fabro_sandbox::{
-    DaytonaSandboxProvider, DockerSandboxProvider, LocalSandboxProvider, Sandbox, SandboxProvider,
-    SandboxProviderRegistry,
+    DaytonaSandboxProvider, DockerSandboxProvider, KubernetesSandboxProvider, LocalSandboxProvider,
+    Sandbox, SandboxProvider, SandboxProviderRegistry,
 };
 use fabro_slack::client::{PostedMessage as SlackPostedMessage, SlackClient};
 use fabro_slack::config::{
@@ -1535,6 +1535,13 @@ impl AppState {
         self.server_secrets.get(name)
     }
 
+    /// Secret the Kubernetes sandbox agent token is derived from. Only the
+    /// derived token ever reaches a pod; every process that can read this
+    /// secret re-derives the same token for reconnects.
+    pub(crate) fn kubernetes_agent_key(&self) -> Option<String> {
+        self.server_secret(EnvVars::SESSION_SECRET)
+    }
+
     pub(crate) fn worker_token_keys(&self) -> &WorkerTokenKeys {
         &self.worker_tokens
     }
@@ -2357,7 +2364,45 @@ fn build_sandbox_provider_registry(
         )));
     }
 
+    // Cluster targeting is ambient (in-cluster service account or the
+    // process's default kubeconfig), so registration doubles as a
+    // connectivity probe: an operator who enables the provider without a
+    // reachable cluster keeps the other providers unaffected.
+    if provider_settings.kubernetes.enabled {
+        match block_on_kube_client() {
+            Ok(client) => providers.push(Arc::new(KubernetesSandboxProvider::with_client(
+                None, None, client,
+            ))),
+            Err(err) => {
+                debug!(
+                    error = %err,
+                    "Kubernetes sandbox provider enabled but no cluster is reachable;                      sandbox provider not registered"
+                );
+            }
+        }
+    }
+
     SandboxProviderRegistry::new(providers)
+}
+
+/// Resolve the ambient kube client synchronously. `build_app_state` already
+/// hops to a short-lived thread for such setup, and provider registration is
+/// synchronous, so the async `try_default` is completed on a helper runtime.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "synchronous app-state assembly may run inside an async runtime; a short-lived OS \
+              thread avoids nested Tokio runtimes"
+)]
+fn block_on_kube_client() -> anyhow::Result<kube::Client> {
+    std::thread::spawn(|| -> anyhow::Result<kube::Client> {
+        let runtime = TokioRuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("build Kubernetes provider runtime")?;
+        Ok(runtime.block_on(kube::Client::try_default())?)
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("Kubernetes provider client thread panicked"))?
 }
 
 pub(crate) fn automation_dir_for_active_config(active_config_path: &std::path::Path) -> PathBuf {
@@ -2769,7 +2814,11 @@ async fn delete_run_sandbox_resource(
         .vault_secret(EnvVars::DAYTONA_API_KEY)
         .await
         .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
-    let sandbox = match reconnect_for_run(&record, daytona_api_key, Some(id)).await {
+    let credentials = ReconnectCredentials {
+        daytona_api_key,
+        kubernetes_agent_key: state.kubernetes_agent_key(),
+    };
+    let sandbox = match reconnect_for_run(&record, credentials, Some(id)).await {
         Ok(sandbox) => sandbox,
         Err(err) if force || delete_started => {
             tracing::warn!(

@@ -633,6 +633,123 @@ mode = "block"
 }
 
 #[test]
+fn kubernetes_dockerfile_errors() {
+    let err = workflow_settings_from_toml_with_catalog(
+        r#"
+_version = 1
+
+[run.environment]
+id = "k8s"
+"#,
+        r#"
+[environments.k8s]
+provider = "kubernetes"
+
+[environments.k8s.image]
+docker = "buildpack-deps:noble"
+dockerfile = "FROM buildpack-deps:noble\n"
+"#,
+    )
+    .expect_err("kubernetes cannot build images");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("image.dockerfile") && message.contains("prebuilt image reference"),
+        "expected kubernetes dockerfile diagnostic, got: {message}"
+    );
+}
+
+#[test]
+fn kubernetes_blocked_network_errors() {
+    let err = workflow_settings_from_toml_with_catalog(
+        r#"
+_version = 1
+
+[run.environment]
+id = "k8s"
+"#,
+        r#"
+[environments.k8s]
+provider = "kubernetes"
+
+[environments.k8s.network]
+mode = "block"
+"#,
+    )
+    .expect_err("kubernetes cannot enforce blocked networking");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("run.environment.network.mode")
+            && message.contains("kubernetes environments cannot enforce"),
+        "expected kubernetes blocked-network diagnostic, got: {message}"
+    );
+}
+
+#[test]
+fn kubernetes_invalid_label_errors() {
+    let err = workflow_settings_from_toml_with_catalog(
+        r#"
+_version = 1
+
+[run.environment]
+id = "k8s"
+"#,
+        r#"
+[environments.k8s]
+provider = "kubernetes"
+
+[environments.k8s.labels]
+"bad label!" = "team"
+team = "not a valid value because it is far too long for a kubernetes label value which is limited to 63"
+"#,
+    )
+    .expect_err("kubernetes labels must be valid pod label keys and values");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("labels") && message.contains("only ASCII"),
+        "expected kubernetes label diagnostic, got: {message}"
+    );
+}
+
+#[test]
+fn kubernetes_image_only_resolves() {
+    let settings = workflow_settings_from_toml_with_catalog(
+        r#"
+_version = 1
+
+[run.environment]
+id = "k8s"
+"#,
+        r#"
+[environments.k8s]
+provider = "kubernetes"
+
+[environments.k8s.image]
+docker = "buildpack-deps:noble"
+
+[environments.k8s.resources]
+cpu = 2
+memory = "4GB"
+
+[environments.k8s.labels]
+team = "platform"
+"#,
+    )
+    .expect("image-reference-only kubernetes environment should resolve");
+
+    assert_eq!(
+        settings.run.environment.provider,
+        EnvironmentProvider::Kubernetes
+    );
+    assert_eq!(
+        settings.run.environment.image.docker.as_deref(),
+        Some("buildpack-deps:noble")
+    );
+}
+
+#[test]
 fn daytona_dockerfile_without_image_ref_resolves() {
     let settings = workflow_settings_from_toml_with_catalog(
         r#"

@@ -34,7 +34,7 @@ fabro-mcp = { path = "../../components/fabro-mcp" }
 fabro-mcp-server = { path = "../fabro-mcp-server" }
 fabro-manifest = { path = "../../components/fabro-manifest" }
 fabro-proc = { path = "../../foundation/fabro-proc" }
-fabro-sandbox = { path = "../../components/fabro-sandbox", features = ["daytona"] }
+fabro-sandbox = { path = "../../components/fabro-sandbox", features = ["daytona", "kubernetes"] }
 fabro-checkpoint = { path = "../../components/fabro-checkpoint" }
 fabro-graphviz = { path = "../../components/fabro-graphviz" }
 fabro-validate = { path = "../../components/fabro-validate" }

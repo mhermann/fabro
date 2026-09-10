@@ -1,0 +1,30 @@
+[package]
+name = "fabro-sandbox-agent"
+edition.workspace = true
+version.workspace = true
+publish = false
+license.workspace = true
+description = "In-pod agent serving exec and process control for Kubernetes sandboxes"
+
+[[bin]]
+name = "fabro-sandbox-agent"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "signal", "net"] }
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+futures-core = "0.3"
+libc = "0.2"
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt"] }
+
+[dev-dependencies]
+reqwest = { workspace = true, features = ["json"] }

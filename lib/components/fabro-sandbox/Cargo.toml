@@ -11,6 +11,7 @@ default = ["local"]
 local = []
 docker = ["dep:bollard", "dep:tar"]
 daytona = ["dep:daytona-sdk", "dep:daytona-api-client", "dep:git2", "dep:fabro-config", "dep:fabro-http", "dep:reqwest-middleware", "dep:rand", "dep:tokio-tungstenite", "dep:futures-util", "dep:rustls"]
+kubernetes = ["dep:kube", "dep:k8s-openapi", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:fabro-config"]
 test-support = []
 
 [lib]
@@ -62,6 +63,13 @@ reqwest-middleware = { version = "0.5", features = ["json", "multipart", "form",
 tokio-tungstenite = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"], optional = true }
+
+# kubernetes
+kube = { workspace = true, optional = true }
+k8s-openapi = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
 
 [dev-dependencies]
 fabro-github = { path = "../fabro-github", features = ["test-support"] }

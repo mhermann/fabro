@@ -88,6 +88,10 @@ strategy = "tailscale_funnel"
         json["server"]["sandbox"]["providers"]["daytona"]["enabled"],
         false
     );
+    assert_eq!(
+        json["server"]["sandbox"]["providers"]["kubernetes"]["enabled"],
+        true
+    );
     assert!(
         json["server"].get("ip_allowlist").is_none(),
         "server settings API should not expose removed IP allowlist settings"

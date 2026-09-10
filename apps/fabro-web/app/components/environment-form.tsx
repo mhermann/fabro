@@ -29,7 +29,20 @@ import {
 export function parseCreatableProvider(value: string | null): EnvironmentProvider {
   return value === EnvironmentProvider.DAYTONA
     ? EnvironmentProvider.DAYTONA
-    : EnvironmentProvider.DOCKER;
+    : value === EnvironmentProvider.KUBERNETES
+      ? EnvironmentProvider.KUBERNETES
+      : EnvironmentProvider.DOCKER;
+}
+
+// Kubernetes environments run prebuilt image references only — the cluster
+// pulls from a registry and never builds. Networking is also cluster-managed,
+// so network blocking stays a Docker/Daytona-only knob.
+export function supportsDockerfileSource(provider: EnvironmentProvider): boolean {
+  return provider !== EnvironmentProvider.KUBERNETES;
+}
+
+export function supportsNetworkBlocking(provider: EnvironmentProvider): boolean {
+  return provider !== EnvironmentProvider.KUBERNETES;
 }
 
 // Environment ids are server-managed file names: lowercase, digits, hyphens.
@@ -147,7 +160,7 @@ function settingsFromForm(values: EnvironmentFormValues): ReplaceEnvironmentRequ
 }
 
 function imageFromForm(values: EnvironmentFormValues): EnvironmentApiImageSettings {
-  if (values.imageSource === "dockerfile") {
+  if (supportsDockerfileSource(values.provider) && values.imageSource === "dockerfile") {
     return {
       docker: null,
       dockerfile: {
@@ -203,8 +216,9 @@ function parseGb(value: string | null, range: ResourceRange): number {
 }
 
 function networkFromForm(values: EnvironmentFormValues): EnvironmentNetworkSettings {
+  const blocking = supportsNetworkBlocking(values.provider) && values.blockNetwork;
   return {
-    mode:  values.blockNetwork ? EnvironmentNetworkMode.BLOCK : EnvironmentNetworkMode.ALLOW_ALL,
+    mode:  blocking ? EnvironmentNetworkMode.BLOCK : EnvironmentNetworkMode.ALLOW_ALL,
     allow: [],
   };
 }
@@ -261,25 +275,31 @@ export function EnvironmentFormFields({
             />
           )}
         </Row>
-        <Row
-          title={<Label required>Source</Label>}
-          help="Whether this environment runs a prebuilt image reference or builds from an inline Dockerfile."
-        >
-          <select
-            name="image_source"
-            aria-label="Image source"
-            value={values.imageSource}
-            onChange={(e) => patch({ imageSource: parseImageSource(e.target.value) })}
-            className={INPUT_CLASS}
+        {supportsDockerfileSource(values.provider) ? (
+          <Row
+            title={<Label required>Source</Label>}
+            help="Whether this environment runs a prebuilt image reference or builds from an inline Dockerfile."
           >
-            <option value="image">Image reference</option>
-            <option value="dockerfile">Dockerfile</option>
-          </select>
-        </Row>
-        {values.imageSource === "image" ? (
+            <select
+              name="image_source"
+              aria-label="Image source"
+              value={values.imageSource}
+              onChange={(e) => patch({ imageSource: parseImageSource(e.target.value) })}
+              className={INPUT_CLASS}
+            >
+              <option value="image">Image reference</option>
+              <option value="dockerfile">Dockerfile</option>
+            </select>
+          </Row>
+        ) : null}
+        {values.provider === EnvironmentProvider.KUBERNETES || values.imageSource === "image" ? (
           <Row
             title={<Label required>Image reference</Label>}
-            help="Docker image or Daytona snapshot name (e.g. fabro-v11)."
+            help={
+              values.provider === EnvironmentProvider.KUBERNETES
+                ? "Prebuilt image reference the cluster pulls (e.g. registry.internal/team/sandbox:2026.1). Kubernetes environments cannot build images."
+                : "Docker image or Daytona snapshot name (e.g. fabro-v11)."
+            }
           >
             <input
               type="text"
@@ -367,18 +387,20 @@ export function EnvironmentFormFields({
           Advanced
         </DisclosureButton>
         <DisclosurePanel className="space-y-6">
-          <Panel title="Network">
-            <Row
-              title="Block all network access"
-              help="Block all outbound network access from the sandbox."
-            >
-              <ToggleSwitch
-                checked={values.blockNetwork}
-                onChange={(blockNetwork) => patch({ blockNetwork })}
-                label="Block all network access"
-              />
-            </Row>
-          </Panel>
+          {supportsNetworkBlocking(values.provider) ? (
+            <Panel title="Network">
+              <Row
+                title="Block all network access"
+                help="Block all outbound network access from the sandbox."
+              >
+                <ToggleSwitch
+                  checked={values.blockNetwork}
+                  onChange={(blockNetwork) => patch({ blockNetwork })}
+                  label="Block all network access"
+                />
+              </Row>
+            </Panel>
+          ) : null}
 
           <Panel title="Lifecycle">
             <Row title="Preserve" help="Keep the sandbox after the run finishes instead of tearing it down.">

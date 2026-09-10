@@ -4,6 +4,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
+use fabro_sandbox::reconnect::ReconnectCredentials;
 use fabro_sandbox::{TerminalSize, open_terminal_for_run};
 use fabro_types::{
     RunSandboxInstance, SandboxProviderKind, SandboxServiceDiscoverySource, SandboxServiceListMeta,
@@ -451,7 +452,7 @@ async fn create_ssh_access(
                 }
             }
         }
-        SandboxProviderKind::Local => ApiError::new(
+        SandboxProviderKind::Local | SandboxProviderKind::Kubernetes => ApiError::new(
             StatusCode::CONFLICT,
             "Sandbox provider does not support access commands.",
         )
@@ -875,7 +876,11 @@ async fn reconnect_run_sandbox_instance(
     record: &RunSandboxInstance,
 ) -> Result<Box<dyn Sandbox>, Response> {
     let daytona_api_key = load_daytona_api_key(state).await?;
-    let sandbox = reconnect_for_run(record, daytona_api_key, Some(*run_id))
+    let credentials = ReconnectCredentials {
+        daytona_api_key,
+        kubernetes_agent_key: state.kubernetes_agent_key(),
+    };
+    let sandbox = reconnect_for_run(record, credentials, Some(*run_id))
         .await
         .map_err(|err| {
             let detail = render_with_causes(&err.to_string(), &collect_causes(err.as_ref()));

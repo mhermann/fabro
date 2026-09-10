@@ -33,7 +33,7 @@ use crate::managed_labels::{self, MANAGED_LABEL, RUN_ID_LABEL};
 use crate::push_credentials::{self, PushCredentialState};
 use crate::redact::redact_auth_url;
 use crate::sandbox::{
-    self, BASH_ENV_VAR, BASH_PROBE_SCRIPT, BASH_PROBE_TIMEOUT_MS, OutputCaptureBuffer, REMOTE_BASH,
+    self, BASH_PROBE_SCRIPT, BASH_PROBE_TIMEOUT_MS, OutputCaptureBuffer, REMOTE_BASH,
     REMOTE_WALK_TIMEOUT_MS, RefreshOutcome, StdioProcessControl, optional_timeout, resolve_path,
     validate_bash_probe, write_process_stdin,
 };
@@ -78,19 +78,10 @@ struct DockerCloneFailure {
     retry_reason: Option<git_retry::GitRetryReason>,
 }
 
-fn env_entry_name(entry: &str) -> &str {
-    entry.split_once('=').map_or(entry, |(name, _)| name)
-}
-
 /// Remove caller/image startup-file injection and explicitly override any
 /// inherited image value for Docker-created processes.
 fn clean_bash_env_entries(entries: impl IntoIterator<Item = String>) -> Vec<String> {
-    let mut clean: Vec<String> = entries
-        .into_iter()
-        .filter(|entry| env_entry_name(entry) != BASH_ENV_VAR)
-        .collect();
-    clean.push(format!("{BASH_ENV_VAR}="));
-    clean
+    sandbox::scrub_bash_env_entries(entries)
 }
 
 fn docker_bash_exec_env(env_vars: Option<&HashMap<String, String>>) -> Vec<String> {
@@ -2468,7 +2459,7 @@ mod tests {
     use tokio::process::Command;
 
     use super::*;
-    use crate::sandbox::{BASH_PROBE_MARKER, bash_probe_passed};
+    use crate::sandbox::{BASH_ENV_VAR, BASH_PROBE_MARKER, bash_probe_passed};
 
     #[test]
     fn remote_walk_command_only_uses_find_for_traversal() {
@@ -2538,7 +2529,12 @@ mod tests {
         assert!(env.contains(&"MODE=test".to_string()));
         assert_eq!(
             env.iter()
-                .filter(|entry| env_entry_name(entry) == BASH_ENV_VAR)
+                .filter(|entry| {
+                    entry
+                        .split_once('=')
+                        .map_or(entry.as_str(), |(name, _)| name)
+                        == BASH_ENV_VAR
+                })
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
             vec!["BASH_ENV="]

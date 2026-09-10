@@ -18,6 +18,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Build the Kubernetes sandbox agent image with the release layout.
+    AgentImage(commands::AgentImageArgs),
     /// Run the test suite N times and capture per-test timing to CSV.
     BenchTests(commands::BenchTestsArgs),
     /// Refresh embedded SPA assets and run cargo build.
@@ -35,6 +37,7 @@ enum Command {
 impl Command {
     fn run(self) -> Result<()> {
         match self {
+            Self::AgentImage(args) => commands::agent_image(args),
             Self::BenchTests(args) => commands::bench_tests(args),
             Self::Build(args) => commands::build(args),
             Self::DockerBuild(args) => commands::docker_build(args),

@@ -210,20 +210,20 @@ Install seeds a `default` environment into SQLite. It is a normal persisted envi
 
 ## Provider mappings
 
-| Environment field | Local | Docker | Daytona |
-|---|---|---|---|
-| `image.docker` | Ignored | Docker image | Snapshot base image; Fabro computes the snapshot name |
-| `image.dockerfile` | Ignored | Warning; ignored | Snapshot Dockerfile; Fabro computes the snapshot name |
-| `resources.cpu` | Warning; ignored | `cpu_quota = cpu * 100000` | Snapshot CPU |
-| `resources.memory` | Warning; ignored | Container memory limit | Snapshot memory |
-| `resources.disk` | Warning; ignored | Warning; ignored | Snapshot disk |
-| `network.mode = "allow_all"` | Host network | Docker default bridge | Daytona allow-all |
-| `network.mode = "block"` | Error | Docker `none` network | Daytona block |
-| `network.mode = "cidr_allow_list"` | Error | Error | Daytona CIDR allow-list |
-| `labels` | Warning; ignored | Warning; ignored | Daytona labels |
-| `lifecycle.auto_stop` | Warning; ignored | Warning; ignored | Daytona auto-stop |
-| `env` | Process environment overlay | Container environment | Sandbox environment |
-| `cwd` | Server-side command working directory | Warning; ignored | Warning; ignored |
+| Environment field | Local | Docker | Daytona | Kubernetes |
+|---|---|---|---|---|
+| `image.docker` | Ignored | Docker image | Snapshot base image; Fabro computes the snapshot name | Pod image reference the cluster pulls |
+| `image.dockerfile` | Ignored | Warning; ignored | Snapshot Dockerfile; Fabro computes the snapshot name | Error; use a prebuilt registry image |
+| `resources.cpu` | Warning; ignored | `cpu_quota = cpu * 100000` | Snapshot CPU | Pod CPU request and limit |
+| `resources.memory` | Warning; ignored | Container memory limit | Snapshot memory | Pod memory request and limit |
+| `resources.disk` | Warning; ignored | Warning; ignored | Snapshot disk | Pod ephemeral-storage request and limit |
+| `network.mode = "allow_all"` | Host network | Docker default bridge | Daytona allow-all | Cluster network policy |
+| `network.mode = "block"` | Error | Docker `none` network | Daytona block | Error; cluster-managed |
+| `network.mode = "cidr_allow_list"` | Error | Error | Daytona CIDR allow-list | Error; cluster-managed |
+| `labels` | Warning; ignored | Warning; ignored | Daytona labels | Pod labels (validated) |
+| `lifecycle.auto_stop` | Warning; ignored | Warning; ignored | Daytona auto-stop | Warning; ignored |
+| `env` | Process environment overlay | Container environment | Sandbox environment | Pod environment |
+| `cwd` | Server-side command working directory | Warning; ignored | Warning; ignored | Warning; ignored |
 
 ## Local
 
@@ -297,3 +297,54 @@ auto_stop = "30m"
 mode = "cidr_allow_list"
 allow = ["208.80.154.232/32", "10.0.0.0/8"]
 ```
+
+## Kubernetes
+
+Kubernetes runs tools in a pod scheduled on your cluster — one pod per run
+sandbox. Enable the provider on the server with
+`server.sandbox.providers.kubernetes.enabled = true`; the cluster itself is
+resolved from the ambient environment (an in-cluster service account when the
+server runs in a pod, otherwise the process's default kubeconfig). The server
+needs RBAC only for pod lifecycle: `create`, `get`, `list`, `delete`, and pod
+port-forward — never pod-exec.
+
+```toml title="workflow.toml"
+[environments.k8s]
+provider = "kubernetes"
+
+[environments.k8s.image]
+docker = "buildpack-deps:noble"
+
+[environments.k8s.resources]
+cpu = 2
+memory = "4GB"
+disk = "20GB"
+```
+
+Kubernetes environments accept `image.docker` only: the value is a prebuilt
+image reference that the cluster must be able to pull. `image.dockerfile` is
+rejected at validation — build and publish images elsewhere (CI, `docker
+build && push`). Blocked and CIDR allow-list networking are likewise rejected
+because Fabro does not create NetworkPolicy objects; egress is whatever the
+cluster allows. User labels become pod labels and must be valid Kubernetes
+label keys and values (63-character limit).
+
+Each sandbox pod runs the user's image with its command overridden to the
+Fabro sandbox agent, a static binary injected by an init container from
+`ghcr.io/fabro-sh/fabro-sandbox-agent` (pinned to the Fabro version; override
+with `FABRO_KUBERNETES_AGENT_IMAGE` for air-gapped or custom registries — the
+image must be pullable by the cluster). The agent speaks a JSON protocol over
+a kube port-forward, so no pod-exec RBAC is required. Agent authentication
+derives from the server's `SESSION_SECRET` secret; only the derived per-pod
+token ever enters the pod.
+
+Kubernetes is a clone-based provider with the same workspace contract as
+Docker and Daytona: GitHub origins clone into `/workspace` (with optional
+exact-commit checkouts), and a run with no origin or with clone disabled gets
+an empty workspace. Stopping a Kubernetes sandbox deletes its pod —
+`emptyDir` storage dies with the pod, so completed-run sandboxes are not
+browsable the way preserved Docker containers are. Runs that need to survive
+deletion use the git-checkpoint based resume, exactly as with the other
+providers. Kubernetes environments cannot enforce `lifecycle.auto_stop`, and
+the terminal/SSH access endpoints report the provider as not supporting
+embedded access commands.

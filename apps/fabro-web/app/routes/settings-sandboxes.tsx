@@ -17,7 +17,7 @@ export function meta() {
   return [{ title: "Sandboxes — Fabro" }];
 }
 
-type SandboxProviderId = "local" | "docker" | "daytona";
+type SandboxProviderId = "local" | "docker" | "daytona" | "kubernetes";
 
 type SandboxProvider = {
   id: SandboxProviderId;
@@ -63,6 +63,12 @@ function ProvidersPanel({ settings }: { settings: ServerSandboxProvidersSettings
         description: "Run stages in cloud sandboxes managed by Daytona.",
         enabled: settings.daytona.enabled,
         secretName: "DAYTONA_API_KEY",
+      },
+      {
+        id: "kubernetes",
+        name: "Kubernetes",
+        description: "Run stages in pods scheduled on your Kubernetes cluster.",
+        enabled: settings.kubernetes.enabled,
       },
     ],
     [settings],

@@ -5,13 +5,13 @@
 
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "docker")]
+#[cfg(any(feature = "docker", feature = "kubernetes"))]
 use fabro_types::settings::ResolveError;
 #[cfg(feature = "daytona")]
 use fabro_types::settings::run::DockerfileSource as ResolvedDockerfileSource;
-use fabro_types::settings::run::{
-    EnvironmentNetworkMode, RunCloneSettings, RunEnvironmentSettings,
-};
+#[cfg(feature = "daytona")]
+use fabro_types::settings::run::EnvironmentNetworkMode;
+use fabro_types::settings::run::{RunCloneSettings, RunEnvironmentSettings};
 
 #[cfg(feature = "daytona")]
 use crate::config::{
@@ -148,6 +148,81 @@ fn docker_config_from_environment_env(
     }
 }
 
+#[cfg(feature = "kubernetes")]
+use crate::kubernetes::KubernetesSandboxOptions;
+
+#[cfg(feature = "kubernetes")]
+#[must_use]
+pub fn kubernetes_config_from_environment(
+    settings: &RunEnvironmentSettings,
+    clone: &RunCloneSettings,
+) -> KubernetesSandboxOptions {
+    // No vault is available on this path (server preflight / manifest), so a
+    // `{{ secrets.* }}` value keeps its source form. Nothing else is left to
+    // resolve: `{{ vars.* }}` is substituted at run creation.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "preflight has no vault, so an unresolved secret token is carried in source \
+                  form; the real value is resolved by \
+                  kubernetes_config_from_environment_with_secrets"
+    )]
+    let env = settings
+        .env
+        .iter()
+        .map(|(key, value)| (key.clone(), value.as_source()))
+        .collect();
+    kubernetes_config_from_environment_env(settings, clone, env)
+}
+
+#[cfg(feature = "kubernetes")]
+pub fn kubernetes_config_from_environment_with_secrets(
+    settings: &RunEnvironmentSettings,
+    clone: &RunCloneSettings,
+    secrets_lookup: impl FnMut(&str) -> Option<String>,
+) -> Result<KubernetesSandboxOptions, ResolveError> {
+    let env = settings.resolve_env(secrets_lookup)?;
+    Ok(kubernetes_config_from_environment_env(settings, clone, env))
+}
+
+#[cfg(feature = "kubernetes")]
+fn kubernetes_config_from_environment_env(
+    settings: &RunEnvironmentSettings,
+    clone: &RunCloneSettings,
+    env: std::collections::HashMap<String, String>,
+) -> KubernetesSandboxOptions {
+    // fabro-config rejects Kubernetes environments that set image.dockerfile,
+    // so only the image reference is consulted here.
+    let mut env_vars = env
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>();
+    env_vars.sort();
+    let default_options = KubernetesSandboxOptions::default();
+    KubernetesSandboxOptions {
+        image: settings
+            .image
+            .docker
+            .clone()
+            .unwrap_or(default_options.image),
+        cpu: settings.resources.cpu,
+        memory_bytes: settings
+            .resources
+            .memory
+            .and_then(|size| i64::try_from(size.as_bytes()).ok()),
+        disk_bytes: settings
+            .resources
+            .disk
+            .and_then(|size| i64::try_from(size.as_bytes()).ok()),
+        labels: (!settings.labels.is_empty()).then(|| settings.labels.clone()),
+        env_vars,
+        clone_depth: clone
+            .depth_limit()
+            .and_then(|depth| usize::try_from(depth).ok()),
+        skip_clone: !clone.enabled,
+        ..default_options
+    }
+}
+
 pub fn local_working_directory_from_environment(
     settings: &RunEnvironmentSettings,
     source_directory: Option<&Path>,
@@ -266,5 +341,73 @@ mod tests {
             DaytonaSnapshotSource::Image("ubuntu:24.04".to_string())
         );
         assert_eq!(snapshot.cpu, Some(2));
+    }
+
+    #[cfg(feature = "kubernetes")]
+    #[test]
+    fn kubernetes_config_maps_image_resources_and_clone_settings() {
+        let mut settings = run_environment(EnvironmentProvider::Kubernetes);
+        settings.image.docker = Some("registry.internal/team/sandbox:2026.1".to_string());
+        settings.resources.cpu = Some(4);
+        settings.resources.memory = Some("8GB".parse().expect("size"));
+        settings
+            .labels
+            .insert("team".to_string(), "platform".to_string());
+        let clone = RunCloneSettings {
+            enabled: true,
+            depth:   1,
+        };
+
+        let config = kubernetes_config_from_environment(&settings, &clone);
+
+        assert_eq!(config.image, "registry.internal/team/sandbox:2026.1");
+        assert_eq!(config.cpu, Some(4));
+        assert_eq!(config.memory_bytes, Some(8_000_000_000));
+        assert_eq!(config.clone_depth, Some(1));
+        assert!(!config.skip_clone);
+        assert_eq!(config.labels.as_ref().map(HashMap::len), Some(1));
+    }
+
+    #[cfg(feature = "kubernetes")]
+    #[test]
+    fn kubernetes_config_disabled_clone_becomes_skip_clone() {
+        let settings = run_environment(EnvironmentProvider::Kubernetes);
+        let clone = RunCloneSettings {
+            enabled: false,
+            depth:   RunCloneSettings::DEFAULT_DEPTH,
+        };
+
+        let config = kubernetes_config_from_environment(&settings, &clone);
+
+        assert!(config.skip_clone);
+        // Depth follows the configured limit, matching the Docker mapping;
+        // `skip_clone` is what disables cloning.
+        assert_eq!(config.clone_depth, Some(100));
+    }
+
+    #[cfg(feature = "kubernetes")]
+    #[test]
+    fn kubernetes_config_resolves_env_secrets() {
+        use std::collections::HashMap;
+
+        use fabro_types::settings::InterpString;
+
+        let mut settings = run_environment(EnvironmentProvider::Kubernetes);
+        settings.env.insert(
+            "TEAM_TOKEN".to_string(),
+            InterpString::parse("{{ secrets.TEAM_TOKEN }}"),
+        );
+
+        let mut lookups = HashMap::from([("TEAM_TOKEN", "resolved-value")]);
+        let config = kubernetes_config_from_environment_with_secrets(
+            &settings,
+            &RunCloneSettings::default(),
+            |name| lookups.remove(name).map(str::to_string),
+        )
+        .expect("secret resolution should succeed");
+
+        assert_eq!(config.env_vars, vec![
+            "TEAM_TOKEN=resolved-value".to_string()
+        ]);
     }
 }

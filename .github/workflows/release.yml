@@ -110,7 +110,7 @@ jobs:
 
       - name: Build (musl via cargo-zigbuild)
         if: matrix.musl
-        run: cargo zigbuild --locked --target ${{ matrix.target }} --release -p fabro-cli
+        run: cargo zigbuild --locked --target ${{ matrix.target }} --release -p fabro-cli -p fabro-sandbox-agent
 
       - name: Build
         if: ${{ !matrix.musl }}
@@ -128,12 +128,17 @@ jobs:
         with:
           subject-path: fabro-${{ matrix.target }}.tar.gz
 
+      - name: Package sandbox agent (musl targets feed the agent image)
+        if: matrix.musl
+        run: cp target/${{ matrix.target }}/release/fabro-sandbox-agent fabro-sandbox-agent-${{ matrix.target }}
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: artifacts-fabro-${{ matrix.target }}
           path: |
             fabro-${{ matrix.target }}.tar.gz
             fabro-${{ matrix.target }}.tar.gz.sha256
+            fabro-sandbox-agent-${{ matrix.target }}
 
   release:
     name: Release
@@ -193,6 +198,7 @@ jobs:
             mkdir -p "tmp/docker-context/$arch"
             tar -xzf "target/distrib/fabro-${target}.tar.gz" -C target/distrib
             cp "target/distrib/fabro-${target}/fabro" "tmp/docker-context/$arch/fabro"
+            cp "target/distrib/fabro-sandbox-agent-${target}" "tmp/docker-context/$arch/fabro-sandbox-agent"
           done
 
       - uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
@@ -253,6 +259,32 @@ jobs:
         with:
           subject-name: ghcr.io/fabro-sh/fabro
           subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - id: meta-sandbox-agent
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        with:
+          images: ghcr.io/fabro-sh/fabro-sandbox-agent
+          tags: |
+            type=match,pattern=v(.*),group=1
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+            type=raw,value=nightly,enable=${{ contains(github.ref_name, '-nightly.') }}
+
+      - id: build-sandbox-agent
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          file: lib/apps/fabro-sandbox-agent/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-sandbox-agent.outputs.tags }}
+          labels: ${{ steps.meta-sandbox-agent.outputs.labels }}
+
+      - name: Attest sandbox-agent image provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ghcr.io/fabro-sh/fabro-sandbox-agent
+          subject-digest: ${{ steps.build-sandbox-agent.outputs.digest }}
           push-to-registry: true
 
   update-homebrew:

@@ -11,6 +11,7 @@ use fabro_github::token_source::InstallationTokenSource;
 use fabro_graphviz::graph;
 use fabro_hooks::{HookContext, HookDecision, HookEvent, HookExecutionContext, HookRunner};
 use fabro_model::Catalog;
+use fabro_sandbox::reconnect::ReconnectCredentials;
 use fabro_sandbox::{
     GitSetupIntent, SandboxEventCallback, SandboxSpec, reconnect_for_run_with_callback, shell_quote,
 };
@@ -29,6 +30,7 @@ use crate::handler::llm::{AgentAcpBackend, AgentApiBackend, BackendRouter, routi
 use crate::handler::{HandlerRegistry, default_registry};
 #[cfg(test)]
 use crate::model_fallback::ModelFallbackPolicy;
+use crate::operations::resolve_kubernetes_agent_key;
 use crate::run_metadata::{RunMetadataRuntime, build_metadata_writer, metadata_branch_name};
 use crate::run_options::{GitCheckpointOptions, RunOptions};
 use crate::sandbox_git_runtime::SandboxGitRuntime;
@@ -431,15 +433,18 @@ pub async fn initialize(
     };
     let attach_existing = attach_instance.is_some();
     let sandbox: Arc<dyn Sandbox> = if let Some(instance) = attach_instance {
-        let daytona_api_key = options
-            .vault
-            .read()
-            .await
-            .get(EnvVars::DAYTONA_API_KEY)
-            .map(str::to_string);
+        let credentials = ReconnectCredentials {
+            daytona_api_key:      options
+                .vault
+                .read()
+                .await
+                .get(EnvVars::DAYTONA_API_KEY)
+                .map(str::to_string),
+            kubernetes_agent_key: resolve_kubernetes_agent_key().ok(),
+        };
         let sandbox = reconnect_for_run_with_callback(
             &instance,
-            daytona_api_key,
+            credentials,
             Some(options.run_options.run_id),
             Some(Arc::clone(&sandbox_event_callback)),
         )

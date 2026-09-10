@@ -1,0 +1,27 @@
+---
+title: "Kubernetes sandbox provider"
+date: "2026-09-10"
+---
+
+Fabro can now run sandboxes on Kubernetes. A new `kubernetes` provider joins `local`, `docker`, and `daytona`, scheduling one pod per run sandbox on a cluster you operate — useful for server deployments where work should run against a shared cluster instead of the host Docker daemon.
+
+Enable it in `settings.toml` and point an environment at it:
+
+```toml
+[server.sandbox.providers.kubernetes]
+enabled = true
+```
+
+```toml title="workflow.toml"
+[environments.k8s]
+provider = "kubernetes"
+
+[environments.k8s.image]
+docker = "registry.internal/team/sandbox:2026.1"
+```
+
+Each sandbox pod runs your prebuilt image with a Fabro sandbox agent injected by an init container; the provider talks to the agent over a kube port-forward, so the server needs only pod lifecycle and port-forward RBAC — no pod-exec, no privileged access. The cluster resolves from the ambient environment (in-cluster service account or the server's default kubeconfig) with no new settings schema. Resource requests and limits map from `resources.cpu`, `resources.memory`, and `resources.disk`; user labels become validated pod labels.
+
+Kubernetes environments are image-reference-only — `image.dockerfile` and network restrictions beyond the cluster's policy are rejected at validation. Clone behavior matches Docker and Daytona: GitHub origins clone into `/workspace`, and stopping a sandbox deletes its pod, so runs that must survive use the git-checkpoint based resume.
+
+The agent image publishes alongside the CLI as `ghcr.io/fabro-sh/fabro-sandbox-agent` on every release. Build it locally with `cargo dev agent-image`, and override the reference with `FABRO_KUBERNETES_AGENT_IMAGE` for air-gapped registries.

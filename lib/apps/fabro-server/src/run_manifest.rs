@@ -20,7 +20,7 @@ use fabro_model::{Catalog, ProviderId};
 use fabro_sandbox::daytona::DaytonaConfig;
 use fabro_sandbox::from_environment::{
     daytona_config_from_environment, docker_config_from_environment,
-    local_working_directory_from_environment,
+    kubernetes_config_from_environment, local_working_directory_from_environment,
 };
 use fabro_sandbox::redact::redact_auth_url;
 use fabro_sandbox::{DockerSandboxOptions, Sandbox, SandboxSpec};
@@ -484,6 +484,9 @@ async fn build_preflight_report(
     };
 
     let daytona_api_key = state.vault_secret(EnvVars::DAYTONA_API_KEY).await?;
+    // The Kubernetes agent token derives from the session secret; preflight
+    // only needs the key material to build a throwaway spec, never the token.
+    let kubernetes_agent_key = state.kubernetes_agent_key();
     let sandbox_ok = run_sandbox_check(
         &mut checks,
         sandbox_provider,
@@ -491,6 +494,7 @@ async fn build_preflight_report(
         &resolved_run,
         github_app.clone(),
         daytona_api_key,
+        kubernetes_agent_key,
     )
     .await;
     let repository_access_ok = run_repository_access_check(
@@ -689,7 +693,9 @@ struct GitRemoteRefCheck {
 
 fn clone_disabled_for_provider(provider: SandboxProviderKind, resolved_run: &RunNamespace) -> bool {
     match provider {
-        SandboxProviderKind::Docker | SandboxProviderKind::Daytona => !resolved_run.clone.enabled,
+        SandboxProviderKind::Docker
+        | SandboxProviderKind::Daytona
+        | SandboxProviderKind::Kubernetes => !resolved_run.clone.enabled,
         SandboxProviderKind::Local => false,
     }
 }
@@ -749,6 +755,14 @@ fn environment_capability_warnings(resolved_run: &RunNamespace) -> Vec<String> {
         EnvironmentProvider::Daytona => {
             if environment.cwd.is_some() {
                 warnings.push("daytona provider ignores cwd".to_string());
+            }
+        }
+        EnvironmentProvider::Kubernetes => {
+            if environment.cwd.is_some() {
+                warnings.push("kubernetes provider ignores cwd".to_string());
+            }
+            if environment.lifecycle.auto_stop.is_some() {
+                warnings.push("kubernetes provider ignores lifecycle.auto_stop".to_string());
             }
         }
     }
@@ -915,6 +929,7 @@ fn preflight_sandbox_spec(
     resolved_run: &RunNamespace,
     github_app: Option<fabro_github::GitHubCredentials>,
     daytona_api_key: Option<String>,
+    kubernetes_agent_key: Option<String>,
 ) -> std::result::Result<SandboxSpec, fabro_sandbox::Error> {
     let clone_origin_url = prepared
         .git
@@ -957,7 +972,27 @@ fn preflight_sandbox_spec(
                 api_key: daytona_api_key,
             }
         }
+        SandboxProviderKind::Kubernetes => {
+            let mut config = resolve_kubernetes_config(resolved_run);
+            config.skip_clone = true;
+            SandboxSpec::Kubernetes {
+                config: Box::new(config),
+                github_app,
+                run_id: None,
+                clone_origin_url,
+                clone_branch,
+                clone_tag: None,
+                clone_commit_sha: None,
+                agent_token_key: kubernetes_agent_key,
+            }
+        }
     })
+}
+
+fn resolve_kubernetes_config(
+    resolved_run: &RunNamespace,
+) -> fabro_sandbox::KubernetesSandboxOptions {
+    kubernetes_config_from_environment(&resolved_run.environment, &resolved_run.clone)
 }
 
 async fn run_sandbox_check(
@@ -967,6 +1002,7 @@ async fn run_sandbox_check(
     resolved_run: &RunNamespace,
     github_app: Option<fabro_github::GitHubCredentials>,
     daytona_api_key: Option<String>,
+    kubernetes_agent_key: Option<String>,
 ) -> bool {
     let spec = match preflight_sandbox_spec(
         sandbox_provider,
@@ -974,6 +1010,7 @@ async fn run_sandbox_check(
         resolved_run,
         github_app.clone(),
         daytona_api_key,
+        kubernetes_agent_key,
     ) {
         Ok(spec) => spec,
         Err(err) => {
@@ -988,8 +1025,8 @@ async fn run_sandbox_check(
         }
     };
     let sandbox_result: Result<Arc<dyn Sandbox>, String> = spec.build(None).await.map_err(|err| {
-        if matches!(sandbox_provider, SandboxProviderKind::Daytona) {
-            format!("Daytona sandbox creation failed: {err}")
+        if sandbox_provider.is_clone_based() && sandbox_provider != SandboxProviderKind::Docker {
+            format!("{sandbox_provider} sandbox creation failed: {err}")
         } else {
             err.to_string()
         }
@@ -2231,6 +2268,7 @@ provider = "local"
             SandboxProviderKind::Docker,
             &prepared,
             &resolved,
+            None,
             None,
             None,
         );

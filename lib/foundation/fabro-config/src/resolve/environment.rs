@@ -238,5 +238,82 @@ fn validate_provider_capabilities(
                 });
             }
         }
+        EnvironmentProvider::Kubernetes => {
+            if environment.image.dockerfile.is_some() {
+                errors.push(ResolveError::Invalid {
+                    path:   format!("{path}.image.dockerfile"),
+                    reason: "kubernetes environments cannot build images; set image.docker to a \
+                             prebuilt image reference and publish it to a registry the cluster \
+                             can pull from"
+                        .to_string(),
+                });
+            }
+            if matches!(
+                environment.network.mode,
+                EnvironmentNetworkMode::Block | EnvironmentNetworkMode::CidrAllowList
+            ) {
+                errors.push(ResolveError::Invalid {
+                    path:   format!("{path}.network.mode"),
+                    reason: "kubernetes environments cannot enforce blocked or CIDR allow-list \
+                         networking"
+                        .to_string(),
+                });
+            }
+            for (key, value) in &environment.labels {
+                if let Some(reason) = kubernetes_label_problem(key, true) {
+                    errors.push(ResolveError::Invalid {
+                        path: format!("{path}.labels.{key}"),
+                        reason,
+                    });
+                }
+                if let Some(reason) = kubernetes_label_problem(value, false) {
+                    errors.push(ResolveError::Invalid {
+                        path:   format!("{path}.labels.{key}"),
+                        reason: format!("invalid label value: {reason}"),
+                    });
+                }
+            }
+        }
     }
+}
+
+/// Validate a Kubernetes label key or value against the restricted subset
+/// Fabro maps onto pod labels. Keys may carry a `/`-separated prefix, which
+/// must be a DNS subdomain; the name half and any value must be 63 characters
+/// or fewer.
+fn kubernetes_label_problem(value: &str, is_key: bool) -> Option<String> {
+    let (prefix, segment) = if is_key {
+        value
+            .split_once('/')
+            .map_or((None, value), |(p, n)| (Some(p), n))
+    } else {
+        (None, value)
+    };
+    if segment.is_empty() {
+        return Some("must not be empty".to_string());
+    }
+    if segment.len() > 63 {
+        return Some("must be at most 63 characters".to_string());
+    }
+    let valid_char = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.');
+    if !segment.bytes().all(valid_char) {
+        return Some("must contain only ASCII letters, digits, '-', '_', and '.'".to_string());
+    }
+    if !segment.starts_with(|byte: char| byte.is_ascii_alphanumeric())
+        || !segment.ends_with(|byte: char| byte.is_ascii_alphanumeric())
+    {
+        return Some("must start and end with an ASCII letter or digit".to_string());
+    }
+    if let Some(prefix) = prefix {
+        let valid_prefix = |byte: u8| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.')
+        };
+        if prefix.is_empty() || prefix.len() > 253 || !prefix.bytes().all(valid_prefix) {
+            return Some(
+                "label key prefix must be a lowercase DNS subdomain of at most 253 characters"
+                    .to_string(),
+            );
+        }
+    }
+    None
 }

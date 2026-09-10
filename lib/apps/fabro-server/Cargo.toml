@@ -34,7 +34,7 @@ fabro-slack = { path = "../../components/fabro-slack" }
 fabro-workflow = { path = "../../components/fabro-workflow" }
 fabro-workflow-version = { path = "../../components/fabro-workflow-version" }
 fabro-validate = { path = "../../components/fabro-validate" }
-fabro-sandbox = { path = "../../components/fabro-sandbox", features = ["daytona", "docker"] }
+fabro-sandbox = { path = "../../components/fabro-sandbox", features = ["daytona", "docker", "kubernetes"] }
 fabro-github = { path = "../../components/fabro-github" }
 fabro-agent = { path = "../../components/fabro-agent" }
 fabro-llm = { path = "../../components/fabro-llm" }
@@ -55,6 +55,9 @@ fabro-variable = { path = "../../components/fabro-variable" }
 fabro-http.workspace = true
 fabro-redact.workspace = true
 fabro-static.workspace = true
+# Direct dependency: the server resolves the ambient kube client once during
+# startup to gate Kubernetes provider registration.
+kube.workspace = true
 chrono.workspace = true
 croner.workspace = true
 futures-util.workspace = true
