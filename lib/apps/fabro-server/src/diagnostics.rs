@@ -781,13 +781,27 @@ async fn check_web_search(state: &AppState) -> CheckResult {
         return check_venice_search(api_key).await;
     }
 
+    let searxng_url =
+        match diagnostic_secret(state, WEB_SEARCH_CHECK_NAME, EnvVars::SEARXNG_URL).await {
+            Ok(value) => value,
+            Err(result) => return result,
+        };
+    if let Some(base_url) = searxng_url.filter(|url| !url.is_empty()) {
+        let api_key =
+            match diagnostic_secret(state, WEB_SEARCH_CHECK_NAME, EnvVars::SEARXNG_API_KEY).await {
+                Ok(value) => value,
+                Err(result) => return result,
+            };
+        return check_searxng_search(base_url, api_key).await;
+    }
+
     CheckResult {
         name:        WEB_SEARCH_CHECK_NAME.to_string(),
         status:      CheckStatus::Warning,
         summary:     "optional, not configured".to_string(),
         details:     Vec::new(),
         remediation: Some(
-            "Run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY` to enable web search".to_string(),
+            "Run `fabro secret set BRAVE_SEARCH_API_KEY`, `fabro secret set VENICE_API_KEY`, or `fabro secret set SEARXNG_URL <url>` to enable web search".to_string(),
         ),
     }
 }
@@ -833,6 +847,41 @@ async fn check_venice_search(api_key: String) -> CheckResult {
     .await;
 
     match_web_search_probe(probe, "venice", "VENICE_API_KEY")
+}
+
+async fn check_searxng_search(base_url: String, api_key: Option<String>) -> CheckResult {
+    let http = match http_client_or_check(WEB_SEARCH_CHECK_NAME, CheckStatus::Warning) {
+        Ok(http) => http,
+        Err(result) => return result,
+    };
+
+    let probe = timeout(EXTERNAL_SERVICE_PROBE_TIMEOUT, async move {
+        let mut request = http
+            .get(format!("{}/search", base_url.trim_end_matches('/')))
+            .query(&[("q", "test"), ("format", "json")]);
+        if let Some(api_key) = api_key {
+            request = request.bearer_auth(api_key);
+        }
+        request.send().await.map_err(anyhow::Error::new)
+    })
+    .await;
+
+    match probe {
+        // A 403 almost always means the instance disables JSON output, so
+        // point the operator at `search.formats` instead of generic
+        // connectivity advice.
+        Ok(Ok(response)) if response.status().as_u16() == 403 => CheckResult {
+            name:        WEB_SEARCH_CHECK_NAME.to_string(),
+            status:      CheckStatus::Warning,
+            summary:     format!("searxng: HTTP {}", response.status()),
+            details:     Vec::new(),
+            remediation: Some(
+                "Enable JSON output on the SearXNG instance: add \"json\" to search.formats in its settings.yml"
+                    .to_string(),
+            ),
+        },
+        other => match_web_search_probe(other, "searxng", "SEARXNG_URL"),
+    }
 }
 
 fn match_web_search_probe(
@@ -1263,7 +1312,7 @@ enabled = false
         assert_eq!(
             result.remediation.as_deref(),
             Some(
-                "Run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY` to enable web search"
+                "Run `fabro secret set BRAVE_SEARCH_API_KEY`, `fabro secret set VENICE_API_KEY`, or `fabro secret set SEARXNG_URL <url>` to enable web search"
             )
         );
     }
@@ -1284,7 +1333,26 @@ enabled = false
         assert_eq!(
             result.remediation.as_deref(),
             Some(
-                "Run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY` to enable web search"
+                "Run `fabro secret set BRAVE_SEARCH_API_KEY`, `fabro secret set VENICE_API_KEY`, or `fabro secret set SEARXNG_URL <url>` to enable web search"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn check_web_search_ignores_env_backed_searxng_url() {
+        let state = TestAppStateBuilder::new()
+            .env_lookup(|name| (name == EnvVars::SEARXNG_URL).then(|| "http://localhost:9".into()))
+            .build();
+
+        let result = check_web_search(&state).await;
+
+        assert_eq!(result.name, "Web Search");
+        assert_eq!(result.status, CheckStatus::Warning);
+        assert_eq!(result.summary, "optional, not configured");
+        assert_eq!(
+            result.remediation.as_deref(),
+            Some(
+                "Run `fabro secret set BRAVE_SEARCH_API_KEY`, `fabro secret set VENICE_API_KEY`, or `fabro secret set SEARXNG_URL <url>` to enable web search"
             )
         );
     }
@@ -1316,6 +1384,35 @@ enabled = false
         assert_eq!(result.name, "Web Search");
         assert_eq!(result.status, CheckStatus::Warning);
         assert_eq!(result.summary, "venice: connectivity error");
+    }
+
+    #[tokio::test]
+    async fn check_web_search_prefers_brave_when_searxng_url_is_also_present() {
+        let state = TestAppStateBuilder::new()
+            .vault_entries([
+                (EnvVars::BRAVE_SEARCH_API_KEY, "invalid\n"),
+                (EnvVars::SEARXNG_URL, "http://localhost:9"),
+            ])
+            .build();
+
+        let result = check_web_search(&state).await;
+
+        assert_eq!(result.name, "Web Search");
+        assert_eq!(result.status, CheckStatus::Warning);
+        assert_eq!(result.summary, "brave: connectivity error");
+    }
+
+    #[tokio::test]
+    async fn check_web_search_uses_searxng_when_paid_keys_are_absent() {
+        let state = TestAppStateBuilder::new()
+            .vault_entries([(EnvVars::SEARXNG_URL, "http://localhost:9")])
+            .build();
+
+        let result = check_web_search(&state).await;
+
+        assert_eq!(result.name, "Web Search");
+        assert_eq!(result.status, CheckStatus::Warning);
+        assert_eq!(result.summary, "searxng: connectivity error");
     }
 
     #[tokio::test]

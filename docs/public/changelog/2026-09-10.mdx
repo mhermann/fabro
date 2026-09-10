@@ -1,0 +1,16 @@
+---
+title: "SearXNG web search backend"
+date: "2026-09-10"
+---
+
+Fabro's `web_search` tool now supports a self-hosted [SearXNG](/integrations/searxng) instance as a third backend, alongside Brave and Venice. SearXNG is a metasearch aggregator you run yourself, so agent-driven search stops costing per-query fees.
+
+Point Fabro at your instance and the tool registers whenever no paid key exists:
+
+```bash
+fabro secret set SEARXNG_URL http://localhost:8888
+```
+
+Backend selection stays credential-based and paid-first: Brave wins when `BRAVE_SEARCH_API_KEY` is set, Venice when `VENICE_API_KEY` is set, and SearXNG only when neither key exists. Existing installs see no behavior change.
+
+The instance must have JSON output enabled — stock SearXNG ships with `format=json` disabled, so add `"json"` to `search.formats` in its `settings.yml`. `fabro doctor` probes the instance and suggests that exact fix when it answers with a 403.

@@ -316,6 +316,8 @@ async fn tool_secrets_from_configured_sources(vault: &Arc<AsyncRwLock<Vault>>) -
     ToolSecrets {
         brave_search_api_key: vault.get(EnvVars::BRAVE_SEARCH_API_KEY).map(str::to_string),
         venice_api_key:       vault.get(EnvVars::VENICE_API_KEY).map(str::to_string),
+        searxng_url:          vault.get(EnvVars::SEARXNG_URL).map(str::to_string),
+        searxng_api_key:      vault.get(EnvVars::SEARXNG_API_KEY).map(str::to_string),
     }
 }
 

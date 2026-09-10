@@ -104,6 +104,8 @@ impl ToolHookCallback for ToolApprovalAdapter {
 pub struct ToolSecrets {
     pub brave_search_api_key: Option<String>,
     pub venice_api_key:       Option<String>,
+    pub searxng_url:          Option<String>,
+    pub searxng_api_key:      Option<String>,
 }
 
 impl std::fmt::Debug for ToolSecrets {
@@ -114,6 +116,8 @@ impl std::fmt::Debug for ToolSecrets {
                 &self.brave_search_api_key.is_some(),
             )
             .field("venice_search_configured", &self.venice_api_key.is_some())
+            .field("searxng_configured", &self.searxng_url.is_some())
+            .field("searxng_key_configured", &self.searxng_api_key.is_some())
             .finish()
     }
 }
@@ -353,14 +357,20 @@ mod tests {
         let secrets = ToolSecrets {
             brave_search_api_key: Some("brave-secret-value".to_string()),
             venice_api_key:       Some("venice-secret-value".to_string()),
+            searxng_url:          Some("http://localhost:8888".to_string()),
+            searxng_api_key:      Some("searxng-secret-value".to_string()),
         };
 
         let debug = format!("{secrets:?}");
 
         assert!(debug.contains("brave_search_configured: true"));
         assert!(debug.contains("venice_search_configured: true"));
+        assert!(debug.contains("searxng_configured: true"));
+        assert!(debug.contains("searxng_key_configured: true"));
         assert!(!debug.contains("brave-secret-value"));
         assert!(!debug.contains("venice-secret-value"));
+        assert!(!debug.contains("searxng-secret-value"));
+        assert!(!debug.contains("localhost:8888"));
     }
 
     #[test]

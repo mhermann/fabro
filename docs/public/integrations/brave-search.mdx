@@ -5,7 +5,7 @@ description: "Give Fabro agents web search capabilities via the Brave Search API
 
 Fabro's [`web_search`](/agents/tools#web_search) tool lets agents search the web during workflow execution. It uses the [Brave Search API](https://brave.com/search/api/) to return titles, URLs, and descriptions for any query.
 
-Fabro selects the backend from the credentials in its vault. Direct Brave Search is preferred whenever `BRAVE_SEARCH_API_KEY` is present. When that key is absent, Fabro can use [Venice Search](/integrations/venice-search) with `VENICE_API_KEY` instead.
+Fabro selects the backend from the credentials in its vault. Direct Brave Search is preferred whenever `BRAVE_SEARCH_API_KEY` is present. When that key is absent, Fabro can use [Venice Search](/integrations/venice-search) with `VENICE_API_KEY`, or a self-hosted [SearXNG](/integrations/searxng) instance with `SEARXNG_URL`, instead.
 
 ## Setup
 

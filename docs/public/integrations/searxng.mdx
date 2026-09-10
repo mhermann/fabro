@@ -1,0 +1,92 @@
+---
+title: "SearXNG"
+description: "Give Fabro agents web search through a self-hosted SearXNG instance"
+---
+
+Fabro's [`web_search`](/agents/tools#web_search) tool can query a [SearXNG](https://docs.searxng.org/) instance that you run yourself. SearXNG is a metasearch engine that aggregates results from upstream engines like Google, Bing, and DuckDuckGo. Fabro falls back to it automatically when no `BRAVE_SEARCH_API_KEY` or `VENICE_API_KEY` is configured, so agent-driven search costs nothing per query.
+
+<Note>
+SearXNG forwards every query to its upstream engines — this is a cost win, not an offline index. The instance needs outbound network access, and query volume is subject to upstream rate limits.
+</Note>
+
+## Setup
+
+1. Run a SearXNG instance with JSON output enabled. JSON is **disabled by default**, so it is not enough to start the stock image:
+
+```bash
+docker run --rm -d -p 8888:8080 searxng/searxng
+```
+
+Then enable the `json` format in the instance's `settings.yml`:
+
+```yaml
+search:
+  formats:
+    - html
+    - json
+```
+
+2. Point Fabro at the instance:
+
+```bash
+fabro secret set SEARXNG_URL http://localhost:8888
+```
+
+If your instance sits behind authentication, also store an API key (SearXNG is configured with auth in front of it, for example via a reverse proxy):
+
+```bash
+fabro secret set SEARXNG_API_KEY <key>
+```
+
+3. Verify the setup:
+
+```bash
+fabro doctor
+```
+
+The doctor output should show **Web Search** as `searxng: configured and reachable`. If a Brave or Venice key is also configured, Fabro checks that backend instead — paid backends always win. If no search credential exists, web search is reported as a warning. Workflows still run, but the `web_search` tool is omitted from the agent's tool set.
+
+The Fabro server reads `SEARXNG_URL` and `SEARXNG_API_KEY` from the vault only. It does not read them from process env or `server.env`.
+
+## How it works
+
+Agents call the `web_search` tool with a query string. Fabro sends `GET {SEARXNG_URL}/search?q=<query>&format=json` (with a 30-second timeout and an optional bearer token) and returns numbered results with title, URL, description, and date when SearXNG includes one:
+
+```
+1. Rust Lang
+   https://rust-lang.org
+   A systems language
+   2026-01-02
+```
+
+SearXNG has no result-count parameter, so `max_results` truncates the returned list client-side.
+
+SearXNG is used only when neither `BRAVE_SEARCH_API_KEY` nor `VENICE_API_KEY` is configured. After selecting SearXNG, a failed call returns an error; Fabro does not retry through a paid backend.
+
+See the [`web_search` tool reference](/agents/tools#web_search) for parameters and details.
+
+## Permissions
+
+`web_search` is classified as a `shell` category tool, requiring the `full` [permission level](/agents/permissions) for auto-approval. At lower permission levels:
+
+- **Interactive mode** — the user is prompted to approve each call
+- **Non-interactive mode** (`--auto-approve`) — calls are denied
+
+## Troubleshooting
+
+**"SearXNG instance returned status 403 Forbidden (JSON output may be disabled ...)"** — The instance has JSON output disabled. Add `"json"` to `search.formats` in the instance's `settings.yml` and restart it. Public SearXNG instances usually block JSON output entirely; use an instance you control.
+
+**`fabro doctor` shows `searxng: connectivity error`** — Fabro cannot reach the instance. Check that `SEARXNG_URL` points at the right host and port, and that the instance is running. Remember the Fabro server resolves the URL from its own network position — inside Docker, `localhost` refers to the server container, not the host.
+
+**Requests time out after 30 seconds** — The upstream engines the instance queries are slow or unreachable. Check the instance's outbound network access.
+
+## Further reading
+
+<Columns cols={2}>
+  <Card title="Tools" icon="wrench" href="/agents/tools#web_search">
+    Full `web_search` tool reference — parameters, output format, and error handling.
+  </Card>
+  <Card title="Brave Search" icon="globe" href="/integrations/brave-search">
+    Paid Brave Search backend, preferred whenever its key is configured.
+  </Card>
+</Columns>

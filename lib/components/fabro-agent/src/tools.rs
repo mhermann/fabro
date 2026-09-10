@@ -84,7 +84,8 @@ pub(crate) fn register_discovery_and_web_tools(
     registry.register(make_web_fetch_tool(summarizer));
 }
 
-/// Register `web_search` when a search provider credential is configured.
+/// Register `web_search` when a search provider is configured: a Brave or
+/// Venice Search API key, or a SearXNG instance URL.
 ///
 /// Separate from [`register_discovery_and_web_tools`] for profiles that offer
 /// search without fabro's discovery tools.

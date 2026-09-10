@@ -23,13 +23,15 @@ Fabro prefers direct Brave Search whenever `BRAVE_SEARCH_API_KEY` is also presen
 fabro secret rm BRAVE_SEARCH_API_KEY
 ```
 
+Fabro only falls back to Venice when no self-hosted SearXNG instance is configured either. To select Venice while keeping SearXNG available, remove `SEARXNG_URL` or unset `VENICE_API_KEY` instead.
+
 2. Verify the key is working:
 
 ```bash
 fabro doctor
 ```
 
-The doctor output should show **Web Search** as `venice: configured and reachable`. If neither Venice nor Brave is configured, web search is reported as a warning. Workflows still run, but the `web_search` tool is omitted from the agent's tool set.
+The doctor output should show **Web Search** as `venice: configured and reachable`. If Venice, Brave, and SearXNG are all unconfigured, web search is reported as a warning. Workflows still run, but the `web_search` tool is omitted from the agent's tool set.
 
 The Fabro server reads this key from the vault only. It does not read `VENICE_API_KEY` from process env or `server.env`.
 
