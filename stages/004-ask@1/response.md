@@ -1,0 +1,9 @@
+Both answers are in. Restating for the planning stage:
+
+**Q1 — Deliverable shape: "Fourth sandbox provider."**
+A new `SandboxProviderKind::Kubernetes` whose backing infrastructure is a Kubernetes cluster: one Pod per run, exec'd into by the server via kubeconfig or in-cluster ServiceAccount, built on the existing Docker/Daytona provider pattern. This means: no Helm chart / fabro-on-k8s deployment packaging, and the change lands in the sandbox provider stack (`fabro-sandbox`, `fabro-types`, `fabro-config`, `fabro-server`, `fabro-workflow`, OpenAPI/TS enums, settings-sandboxes web page, docs).
+
+**Q2 — v1 surface: "Core only."**
+v1 = create Pod, clone, exec + streaming exec, file operations, git push, stop/delete, inventory listing, diagnostics, docs. Concretely excluded: embedded terminal (no `TerminalSession` impl — `open_terminal_for_run` returns "not supported" for Kubernetes), no install-wizard entry (`InstallSandboxInput` stays `docker | daytona`), no preview URLs/VNC, and `image.dockerfile` rejected for kubernetes environments with a provider-capability validation error.
+
+Combined with the sweep's decisions, the build is now fully determined: pod-per-run primitive, kube-rs client, exec-based cloning inheriting the shared git machinery, NetworkPolicy enforcement for `block`/`cidr_allow_list`, `resources.disk` → ephemeral-storage limits, `stop()` deletes the pod, server-level single namespace with kube-standard connection inference, `kubernetes` cargo feature enabled on fabro-server + fabro-cli, registration gated on resolvable cluster config, and httpmock + live-gated kind tests. Nothing remaining that would send me back for a second round.
