@@ -1,0 +1,10 @@
+Both files are written.
+
+**`/tmp/pr-title.txt`** — `Add Kubernetes sandbox provider for pod-per-run execution` (57 chars, imperative, no period).
+
+**`/tmp/pr-body.md`** — covers:
+- **What & why**: a fourth, clone-based sandbox provider running one pod per run on an operator's cluster via the Kubernetes exec API, with kube-standard connection inference and no new settings beyond `providers.kubernetes.enabled`.
+- **Design detail a reviewer needs**: RFC 1123 pod naming (lowercased ULIDs), managed-vs-user label precedence, the `__FABRO_RC__` exec sentinel (per-exec nonce, hold-back reader), `setsid` wrapper/kill path, sentinel-free stdio sessions, tar-over-exec transfers, per-pod owner-referenced NetworkPolicies for the three network modes, and shared clone/push machinery.
+- **Surfaces**: types/config, the new gated `kubernetes` feature (kube 4.2/k8s-openapi 0.28, rustls+ring), provider inventory with managed-label refusal, workflow/server wiring, OpenAPI + regenerated TS client, web picker/form/settings, and docs.
+- **Verification**: the offline unit/httpmock/config/server/web test suites, plus the four `#[ignore]`-gated live tests and the intended kind-based smoke path.
+- **Reviewer attention**: I confirmed the four post-implement stages (fork/synth/deep_review) changed no code, so the internal reviews' findings are still open — the body says so explicitly and lists them (blocking `AttachedProcess` drop in `spawn_stdio_process`, the stdio drain-deadlock shape, the `wait()` wakeup race, the self-matching `pgrep` live-test probe, the wide DNS/53 egress exception, the ~520 duplicated lines vs `docker.rs`, plus minor dead code and test gaps), along with the in-cluster ServiceAccount deployment note. Since no findings have been fixed yet, the body doesn't claim any fixes; if a later stage addresses them, this stage re-runs and the description should be rewritten then.
