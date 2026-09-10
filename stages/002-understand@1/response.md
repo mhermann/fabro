@@ -1,0 +1,64 @@
+Exploration complete. I read the sandbox crate end-to-end, the provider trait/registry, both existing remote providers (Docker, Daytona), the config/settings layer, the server wiring, the OpenAPI surface, and the web UI. No files were modified. Here is the report.
+
+## 1. Repository structure, language, tooling, and where the change lands
+
+**Stack:** Rust workspace under `lib/` (`apps/`, `components/`, `foundation/` crates) + TypeScript under `apps/fabro-web` (React 19 SPA, Bun) and `lib/packages/fabro-api-client` (generated). Tooling: cargo + nextest + insta snapshots, pinned nightly fmt/clippy, Bun tests, OpenAPI-first API generation (progenitor → Rust, openapi-generator → TS). No `AGENTS.md` files exist; root `CLAUDE.md` carries the conventions.
+
+**The change lands primarily in `lib/components/fabro-sandbox`**, with required touchpoints across:
+
+| Layer | File(s) | What's there today |
+|---|---|---|
+| Provider kind enum | `lib/foundation/fabro-types/src/sandbox_provider.rs` | `SandboxProviderKind {Local, Docker, Daytona}` (strum, serde, wire type) |
+| Environment settings enum | `fabro-types/src/settings/run.rs` | Parallel `EnvironmentProvider` + `From<EnvironmentProvider> for SandboxProviderKind`, `is_clone_based()` |
+| Sandbox trait | `fabro-sandbox/src/sandbox.rs` (~3.2k lines) | `Sandbox` trait: exec (plain + streaming), file ops, walk/glob/grep, `spawn_stdio_process`, lifecycle (`initialize/start/stop/delete/cleanup`), git setup, push-credential refresh, terminal/ssh, preview URLs; shared remote-Bash probe helpers |
+| Per-run construction | `fabro-sandbox/src/sandbox_spec.rs` | `SandboxSpec` enum (Local/Docker/Daytona, feature-gated) → `Arc<dyn Sandbox>`; persists `RunSandboxInstance` metadata |
+| Inventory provider | `fabro-sandbox/src/provider.rs` + `provider/docker.rs`, `provider/daytona.rs` | `SandboxProvider` trait (list/get/create/delete), `SandboxProviderRegistry`, `SandboxCreateSpec` |
+| Provider impls | `docker.rs` (~3.1k lines), `daytona/mod.rs` (~5.1k lines) | Reference implementations: clone-based workspace (`/workspace` + `/repos`), bash probe, git retry/push credentials, managed labels |
+| Config mapping | `fabro-sandbox/src/from_environment.rs` | `RunEnvironmentSettings` → `DockerSandboxOptions` / `DaytonaConfig` |
+| Reconnect/terminal | `reconnect.rs`, `terminal.rs` | Provider-dispatched reconnect from persisted records; PTY sessions per provider |
+| Features | `fabro-sandbox/Cargo.toml` | `docker`, `daytona` are opt-in cargo features; `local` default |
+| Server wiring | `fabro-server/src/server.rs` (`build_sandbox_provider_registry`), `run_manifest.rs` (preflight), `fabro-workflow/src/operations/start.rs` (run start builds `SandboxSpec`) | Registry built from `[server.sandbox.providers.*].enabled` + Daytona key from vault |
+| Settings schema | `fabro-types/src/settings/server.rs` | `ServerSandboxProvidersSettings {local, docker, daytona}` — new variant requires a new field |
+| Config validation | `fabro-config/src/resolve/environment.rs` | `validate_provider_capabilities` per provider (network-mode support, image/dockerfile rules) |
+| API contract | `docs/public/api-reference/fabro-api.yaml` | `SandboxProviderKind` enum `[local, docker, daytona]`, `EnvironmentProvider` enum, `ServerSandboxProvidersSettings` `required: [local, docker, daytona]`; `fabro-api/build.rs` reuses the fabro-types enum via `with_replacement` |
+| Web UI | `apps/fabro-web/app/lib/environment-providers.ts` (`CREATABLE_PROVIDERS`), `environment-form.tsx`, `settings-sandboxes.tsx` | Provider surfaced in environment creation + sandbox settings |
+| Install wizard | `fabro-install/src/lib.rs` | `InstallSandboxSelection` (Docker/Daytona) |
+| Docs | `docs/public/execution/environments.mdx`, `docs/public/administration/sandboxing.mdx` | "Fabro supports three sandbox providers" |
+| Env vars/secrets | `fabro-static/src/env_vars.rs`, `secret_registry.rs` | Daytona keys pattern for any kubeconfig/token config |
+
+There is **no existing Kubernetes sandbox code** — only unrelated references (`KUBERNETES_SERVICE_HOST` used to detect the server itself running in a container, plus deployment docs).
+
+## 2. Goal restated concretely
+
+Add `kubernetes` as a fourth first-class sandbox provider: a new feature-gated `KubernetesSandbox` implementing the `Sandbox` trait (create a per-run pod-like execution environment with `/workspace`-style layout, GitHub clone support, exec/file/stdio/terminal operations, reconnect) plus a `KubernetesSandboxProvider` implementing `SandboxProvider` (inventory list/get/create/delete via managed labels), threaded through the `SandboxProviderKind`/`EnvironmentProvider` enums, `SandboxSpec`/`SandboxCreateSpec`, config mapping from `[environments.<slug>]` settings (image, resources, network, lifecycle, env), server registry/policy wiring, the OpenAPI spec + regenerated clients, the web UI provider lists, install flows, and docs — following the established clone-based provider contract that Docker and Daytona already implement.
+
+## 3. What I know for certain
+
+- **Two provider surfaces must be implemented:** the `Sandbox` trait (per-run execution) and the `SandboxProvider` trait (inventory). Both Docker and Daytona implement both; Local only implements the inventory side trivially.
+- **Adding a `SandboxProviderKind` variant is a cross-cutting, exhaustive-match change** across at least: fabro-types (enum, tests, serde), `settings/server.rs` `for_provider`, `sandbox_spec.rs`, `provider.rs`, `reconnect.rs`, `terminal.rs`, `details.rs`, `git_retry.rs`, workflow `operations/start.rs`, server `run_manifest.rs`, `handler/sandbox.rs` (ssh-access/VNC/preview dispatch), `handler/runs.rs`, CLI `run_progress`, fabro-install — plus the OpenAPI enum, both generated clients, and the web UI's `CREATABLE_PROVIDERS`.
+- **Providers are cargo feature-gated** (`docker`, `daytona`); a `kubernetes` feature would follow, with `#[cfg]` gates threaded through `lib.rs`, `sandbox_spec.rs`, `provider.rs`, `reconnect.rs`, `terminal.rs`, `from_environment.rs`.
+- **The remote-sandbox contract is exec-over-Bash:** providers must guarantee non-login `/bin/bash`, pass the `BASH_PROBE_SCRIPT` marker check, strip `BASH_ENV`, and support the shared walk/glob/grep command helpers already in `sandbox.rs`. Git clone is executed inside the sandbox with GitHub App installation-token credentials and the shared `git_retry` machinery.
+- **Docker and Daytona are "clone-based"** (`is_clone_based()`): GitHub-origin runs are cloned into `/workspace` + `/repos/<owner>/<repo>` with a `primary_repo_link`; `run.clone` depth/tag/SHA semantics and the "no layer proves ancestry" rule are provider obligations. `SandboxProviderKind::is_clone_based()` and `EnvironmentProvider::is_clone_based()` currently hard-code `Docker | Daytona` and must be extended (this drives dry-run coercion, GitHub credential needs, and UI clone-based checks).
+- **Config plumbing shape is fixed:** `RunEnvironmentSettings {provider, cwd, image{docker,dockerfile}, resources{cpu,memory,disk}, network{mode,allow}, lifecycle{preserve,stop_on_terminal,auto_stop}, labels, env}` → a new `kubernetes_config_from_environment` mapping in `from_environment.rs`, consumed by both workflow run-start and server preflight.
+- **Server enablement/policy:** `[server.sandbox.providers.<kind>]` gates launches; `build_sandbox_provider_registry` in `server.rs` decides registration (Daytona also requires an API key from the vault — a K8s provider needs an analogous credential/cluster-config story or none if using ambient kubeconfig/in-cluster config).
+- **Wire contract is OpenAPI-first:** the spec enum must gain `kubernetes`, `fabro-api` regenerates (the Rust enum is reused via `with_replacement`, and parity tests exist in `fabro-api/tests/`), the TS client regenerates, and the `required: [local, docker, daytona]` server-sandbox-providers schema needs updating.
+- **Inventory safety model:** managed-label filtering (`managed_labels.rs`) protects list/delete so a provider only touches Fabro-created resources; delete refuses unmanaged resources (Docker precedent).
+- **Reconnect is mandatory:** runs persist `RunSandboxInstance` records and servers reconnect after restarts (`reconnect.rs`), so the K8s provider must support reattaching to an existing workload by persisted runtime id.
+- **Strategy docs govern the implementation:** testing-strategy, events-strategy (if adding `SandboxEvent` variants), error-handling-strategy (new `Error` variants), logging-strategy, server-secrets-strategy (any kubeconfig/token secret handling) must be read before writing code; strum derives for any new string-mapped enums; `shell_quote()` for all shell interpolation; no glob imports; test helpers behind `test-support`.
+
+## 4. What is genuinely ambiguous
+
+Two reasonable engineers would diverge on:
+
+1. **The Kubernetes runtime primitive.** One long-lived Pod per run sandbox (created on `initialize`, `exec`'d into for every command — closest analog to the Docker provider) vs. a Job-per-command model vs. a StatefulSet. The `Sandbox` contract (persistent working directory, `spawn_stdio_process` long-running processes, PTY terminal sessions, reconnect) pushes hard toward "one Pod running `sleep infinity`," but that's a design choice with cost/cleanup implications (reaping orphaned pods, `auto_stop` idle reclamation, `preserve`/`stop_on_terminal` semantics — K8s has no native idle detection).
+2. **Exec/streaming transport.** Direct API-server exec/attach WebSocket (implies the Fabro server holds pod-exec RBAC — a significant security posture decision) vs. an agent/sidecar container inside the sandbox pod exposing an SSH or HTTP API (closer to the Daytona model). Affects stdin streaming, PTY terminals, timeouts, and what credentials the server needs.
+3. **Image/dockerfile handling.** `image.docker` maps naturally to a container image ref. But `image.dockerfile` (inline or path) requires *building* an image — Docker builds via its local daemon, Daytona builds snapshots server-side. K8s has no build primitive: does the provider reject dockerfile sources, require a configured registry to push builds to (new operator config), or build via a Kaniko-style job? This is the biggest scope fork.
+4. **Network policy enforcement.** `network.mode = block` / `cidr_allow_list` could be implemented with per-sandbox Kubernetes `NetworkPolicy` objects (only works if the CNI enforces egress — not guaranteed) or rejected at config validation like Docker rejects CIDR allow-lists. Different product outcomes from the same instruction.
+5. **Resource mapping.** `cpu/memory` → requests and/or limits (Guaranteed vs Burstable QoS)? `disk` → ephemeral-storage limit, emptyDir sizeLimit, or a PVC per sandbox?
+6. **Cluster targeting and credentials.** Ambient in-cluster ServiceAccount/kubeconfig vs. explicit operator config (`kubeconfig` path, context, namespace) vs. multiple named clusters per environment. Namespace selection, RBAC requirements, and whether credentials live in the vault (Daytona pattern) are all open.
+7. **Clone mechanism.** Exec-based clone inside the running pod (reuses all existing git-retry/credential machinery, Docker-style) vs. init-container clone. Exec-based is the path of least resistance and matches the shared helper design, but init containers are the idiomatic K8s answer.
+8. **Scope of first-class support.** Full parity (inventory registry, reconnect, PTY terminal, preview URLs/port-forwarding for MCP services, VNC, ssh access command, install wizard entry, web UI) vs. a minimal viable slice (create/exec/files/delete + config + policy) with terminal/preview/VNC explicitly unsupported. Docker/Daytona took months of accumulated surface (3–5k lines each); the instruction doesn't say how much parity is required.
+9. **Naming and wire string.** `kubernetes` vs `k8s` for the enum/string (affects the wire contract permanently).
+10. **Feature defaults and distribution.** Is the `kubernetes` cargo feature compiled into the shipped server binary by default (like docker/daytona presumably are — worth verifying how fabro-server enables those features), and does the provider register only when explicitly configured, or whenever a kubeconfig/in-cluster environment is detected?
+11. **Testing strategy for a cluster-dependent provider.** The repo's e2e machinery (`#[e2e_test]`, twin mode) covers LLM APIs, not clusters. Unit-level mocking of the k8s client vs. a `kind`/`k3d` cluster in CI vs. live-only e2e tests behind an env var — genuinely open, and it shapes how testable the implementation code is structured (trait seams for the k8s client vs. concrete `kube-rs` calls).
+12. **Which client crate.** `kube-rs` (`kube` + `k8s-openapi`) is the obvious Rust choice, but no k8s dependency exists in the workspace today; pinning versions and the API-version matrix is a new maintenance surface the instruction doesn't specify.

@@ -1162,14 +1162,142 @@
     }
   },
   "web_url": "http://127.0.0.1:32276/runs/01M25MEFENW9C2NFF7G196FE8M",
-  "start": null,
-  "status": {
-    "kind": "starting"
+  "start": {
+    "start_time": "2026-09-10T12:25:03.687758Z",
+    "run_branch": "fabro/run/01M25MEFENW9C2NFF7G196FE8M",
+    "base_sha": "b5700e9ca65867909a93ef4fbdded1b2fd39eadb"
   },
-  "status_updated_at": "2026-09-10T12:24:57.081827Z",
-  "last_event_at": "2026-09-10T12:25:03.670329Z",
+  "status": {
+    "kind": "running"
+  },
+  "status_updated_at": "2026-09-10T12:25:03.687802Z",
+  "last_event_at": "2026-09-10T12:30:14.805742Z",
   "pending_control": null,
-  "checkpoints": [],
+  "checkpoints": [
+    {
+      "seq": 23,
+      "checkpoint": {
+        "timestamp": "2026-09-10T12:25:06.468548Z",
+        "current_node": "start",
+        "completed_nodes": [
+          "start"
+        ],
+        "node_retries": {},
+        "context_values": {
+          "failure_signature": "",
+          "internal.thread_id": null,
+          "graph.stall_timeout": "7200000ms",
+          "internal.retry_count.start": 0,
+          "internal.fidelity": "compact",
+          "graph.rankdir": "LR",
+          "failure_class": "",
+          "graph.goal": "Create a provider for running sandboxes in Kubernetes",
+          "graph.model_stylesheet": "\n            *      { model: glm-5.3; reasoning_effort: high; }\n            .deep  { model: glm-5.3; reasoning_effort: max; }\n            .fast  { model: glm-5.3-flash; }\n        ",
+          "internal.run_id": "01M25MEFENW9C2NFF7G196FE8M",
+          "outcome": "succeeded",
+          "graph.max_node_visits": "32",
+          "current_node": "start",
+          "internal.work_dir": "/workspace/fabro",
+          "graph.on_failure": "exit",
+          "internal.node_visit_count": 1
+        },
+        "node_outcomes": {
+          "start": {
+            "status": "succeeded",
+            "usage": null
+          }
+        },
+        "next_node_id": "understand",
+        "node_visits": {
+          "start": 1
+        }
+      },
+      "diff": {}
+    },
+    {
+      "seq": 0,
+      "checkpoint": {
+        "timestamp": "2026-09-10T12:30:14.821296Z",
+        "current_node": "understand",
+        "completed_nodes": [
+          "start",
+          "understand"
+        ],
+        "node_retries": {},
+        "context_values": {
+          "outcome": "succeeded",
+          "internal.fidelity": "full",
+          "internal.run_id": "01M25MEFENW9C2NFF7G196FE8M",
+          "last_stage": "understand",
+          "internal.retry_count.understand": 0,
+          "thread.build.current_node": "understand",
+          "internal.thread_id": "build",
+          "graph.model_stylesheet": "\n            *      { model: glm-5.3; reasoning_effort: high; }\n            .deep  { model: glm-5.3; reasoning_effort: max; }\n            .fast  { model: glm-5.3-flash; }\n        ",
+          "graph.stall_timeout": "7200000ms",
+          "graph.on_failure": "exit",
+          "internal.node_visit_count": 1,
+          "graph.rankdir": "LR",
+          "graph.max_node_visits": "32",
+          "failure_signature": "",
+          "internal.retry_count.start": 0,
+          "response.understand": "Exploration complete. I read the sandbox crate end-to-end, the provider trait/registry, both existing remote providers (Docker, Daytona), the config/settings layer, the server wiring, the OpenAPI surface, and the web UI. No files were modified. Here is the report.\n\n## 1. Repository structure, language, tooling, and where the change lands\n\n**Stack:** Rust workspace under `lib/` (`apps/`, `components/`, `foundation/` crates) + TypeScript under `apps/fabro-web` (React 19 SPA, Bun) and `lib/packages/fabro-api-client` (generated). Tooling: cargo + nextest + insta snapshots, pinned nightly fmt/clippy, Bun tests, OpenAPI-first API generation (progenitor → Rust, openapi-generator → TS). No `AGENTS.md` files exist; root `CLAUDE.md` carries the conventions.\n\n**The change lands primarily in `lib/components/fabro-sandbox`**, with required touchpoints across:\n\n| Layer | File(s) | What's there today |\n|---|---|---|\n| Provider kind enum | `lib/foundation/fabro-types/src/sandbox_provider.rs` | `SandboxProviderKind {Local, Docker, Daytona}` (strum, serde, wire type) |\n| Environment settings enum | `fabro-types/src/settings/run.rs` | Parallel `EnvironmentProvider` + `From<EnvironmentProvider> for SandboxProviderKind`, `is_clone_based()` |\n| Sandbox trait | `fabro-sandbox/src/sandbox.rs` (~3.2k lines) | `Sandbox` trait: exec (plain + streaming), file ops, walk/glob/grep, `spawn_stdio_process`, lifecycle (`initialize/start/stop/delete/cleanup`), git setup, push-credential refresh, terminal/ssh, preview URLs; shared remote-Bash probe helpers |\n| Per-run construction | `fabro-sandbox/src/sandbox_spec.rs` | `SandboxSpec` enum (Local/Docker/Daytona, feature-gated) → `Arc<dyn Sandbox>`; persists `RunSandboxInstance` metadata |\n| Inventory provider | `fabro-sandbox/src/provider.rs` + `provider/docker.rs`, `provider/daytona.rs` | `SandboxProvider` trait (list/get/create/delete), `SandboxProviderRegistry`, `SandboxCreateSpec` |\n| Provider impls | `docker.rs` (~3.1k lines), `daytona/mod.rs` (~5.1k lines) | Reference implementations: clone-based workspace (`/workspace` + `/repos`), bash probe, git retry/push credentials, managed labels |\n| Config mapping | `fabro-sandbox/src/from_environment.rs` | `RunEnvironmentSettings` → `DockerSandboxOptions` / `DaytonaConfig` |\n| Reconnect/terminal | `reconnect.rs`, `terminal.rs` | Provider-dispatched reconnect from persisted records; PTY sessions per provider |\n| Features | `fabro-sandbox/Cargo.toml` | `docker`, `daytona` are opt-in cargo features; `local` default |\n| Server wiring | `fabro-server/src/server.rs` (`build_sandbox_provider_registry`), `run_manifest.rs` (preflight), `fabro-workflow/src/operations/start.rs` (run start builds `SandboxSpec`) | Registry built from `[server.sandbox.providers.*].enabled` + Daytona key from vault |\n| Settings schema | `fabro-types/src/settings/server.rs` | `ServerSandboxProvidersSettings {local, docker, daytona}` — new variant requires a new field |\n| Config validation | `fabro-config/src/resolve/environment.rs` | `validate_provider_capabilities` per provider (network-mode support, image/dockerfile rules) |\n| API contract | `docs/public/api-reference/fabro-api.yaml` | `SandboxProviderKind` enum `[local, docker, daytona]`, `EnvironmentProvider` enum, `ServerSandboxProvidersSettings` `required: [local, docker, daytona]`; `fabro-api/build.rs` reuses the fabro-types enum via `with_replacement` |\n| Web UI | `apps/fabro-web/app/lib/environment-providers.ts` (`CREATABLE_PROVIDERS`), `environment-form.tsx`, `settings-sandboxes.tsx` | Provider surfaced in environment creation + sandbox settings |\n| Install wizard | `fabro-install/src/lib.rs` | `InstallSandboxSelection` (Docker/Daytona) |\n| Docs | `docs/public/execution/environments.mdx`, `docs/public/administration/sandboxing.mdx` | \"Fabro supports three sandbox providers\" |\n| Env vars/secrets | `fabro-static/src/env_vars.rs`, `secret_registry.rs` | Daytona keys pattern for any kubeconfig/token config |\n\nThere is **no existing Kubernetes sandbox code** — only unrelated references (`KUBERNETES_SERVICE_HOST` used to detect the server itself running in a container, plus deployment docs).\n\n## 2. Goal restated concretely\n\nAdd `kubernetes` as a fourth first-class sandbox provider: a new feature-gated `KubernetesSandbox` implementing the `Sandbox` trait (create a per-run pod-like execution environment with `/workspace`-style layout, GitHub clone support, exec/file/stdio/terminal operations, reconnect) plus a `KubernetesSandboxProvider` implementing `SandboxProvider` (inventory list/get/create/delete via managed labels), threaded through the `SandboxProviderKind`/`EnvironmentProvider` enums, `SandboxSpec`/`SandboxCreateSpec`, config mapping from `[environments.<slug>]` settings (image, resources, network, lifecycle, env), server registry/policy wiring, the OpenAPI spec + regenerated clients, the web UI provider lists, install flows, and docs — following the established clone-based provider contract that Docker and Daytona already implement.\n\n## 3. What I know for certain\n\n- **Two provider surfaces must be implemented:** the `Sandbox` trait (per-run execution) and the `SandboxProvider` trait (inventory). Both Docker and Daytona implement both; Local only implements the inventory side trivially.\n- **Adding a `SandboxProviderKind` variant is a cross-cutting, exhaustive-match change** across at least: fabro-types (enum, tests, serde), `settings/server.rs` `for_provider`, `sandbox_spec.rs`, `provider.rs`, `reconnect.rs`, `terminal.rs`, `details.rs`, `git_retry.rs`, workflow `operations/start.rs`, server `run_manifest.rs`, `handler/sandbox.rs` (ssh-access/VNC/preview dispatch), `handler/runs.rs`, CLI `run_progress`, fabro-install — plus the OpenAPI enum, both generated clients, and the web UI's `CREATABLE_PROVIDERS`.\n- **Providers are cargo feature-gated** (`docker`, `daytona`); a `kubernetes` feature would follow, with `#[cfg]` gates threaded through `lib.rs`, `sandbox_spec.rs`, `provider.rs`, `reconnect.rs`, `terminal.rs`, `from_environment.rs`.\n- **The remote-sandbox contract is exec-over-Bash:** providers must guarantee non-login `/bin/bash`, pass the `BASH_PROBE_SCRIPT` marker check, strip `BASH_ENV`, and support the shared walk/glob/grep command helpers already in `sandbox.rs`. Git clone is executed inside the sandbox with GitHub App installation-token credentials and the shared `git_retry` machinery.\n- **Docker and Daytona are \"clone-based\"** (`is_clone_based()`): GitHub-origin runs are cloned into `/workspace` + `/repos/<owner>/<repo>` with a `primary_repo_link`; `run.clone` depth/tag/SHA semantics and the \"no layer proves ancestry\" rule are provider obligations. `SandboxProviderKind::is_clone_based()` and `EnvironmentProvider::is_clone_based()` currently hard-code `Docker | Daytona` and must be extended (this drives dry-run coercion, GitHub credential needs, and UI clone-based checks).\n- **Config plumbing shape is fixed:** `RunEnvironmentSettings {provider, cwd, image{docker,dockerfile}, resources{cpu,memory,disk}, network{mode,allow}, lifecycle{preserve,stop_on_terminal,auto_stop}, labels, env}` → a new `kubernetes_config_from_environment` mapping in `from_environment.rs`, consumed by both workflow run-start and server preflight.\n- **Server enablement/policy:** `[server.sandbox.providers.<kind>]` gates launches; `build_sandbox_provider_registry` in `server.rs` decides registration (Daytona also requires an API key from the vault — a K8s provider needs an analogous credential/cluster-config story or none if using ambient kubeconfig/in-cluster config).\n- **Wire contract is OpenAPI-first:** the spec enum must gain `kubernetes`, `fabro-api` regenerates (the Rust enum is reused via `with_replacement`, and parity tests exist in `fabro-api/tests/`), the TS client regenerates, and the `required: [local, docker, daytona]` server-sandbox-providers schema needs updating.\n- **Inventory safety model:** managed-label filtering (`managed_labels.rs`) protects list/delete so a provider only touches Fabro-created resources; delete refuses unmanaged resources (Docker precedent).\n- **Reconnect is mandatory:** runs persist `RunSandboxInstance` records and servers reconnect after restarts (`reconnect.rs`), so the K8s provider must support reattaching to an existing workload by persisted runtime id.\n- **Strategy docs govern the implementation:** testing-strategy, events-strategy (if adding `SandboxEvent` variants), error-handling-strategy (new `Error` variants), logging-strategy, server-secrets-strategy (any kubeconfig/token secret handling) must be read before writing code; strum derives for any new string-mapped enums; `shell_quote()` for all shell interpolation; no glob imports; test helpers behind `test-support`.\n\n## 4. What is genuinely ambiguous\n\nTwo reasonable engineers would diverge on:\n\n1. **The Kubernetes runtime primitive.** One long-lived Pod per run sandbox (created on `initialize`, `exec`'d into for every command — closest analog to the Docker provider) vs. a Job-per-command model vs. a StatefulSet. The `Sandbox` contract (persistent working directory, `spawn_stdio_process` long-running processes, PTY terminal sessions, reconnect) pushes hard toward \"one Pod running `sleep infinity`,\" but that's a design choice with cost/cleanup implications (reaping orphaned pods, `auto_stop` idle reclamation, `preserve`/`stop_on_terminal` semantics — K8s has no native idle detection).\n2. **Exec/streaming transport.** Direct API-server exec/attach WebSocket (implies the Fabro server holds pod-exec RBAC — a significant security posture decision) vs. an agent/sidecar container inside the sandbox pod exposing an SSH or HTTP API (closer to the Daytona model). Affects stdin streaming, PTY terminals, timeouts, and what credentials the server needs.\n3. **Image/dockerfile handling.** `image.docker` maps naturally to a container image ref. But `image.dockerfile` (inline or path) requires *building* an image — Docker builds via its local daemon, Daytona builds snapshots server-side. K8s has no build primitive: does the provider reject dockerfile sources, require a configured registry to push builds to (new operator config), or build via a Kaniko-style job? This is the biggest scope fork.\n4. **Network policy enforcement.** `network.mode = block` / `cidr_allow_list` could be implemented with per-sandbox Kubernetes `NetworkPolicy` objects (only works if the CNI enforces egress — not guaranteed) or rejected at config validation like Docker rejects CIDR allow-lists. Different product outcomes from the same instruction.\n5. **Resource mapping.** `cpu/memory` → requests and/or limits (Guaranteed vs Burstable QoS)? `disk` → ephemeral-storage limit, emptyDir sizeLimit, or a PVC per sandbox?\n6. **Cluster targeting and credentials.** Ambient in-cluster ServiceAccount/kubeconfig vs. explicit operator config (`kubeconfig` path, context, namespace) vs. multiple named clusters per environment. Namespace selection, RBAC requirements, and whether credentials live in the vault (Daytona pattern) are all open.\n7. **Clone mechanism.** Exec-based clone inside the running pod (reuses all existing git-retry/credential machinery, Docker-style) vs. init-container clone. Exec-based is the path of least resistance and matches the shared helper design, but init containers are the idiomatic K8s answer.\n8. **Scope of first-class support.** Full parity (inventory registry, reconnect, PTY terminal, preview URLs/port-forwarding for MCP services, VNC, ssh access command, install wizard entry, web UI) vs. a minimal viable slice (create/exec/files/delete + config + policy) with terminal/preview/VNC explicitly unsupported. Docker/Daytona took months of accumulated surface (3–5k lines each); the instruction doesn't say how much parity is required.\n9. **Naming and wire string.** `kubernetes` vs `k8s` for the enum/string (affects the wire contract permanently).\n10. **Feature defaults and distribution.** Is the `kubernetes` cargo feature compiled into the shipped server binary by default (like docker/daytona presumably are — worth verifying how fabro-server enables those features), and does the provider register only when explicitly configured, or whenever a kubeconfig/in-cluster environment is detected?\n11. **Testing strategy for a cluster-dependent provider.** The repo's e2e machinery (`#[e2e_test]`, twin mode) covers LLM APIs, not clusters. Unit-level mocking of the k8s client vs. a `kind`/`k3d` cluster in CI vs. live-only e2e tests behind an env var — genuinely open, and it shapes how testable the implementation code is structured (trait seams for the k8s client vs. concrete `kube-rs` calls).\n12. **Which client crate.** `kube-rs` (`kube` + `k8s-openapi`) is the obvious Rust choice, but no k8s dependency exists in the workspace today; pinning versions and the API-version matrix is a new maintenance surface the instruction doesn't specify.",
+          "current_node": "understand",
+          "failure_class": "",
+          "last_response": "Exploration complete. I read the sandbox crate end-to-end, the provider trait/registry, both existing remote providers (Docker, Daytona), the config/settings layer, the server wiring, the OpenAPI surf",
+          "graph.goal": "Create a provider for running sandboxes in Kubernetes",
+          "internal.work_dir": "/workspace/fabro"
+        },
+        "node_outcomes": {
+          "start": {
+            "status": "succeeded",
+            "usage": null
+          },
+          "understand": {
+            "status": "succeeded",
+            "context_updates": {
+              "last_stage": "understand",
+              "response.understand": "Exploration complete. I read the sandbox crate end-to-end, the provider trait/registry, both existing remote providers (Docker, Daytona), the config/settings layer, the server wiring, the OpenAPI surface, and the web UI. No files were modified. Here is the report.\n\n## 1. Repository structure, language, tooling, and where the change lands\n\n**Stack:** Rust workspace under `lib/` (`apps/`, `components/`, `foundation/` crates) + TypeScript under `apps/fabro-web` (React 19 SPA, Bun) and `lib/packages/fabro-api-client` (generated). Tooling: cargo + nextest + insta snapshots, pinned nightly fmt/clippy, Bun tests, OpenAPI-first API generation (progenitor → Rust, openapi-generator → TS). No `AGENTS.md` files exist; root `CLAUDE.md` carries the conventions.\n\n**The change lands primarily in `lib/components/fabro-sandbox`**, with required touchpoints across:\n\n| Layer | File(s) | What's there today |\n|---|---|---|\n| Provider kind enum | `lib/foundation/fabro-types/src/sandbox_provider.rs` | `SandboxProviderKind {Local, Docker, Daytona}` (strum, serde, wire type) |\n| Environment settings enum | `fabro-types/src/settings/run.rs` | Parallel `EnvironmentProvider` + `From<EnvironmentProvider> for SandboxProviderKind`, `is_clone_based()` |\n| Sandbox trait | `fabro-sandbox/src/sandbox.rs` (~3.2k lines) | `Sandbox` trait: exec (plain + streaming), file ops, walk/glob/grep, `spawn_stdio_process`, lifecycle (`initialize/start/stop/delete/cleanup`), git setup, push-credential refresh, terminal/ssh, preview URLs; shared remote-Bash probe helpers |\n| Per-run construction | `fabro-sandbox/src/sandbox_spec.rs` | `SandboxSpec` enum (Local/Docker/Daytona, feature-gated) → `Arc<dyn Sandbox>`; persists `RunSandboxInstance` metadata |\n| Inventory provider | `fabro-sandbox/src/provider.rs` + `provider/docker.rs`, `provider/daytona.rs` | `SandboxProvider` trait (list/get/create/delete), `SandboxProviderRegistry`, `SandboxCreateSpec` |\n| Provider impls | `docker.rs` (~3.1k lines), `daytona/mod.rs` (~5.1k lines) | Reference implementations: clone-based workspace (`/workspace` + `/repos`), bash probe, git retry/push credentials, managed labels |\n| Config mapping | `fabro-sandbox/src/from_environment.rs` | `RunEnvironmentSettings` → `DockerSandboxOptions` / `DaytonaConfig` |\n| Reconnect/terminal | `reconnect.rs`, `terminal.rs` | Provider-dispatched reconnect from persisted records; PTY sessions per provider |\n| Features | `fabro-sandbox/Cargo.toml` | `docker`, `daytona` are opt-in cargo features; `local` default |\n| Server wiring | `fabro-server/src/server.rs` (`build_sandbox_provider_registry`), `run_manifest.rs` (preflight), `fabro-workflow/src/operations/start.rs` (run start builds `SandboxSpec`) | Registry built from `[server.sandbox.providers.*].enabled` + Daytona key from vault |\n| Settings schema | `fabro-types/src/settings/server.rs` | `ServerSandboxProvidersSettings {local, docker, daytona}` — new variant requires a new field |\n| Config validation | `fabro-config/src/resolve/environment.rs` | `validate_provider_capabilities` per provider (network-mode support, image/dockerfile rules) |\n| API contract | `docs/public/api-reference/fabro-api.yaml` | `SandboxProviderKind` enum `[local, docker, daytona]`, `EnvironmentProvider` enum, `ServerSandboxProvidersSettings` `required: [local, docker, daytona]`; `fabro-api/build.rs` reuses the fabro-types enum via `with_replacement` |\n| Web UI | `apps/fabro-web/app/lib/environment-providers.ts` (`CREATABLE_PROVIDERS`), `environment-form.tsx`, `settings-sandboxes.tsx` | Provider surfaced in environment creation + sandbox settings |\n| Install wizard | `fabro-install/src/lib.rs` | `InstallSandboxSelection` (Docker/Daytona) |\n| Docs | `docs/public/execution/environments.mdx`, `docs/public/administration/sandboxing.mdx` | \"Fabro supports three sandbox providers\" |\n| Env vars/secrets | `fabro-static/src/env_vars.rs`, `secret_registry.rs` | Daytona keys pattern for any kubeconfig/token config |\n\nThere is **no existing Kubernetes sandbox code** — only unrelated references (`KUBERNETES_SERVICE_HOST` used to detect the server itself running in a container, plus deployment docs).\n\n## 2. Goal restated concretely\n\nAdd `kubernetes` as a fourth first-class sandbox provider: a new feature-gated `KubernetesSandbox` implementing the `Sandbox` trait (create a per-run pod-like execution environment with `/workspace`-style layout, GitHub clone support, exec/file/stdio/terminal operations, reconnect) plus a `KubernetesSandboxProvider` implementing `SandboxProvider` (inventory list/get/create/delete via managed labels), threaded through the `SandboxProviderKind`/`EnvironmentProvider` enums, `SandboxSpec`/`SandboxCreateSpec`, config mapping from `[environments.<slug>]` settings (image, resources, network, lifecycle, env), server registry/policy wiring, the OpenAPI spec + regenerated clients, the web UI provider lists, install flows, and docs — following the established clone-based provider contract that Docker and Daytona already implement.\n\n## 3. What I know for certain\n\n- **Two provider surfaces must be implemented:** the `Sandbox` trait (per-run execution) and the `SandboxProvider` trait (inventory). Both Docker and Daytona implement both; Local only implements the inventory side trivially.\n- **Adding a `SandboxProviderKind` variant is a cross-cutting, exhaustive-match change** across at least: fabro-types (enum, tests, serde), `settings/server.rs` `for_provider`, `sandbox_spec.rs`, `provider.rs`, `reconnect.rs`, `terminal.rs`, `details.rs`, `git_retry.rs`, workflow `operations/start.rs`, server `run_manifest.rs`, `handler/sandbox.rs` (ssh-access/VNC/preview dispatch), `handler/runs.rs`, CLI `run_progress`, fabro-install — plus the OpenAPI enum, both generated clients, and the web UI's `CREATABLE_PROVIDERS`.\n- **Providers are cargo feature-gated** (`docker`, `daytona`); a `kubernetes` feature would follow, with `#[cfg]` gates threaded through `lib.rs`, `sandbox_spec.rs`, `provider.rs`, `reconnect.rs`, `terminal.rs`, `from_environment.rs`.\n- **The remote-sandbox contract is exec-over-Bash:** providers must guarantee non-login `/bin/bash`, pass the `BASH_PROBE_SCRIPT` marker check, strip `BASH_ENV`, and support the shared walk/glob/grep command helpers already in `sandbox.rs`. Git clone is executed inside the sandbox with GitHub App installation-token credentials and the shared `git_retry` machinery.\n- **Docker and Daytona are \"clone-based\"** (`is_clone_based()`): GitHub-origin runs are cloned into `/workspace` + `/repos/<owner>/<repo>` with a `primary_repo_link`; `run.clone` depth/tag/SHA semantics and the \"no layer proves ancestry\" rule are provider obligations. `SandboxProviderKind::is_clone_based()` and `EnvironmentProvider::is_clone_based()` currently hard-code `Docker | Daytona` and must be extended (this drives dry-run coercion, GitHub credential needs, and UI clone-based checks).\n- **Config plumbing shape is fixed:** `RunEnvironmentSettings {provider, cwd, image{docker,dockerfile}, resources{cpu,memory,disk}, network{mode,allow}, lifecycle{preserve,stop_on_terminal,auto_stop}, labels, env}` → a new `kubernetes_config_from_environment` mapping in `from_environment.rs`, consumed by both workflow run-start and server preflight.\n- **Server enablement/policy:** `[server.sandbox.providers.<kind>]` gates launches; `build_sandbox_provider_registry` in `server.rs` decides registration (Daytona also requires an API key from the vault — a K8s provider needs an analogous credential/cluster-config story or none if using ambient kubeconfig/in-cluster config).\n- **Wire contract is OpenAPI-first:** the spec enum must gain `kubernetes`, `fabro-api` regenerates (the Rust enum is reused via `with_replacement`, and parity tests exist in `fabro-api/tests/`), the TS client regenerates, and the `required: [local, docker, daytona]` server-sandbox-providers schema needs updating.\n- **Inventory safety model:** managed-label filtering (`managed_labels.rs`) protects list/delete so a provider only touches Fabro-created resources; delete refuses unmanaged resources (Docker precedent).\n- **Reconnect is mandatory:** runs persist `RunSandboxInstance` records and servers reconnect after restarts (`reconnect.rs`), so the K8s provider must support reattaching to an existing workload by persisted runtime id.\n- **Strategy docs govern the implementation:** testing-strategy, events-strategy (if adding `SandboxEvent` variants), error-handling-strategy (new `Error` variants), logging-strategy, server-secrets-strategy (any kubeconfig/token secret handling) must be read before writing code; strum derives for any new string-mapped enums; `shell_quote()` for all shell interpolation; no glob imports; test helpers behind `test-support`.\n\n## 4. What is genuinely ambiguous\n\nTwo reasonable engineers would diverge on:\n\n1. **The Kubernetes runtime primitive.** One long-lived Pod per run sandbox (created on `initialize`, `exec`'d into for every command — closest analog to the Docker provider) vs. a Job-per-command model vs. a StatefulSet. The `Sandbox` contract (persistent working directory, `spawn_stdio_process` long-running processes, PTY terminal sessions, reconnect) pushes hard toward \"one Pod running `sleep infinity`,\" but that's a design choice with cost/cleanup implications (reaping orphaned pods, `auto_stop` idle reclamation, `preserve`/`stop_on_terminal` semantics — K8s has no native idle detection).\n2. **Exec/streaming transport.** Direct API-server exec/attach WebSocket (implies the Fabro server holds pod-exec RBAC — a significant security posture decision) vs. an agent/sidecar container inside the sandbox pod exposing an SSH or HTTP API (closer to the Daytona model). Affects stdin streaming, PTY terminals, timeouts, and what credentials the server needs.\n3. **Image/dockerfile handling.** `image.docker` maps naturally to a container image ref. But `image.dockerfile` (inline or path) requires *building* an image — Docker builds via its local daemon, Daytona builds snapshots server-side. K8s has no build primitive: does the provider reject dockerfile sources, require a configured registry to push builds to (new operator config), or build via a Kaniko-style job? This is the biggest scope fork.\n4. **Network policy enforcement.** `network.mode = block` / `cidr_allow_list` could be implemented with per-sandbox Kubernetes `NetworkPolicy` objects (only works if the CNI enforces egress — not guaranteed) or rejected at config validation like Docker rejects CIDR allow-lists. Different product outcomes from the same instruction.\n5. **Resource mapping.** `cpu/memory` → requests and/or limits (Guaranteed vs Burstable QoS)? `disk` → ephemeral-storage limit, emptyDir sizeLimit, or a PVC per sandbox?\n6. **Cluster targeting and credentials.** Ambient in-cluster ServiceAccount/kubeconfig vs. explicit operator config (`kubeconfig` path, context, namespace) vs. multiple named clusters per environment. Namespace selection, RBAC requirements, and whether credentials live in the vault (Daytona pattern) are all open.\n7. **Clone mechanism.** Exec-based clone inside the running pod (reuses all existing git-retry/credential machinery, Docker-style) vs. init-container clone. Exec-based is the path of least resistance and matches the shared helper design, but init containers are the idiomatic K8s answer.\n8. **Scope of first-class support.** Full parity (inventory registry, reconnect, PTY terminal, preview URLs/port-forwarding for MCP services, VNC, ssh access command, install wizard entry, web UI) vs. a minimal viable slice (create/exec/files/delete + config + policy) with terminal/preview/VNC explicitly unsupported. Docker/Daytona took months of accumulated surface (3–5k lines each); the instruction doesn't say how much parity is required.\n9. **Naming and wire string.** `kubernetes` vs `k8s` for the enum/string (affects the wire contract permanently).\n10. **Feature defaults and distribution.** Is the `kubernetes` cargo feature compiled into the shipped server binary by default (like docker/daytona presumably are — worth verifying how fabro-server enables those features), and does the provider register only when explicitly configured, or whenever a kubeconfig/in-cluster environment is detected?\n11. **Testing strategy for a cluster-dependent provider.** The repo's e2e machinery (`#[e2e_test]`, twin mode) covers LLM APIs, not clusters. Unit-level mocking of the k8s client vs. a `kind`/`k3d` cluster in CI vs. live-only e2e tests behind an env var — genuinely open, and it shapes how testable the implementation code is structured (trait seams for the k8s client vs. concrete `kube-rs` calls).\n12. **Which client crate.** `kube-rs` (`kube` + `k8s-openapi`) is the obvious Rust choice, but no k8s dependency exists in the workspace today; pinning versions and the API-version matrix is a new maintenance surface the instruction doesn't specify.",
+              "last_response": "Exploration complete. I read the sandbox crate end-to-end, the provider trait/registry, both existing remote providers (Docker, Daytona), the config/settings layer, the server wiring, the OpenAPI surf"
+            },
+            "notes": "Stage completed: understand",
+            "usage": {
+              "input": {
+                "usage": {
+                  "model": {
+                    "provider": "zai",
+                    "model_id": "glm-5.3"
+                  },
+                  "tokens": {
+                    "input_tokens": 65933,
+                    "output_tokens": 5622,
+                    "reasoning_tokens": 4282,
+                    "cache_read_tokens": 1244352,
+                    "cache_write_tokens": 0
+                  }
+                },
+                "facts": {
+                  "algorithm": "openai"
+                }
+              },
+              "total_usd_micros": 459372
+            },
+            "timing": {
+              "wall_time_ms": 0,
+              "inference_time_ms": 304961,
+              "tool_time_ms": 3233,
+              "active_time_ms": 308194
+            }
+          }
+        },
+        "next_node_id": "sweep",
+        "node_visits": {
+          "start": 1,
+          "understand": 1
+        }
+      },
+      "diff": {}
+    }
+  ],
   "conclusion": null,
   "sandbox": {
     "kind": "ready",
@@ -1196,5 +1324,261 @@
   "pull_request": null,
   "superseded_by": null,
   "pending_interviews": {},
-  "stages": {}
+  "stages": {
+    "understand@1": {
+      "first_event_seq": 24,
+      "prompt": null,
+      "response": null,
+      "completion": null,
+      "provider_used": {
+        "mode": "agent",
+        "provider": "zai",
+        "model": "glm-5.3",
+        "reasoning_effort": "high"
+      },
+      "diff": null,
+      "script_invocation": null,
+      "script_timing": null,
+      "parallel_results": null,
+      "output": null,
+      "started_at": "2026-09-10T12:25:06.471415Z",
+      "handler": "agent",
+      "graph_visit": 1,
+      "live_inference_ms": 304956,
+      "live_tool_ms": 3212,
+      "usage": {
+        "input_tokens": 65933,
+        "output_tokens": 5622,
+        "total_tokens": 1320189,
+        "reasoning_tokens": 4282,
+        "cache_read_tokens": 1244352,
+        "cache_write_tokens": 0,
+        "total_usd_micros": 459372
+      },
+      "model": {
+        "provider": "zai",
+        "model_id": "glm-5.3"
+      },
+      "skills": {
+        "available": [
+          {
+            "name": "rust-style-guide",
+            "description": "Apply this Rust style guide when writing, reviewing, refactoring, or configuring Rust code for this project. Covers Rust 2024/MSRV, library vs application conventions, public API design, errors, panics, ownership and cloning, async/Tokio/concurrency, tracing, rustfmt/Clippy, testing with nextest, and unsafe/macro policy. Also use when setting up new Rust projects, investigating Rust performance, verifying library releases, or reviewing Rust code changes."
+          }
+        ],
+        "activated": []
+      },
+      "permission_level": "full",
+      "agent_tools": [
+        {
+          "name": "close_agent",
+          "description": "Close a running or completed subagent that is no longer needed.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "subagent",
+          "invoked": false
+        },
+        {
+          "name": "edit_file",
+          "description": "Edit a file by replacing an exact string. The old_string must be an exact match and unique unless replace_all is true; include surrounding context when needed. Read the file first and preserve existing indentation.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "write",
+          "invoked": false
+        },
+        {
+          "name": "glob",
+          "description": "Find files by search-root-relative path using a glob pattern. Use path to choose the search root. `*` stays within one path segment and `**` searches recursively. Prefer this over shell find or ls when locating repository files.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "read",
+          "invoked": true
+        },
+        {
+          "name": "grep",
+          "description": "Search file contents with a regex pattern. Use path to choose the search root, glob_filter to limit matching files, case_insensitive for case folding, and max_results to cap output.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "read",
+          "invoked": true
+        },
+        {
+          "name": "read_file",
+          "description": "Read files before editing them. Returns line-numbered text and supports offset/limit for large files. Use this instead of shell cat, head, tail, or sed when inspecting repository files.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "read",
+          "invoked": true
+        },
+        {
+          "name": "request_user_input",
+          "description": "Ask the human one or more questions and wait for their answers before continuing this stage.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "other",
+          "invoked": false
+        },
+        {
+          "name": "send_input",
+          "description": "Send a follow-up message to a subagent. A running agent receives it at a safe turn boundary. A completed agent starts another turn in the same session with its existing history.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "subagent",
+          "invoked": false
+        },
+        {
+          "name": "shell",
+          "description": "Execute Bash commands for terminal operations, package managers, tests and builds. Use dedicated tools for file reads, file edits, filename searches, and content searches. Provide timeout_ms for long-running commands.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "shell",
+          "invoked": true
+        },
+        {
+          "name": "spawn_agent",
+          "description": "Spawn a subagent for independent work or context isolation. Use it for tasks that can proceed separately, and avoid duplicating the same work in the parent session.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "subagent",
+          "invoked": false
+        },
+        {
+          "name": "update_plan",
+          "description": "Update the multi-step plan for the current task. Submit the entire plan; existing steps are reconciled by exact step text.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "other",
+          "invoked": false
+        },
+        {
+          "name": "use_skill",
+          "description": "Load a skill's instructions by name. Call this when the user's request matches an available skill.",
+          "source": {
+            "kind": "skill"
+          },
+          "category": "other",
+          "invoked": false
+        },
+        {
+          "name": "wait",
+          "description": "Wait for a subagent to complete, then use the result to synthesize the outcome for the user.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "subagent",
+          "invoked": false
+        },
+        {
+          "name": "web_fetch",
+          "description": "Fetch content from a URL that starts with http:// or https://. Pass a prompt to extract specific information or summarize the page; omit prompt to return the page content.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "other",
+          "invoked": false
+        },
+        {
+          "name": "write_file",
+          "description": "Create new files, or overwrite an existing file only when replacement is explicitly intended. Prefer edit_file for targeted changes to existing files because write_file overwrites the full file content.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "write",
+          "invoked": false
+        }
+      ],
+      "context_window": {
+        "provider": "zai",
+        "model": "glm-5.3",
+        "context_window_tokens": 1048576,
+        "input_tokens": 64812,
+        "usage_percent": 6.1809539794921875,
+        "count_method": "response_usage_scaled_breakdown",
+        "staleness": "live",
+        "generated_at": "2026-09-10T12:30:14.805065Z",
+        "event_seq": 249,
+        "breakdown": [
+          {
+            "category": "system_prompt",
+            "tokens": 1103,
+            "usage_percent": 0.10519027709960938
+          },
+          {
+            "category": "tools",
+            "tokens": 1510,
+            "usage_percent": 0.14400482177734375
+          },
+          {
+            "category": "skills",
+            "tokens": 216,
+            "usage_percent": 0.020599365234375
+          },
+          {
+            "category": "memory",
+            "tokens": 4266,
+            "usage_percent": 0.40683746337890625
+          },
+          {
+            "category": "conversation",
+            "tokens": 57709,
+            "usage_percent": 5.503559112548828
+          },
+          {
+            "category": "other",
+            "tokens": 8,
+            "usage_percent": 0.000762939453125
+          }
+        ],
+        "warnings": []
+      },
+      "agent_control": "running",
+      "state": "running"
+    },
+    "start@1": {
+      "first_event_seq": 20,
+      "prompt": null,
+      "response": null,
+      "completion": {
+        "outcome": "succeeded",
+        "notes": null,
+        "failure_reason": null,
+        "timestamp": "2026-09-10T12:25:06.468267Z"
+      },
+      "provider_used": null,
+      "diff": null,
+      "script_invocation": null,
+      "script_timing": null,
+      "parallel_results": null,
+      "output": null,
+      "started_at": "2026-09-10T12:25:06.464965Z",
+      "handler": "start",
+      "graph_visit": 1,
+      "timing": {
+        "wall_time_ms": 0,
+        "inference_time_ms": 0,
+        "tool_time_ms": 0,
+        "active_time_ms": 0
+      },
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "reasoning_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0
+      },
+      "agent_control": "running",
+      "state": "succeeded"
+    }
+  }
 }
