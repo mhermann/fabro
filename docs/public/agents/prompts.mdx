@@ -145,7 +145,7 @@ The system prompt varies by LLM provider. Each provider has its own identity tex
 <Accordion title="Example system prompt (Anthropic provider)">
 This is the full system prompt sent to Claude as the LLM system message. The `<environment>` block is filled in at runtime.
 
-Tool guidance tracks the tools actually registered for the session. The `web_search` section shown below is present when a [Brave Search API key](/integrations/brave-search) or [Venice API key](/integrations/venice-search) is configured. Without either key, both the tool and its guidance are omitted.
+Tool guidance tracks the tools actually registered for the session. The `web_search` section shown below is present when a [SearXNG URL](/integrations/searxng), [Brave Search API key](/integrations/brave-search), or [Venice API key](/integrations/venice-search) is configured. Without any of them, both the tool and its guidance are omitted.
 
 ```
 You are Claude, an AI coding assistant made by Anthropic. You help users with
