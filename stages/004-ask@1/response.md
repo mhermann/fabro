@@ -1,0 +1,7 @@
+Both answers are in. Restating for the record:
+
+**Q1 — v1 scope tier → (b) Local/CLI + server-side.** Forgejo support ships as: a `fabro-forgejo` crate (PAT auth, clone-credential resolution, PR create/find/merge/close), credential-injected run-branch/meta-branch push and auto-PR for CLI runs in a Forgejo clone, **plus** server-side run targeting (run targets can name Forgejo repos), server checkout, automations on Forgejo repos, Docker/Daytona sandbox clone support, web repo picker, integration status, and a `fabro doctor` check. This means the OpenAPI spec, generated Rust/TS clients, `run_intent`, `git_checkout`, and `clone_source` are all in scope. **Browser login via Forgejo OAuth2 is explicitly out of v1** — no `AuthMethod` change, no web login flow.
+
+**Q2 — Repo addressing → (a) One instance + provider tag.** A single configured instance under `[server.integrations.forgejo] url = "…"`, with an optional `provider: "github" | "forgejo"` discriminator on run targets that defaults to `github` (wire-additive, backward compatible). GitHub and Forgejo coexist on one server; one `FORGEJO_TOKEN` in the vault. No named-instances schema, no exclusive either/or switch.
+
+Combined, the build is: a parallel `fabro-forgejo` integration crate plus the additive provider-tag run-addressing change, covering CLI and server surfaces end to end — auth via scoped PAT, webhooks/tracker/OAuth-login excluded per the decisions already recorded in the previous stage.
