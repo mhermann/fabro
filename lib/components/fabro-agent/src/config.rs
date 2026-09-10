@@ -103,6 +103,7 @@ impl ToolHookCallback for ToolApprovalAdapter {
 
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ToolSecrets {
+    pub searxng_url:          Option<String>,
     pub brave_search_api_key: Option<String>,
     pub venice_api_key:       Option<String>,
 }
@@ -110,6 +111,7 @@ pub struct ToolSecrets {
 impl std::fmt::Debug for ToolSecrets {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolSecrets")
+            .field("searxng_configured", &self.searxng_url.is_some())
             .field(
                 "brave_search_configured",
                 &self.brave_search_api_key.is_some(),
@@ -359,14 +361,17 @@ mod tests {
     #[test]
     fn tool_secrets_debug_redacts_values() {
         let secrets = ToolSecrets {
+            searxng_url:          Some("http://searxng:8080".to_string()),
             brave_search_api_key: Some("brave-secret-value".to_string()),
             venice_api_key:       Some("venice-secret-value".to_string()),
         };
 
         let debug = format!("{secrets:?}");
 
+        assert!(debug.contains("searxng_configured: true"));
         assert!(debug.contains("brave_search_configured: true"));
         assert!(debug.contains("venice_search_configured: true"));
+        assert!(!debug.contains("http://searxng:8080"));
         assert!(!debug.contains("brave-secret-value"));
         assert!(!debug.contains("venice-secret-value"));
     }

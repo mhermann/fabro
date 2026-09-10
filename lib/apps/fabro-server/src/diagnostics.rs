@@ -760,6 +760,15 @@ fn check_storage_dir_path(path: &std::path::Path) -> CheckResult {
 }
 
 async fn check_web_search(state: &AppState) -> CheckResult {
+    let searxng_url =
+        match diagnostic_secret(state, WEB_SEARCH_CHECK_NAME, EnvVars::SEARXNG_URL).await {
+            Ok(value) => value,
+            Err(result) => return result,
+        };
+    if let Some(base_url) = searxng_url {
+        return check_searxng_search(base_url).await;
+    }
+
     let brave_api_key = match diagnostic_secret(
         state,
         WEB_SEARCH_CHECK_NAME,
@@ -789,12 +798,34 @@ async fn check_web_search(state: &AppState) -> CheckResult {
         summary:     "optional, not configured".to_string(),
         details:     Vec::new(),
         remediation: Some(
-            "Run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY` to enable web search".to_string(),
+            "Run `fabro secret set SEARXNG_URL <url>` (self-hosted SearXNG), or `fabro secret set BRAVE_SEARCH_API_KEY` / `fabro secret set VENICE_API_KEY` to enable web search".to_string(),
         ),
     }
 }
 
 const WEB_SEARCH_CHECK_NAME: &str = "Web Search";
+
+async fn check_searxng_search(base_url: String) -> CheckResult {
+    let http = match http_client_or_check(WEB_SEARCH_CHECK_NAME, CheckStatus::Warning) {
+        Ok(http) => http,
+        Err(result) => return result,
+    };
+
+    let probe = timeout(EXTERNAL_SERVICE_PROBE_TIMEOUT, async move {
+        http.get(format!("{}/search", base_url.trim_end_matches('/')))
+            .query(&[("q", "test"), ("format", "json")])
+            .send()
+            .await
+            .map_err(anyhow::Error::new)
+    })
+    .await;
+
+    match_web_search_probe_with_remediation(
+        probe,
+        "searxng",
+        "Check the SearXNG instance and SEARXNG_URL".to_string(),
+    )
+}
 
 async fn check_brave_search(api_key: String) -> CheckResult {
     let http = match http_client_or_check(WEB_SEARCH_CHECK_NAME, CheckStatus::Warning) {
@@ -842,6 +873,19 @@ fn match_web_search_probe(
     provider: &str,
     secret_name: &str,
 ) -> CheckResult {
+    match_web_search_probe_with_remediation(
+        probe,
+        provider,
+        format!("Check {secret_name} and network connectivity"),
+    )
+}
+
+fn match_web_search_probe_with_remediation(
+    probe: Result<anyhow::Result<Response>, Elapsed>,
+    provider: &str,
+    remediation: String,
+) -> CheckResult {
+    let remediation = Some(remediation);
     match probe {
         Ok(Ok(response)) if response.status().is_success() => CheckResult {
             name:        WEB_SEARCH_CHECK_NAME.to_string(),
@@ -851,27 +895,27 @@ fn match_web_search_probe(
             remediation: None,
         },
         Ok(Ok(response)) => CheckResult {
-            name:        WEB_SEARCH_CHECK_NAME.to_string(),
-            status:      CheckStatus::Warning,
-            summary:     format!("{provider}: HTTP {}", response.status()),
-            details:     Vec::new(),
-            remediation: Some(format!("Check {secret_name} and network connectivity")),
+            name: WEB_SEARCH_CHECK_NAME.to_string(),
+            status: CheckStatus::Warning,
+            summary: format!("{provider}: HTTP {}", response.status()),
+            details: Vec::new(),
+            remediation,
         },
         Ok(Err(err)) => CheckResult {
-            name:        WEB_SEARCH_CHECK_NAME.to_string(),
-            status:      CheckStatus::Warning,
-            summary:     format!("{provider}: connectivity error"),
-            details:     vec![CheckDetail::new(format!("{err:#}"))],
-            remediation: Some(format!("Check {secret_name} and network connectivity")),
+            name: WEB_SEARCH_CHECK_NAME.to_string(),
+            status: CheckStatus::Warning,
+            summary: format!("{provider}: connectivity error"),
+            details: vec![CheckDetail::new(format!("{err:#}"))],
+            remediation,
         },
         Err(_) => CheckResult {
-            name:        WEB_SEARCH_CHECK_NAME.to_string(),
-            status:      CheckStatus::Warning,
-            summary:     format!("{provider}: timeout"),
-            details:     vec![CheckDetail::new(format!(
+            name: WEB_SEARCH_CHECK_NAME.to_string(),
+            status: CheckStatus::Warning,
+            summary: format!("{provider}: timeout"),
+            details: vec![CheckDetail::new(format!(
                 "Web Search ({provider}) probe timed out"
             ))],
-            remediation: Some(format!("Check {secret_name} and network connectivity")),
+            remediation,
         },
     }
 }
@@ -963,7 +1007,7 @@ mod tests {
 
     use fabro_config::RunLayer;
     use fabro_vault::SecretType;
-    use httpmock::Method::POST;
+    use httpmock::Method::{GET, POST};
     use httpmock::MockServer;
     use serde_json::json;
 
@@ -1265,7 +1309,7 @@ enabled = false
         assert_eq!(
             result.remediation.as_deref(),
             Some(
-                "Run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY` to enable web search"
+                "Run `fabro secret set SEARXNG_URL <url>` (self-hosted SearXNG), or `fabro secret set BRAVE_SEARCH_API_KEY` / `fabro secret set VENICE_API_KEY` to enable web search"
             )
         );
     }
@@ -1286,7 +1330,7 @@ enabled = false
         assert_eq!(
             result.remediation.as_deref(),
             Some(
-                "Run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY` to enable web search"
+                "Run `fabro secret set SEARXNG_URL <url>` (self-hosted SearXNG), or `fabro secret set BRAVE_SEARCH_API_KEY` / `fabro secret set VENICE_API_KEY` to enable web search"
             )
         );
     }
@@ -1318,6 +1362,73 @@ enabled = false
         assert_eq!(result.name, "Web Search");
         assert_eq!(result.status, CheckStatus::Warning);
         assert_eq!(result.summary, "venice: connectivity error");
+    }
+
+    #[tokio::test]
+    async fn check_web_search_prefers_searxng_over_paid_keys() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/search")
+                .query_param("q", "test")
+                .query_param("format", "json");
+            then.status(200)
+                .json_body(serde_json::json!({"results": []}));
+        });
+        // A newline key would fail any brave probe locally, so a passing
+        // searxng result proves searxng is checked first.
+        let state = TestAppStateBuilder::new()
+            .vault_entries([
+                (EnvVars::SEARXNG_URL, format!("{}/", server.base_url())),
+                (EnvVars::BRAVE_SEARCH_API_KEY, "invalid\n".to_string()),
+            ])
+            .build();
+
+        let result = check_web_search(&state).await;
+
+        mock.assert();
+        assert_eq!(result.name, "Web Search");
+        assert_eq!(result.status, CheckStatus::Pass);
+        assert_eq!(result.summary, "searxng: configured and reachable");
+    }
+
+    #[tokio::test]
+    async fn check_web_search_reports_searxng_http_403_with_remediation() {
+        let server = MockServer::start();
+        let _mock = server.mock(|when, then| {
+            when.method(GET).path("/search");
+            then.status(403).body("forbidden");
+        });
+        let state = TestAppStateBuilder::new()
+            .vault_entries([(EnvVars::SEARXNG_URL, server.base_url())])
+            .build();
+
+        let result = check_web_search(&state).await;
+
+        assert_eq!(result.name, "Web Search");
+        assert_eq!(result.status, CheckStatus::Warning);
+        assert_eq!(result.summary, "searxng: HTTP 403 Forbidden");
+        assert_eq!(
+            result.remediation.as_deref(),
+            Some("Check the SearXNG instance and SEARXNG_URL")
+        );
+    }
+
+    #[tokio::test]
+    async fn check_web_search_reports_searxng_connectivity_error() {
+        let state = TestAppStateBuilder::new()
+            .vault_entries([(EnvVars::SEARXNG_URL, "invalid\n")])
+            .build();
+
+        let result = check_web_search(&state).await;
+
+        assert_eq!(result.name, "Web Search");
+        assert_eq!(result.status, CheckStatus::Warning);
+        assert_eq!(result.summary, "searxng: connectivity error");
+        assert_eq!(
+            result.remediation.as_deref(),
+            Some("Check the SearXNG instance and SEARXNG_URL")
+        );
     }
 
     #[tokio::test]

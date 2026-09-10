@@ -304,6 +304,7 @@ async fn build_registry(
 async fn tool_secrets_from_configured_sources(vault: &Arc<AsyncRwLock<Vault>>) -> ToolSecrets {
     let vault = vault.read().await;
     ToolSecrets {
+        searxng_url:          vault.get(EnvVars::SEARXNG_URL).map(str::to_string),
         brave_search_api_key: vault.get(EnvVars::BRAVE_SEARCH_API_KEY).map(str::to_string),
         venice_api_key:       vault.get(EnvVars::VENICE_API_KEY).map(str::to_string),
     }
