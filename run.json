@@ -1162,14 +1162,142 @@
     }
   },
   "web_url": "http://127.0.0.1:32276/runs/01M252QA19Z83CECNHGA992YY5",
-  "start": null,
-  "status": {
-    "kind": "starting"
+  "start": {
+    "start_time": "2026-09-10T07:15:17.850535Z",
+    "run_branch": "fabro/run/01M252QA19Z83CECNHGA992YY5",
+    "base_sha": "b5700e9ca65867909a93ef4fbdded1b2fd39eadb"
   },
-  "status_updated_at": "2026-09-10T07:15:12.075353Z",
-  "last_event_at": "2026-09-10T07:15:17.845476Z",
+  "status": {
+    "kind": "running"
+  },
+  "status_updated_at": "2026-09-10T07:15:17.850559Z",
+  "last_event_at": "2026-09-10T07:18:42.569004Z",
   "pending_control": null,
-  "checkpoints": [],
+  "checkpoints": [
+    {
+      "seq": 23,
+      "checkpoint": {
+        "timestamp": "2026-09-10T07:15:19.992040Z",
+        "current_node": "start",
+        "completed_nodes": [
+          "start"
+        ],
+        "node_retries": {},
+        "context_values": {
+          "graph.on_failure": "exit",
+          "internal.thread_id": null,
+          "graph.max_node_visits": "32",
+          "graph.stall_timeout": "7200000ms",
+          "internal.retry_count.start": 0,
+          "internal.run_id": "01M252QA19Z83CECNHGA992YY5",
+          "graph.goal": "Add support for forgejo similar to github integration",
+          "graph.rankdir": "LR",
+          "internal.node_visit_count": 1,
+          "current_node": "start",
+          "failure_class": "",
+          "internal.fidelity": "compact",
+          "internal.work_dir": "/workspace/fabro",
+          "graph.model_stylesheet": "\n            *      { model: glm-5.3; reasoning_effort: high; }\n            .deep  { model: glm-5.3; reasoning_effort: max; }\n            .fast  { model: glm-5.3-flash; }\n        ",
+          "failure_signature": "",
+          "outcome": "succeeded"
+        },
+        "node_outcomes": {
+          "start": {
+            "status": "succeeded",
+            "usage": null
+          }
+        },
+        "next_node_id": "understand",
+        "node_visits": {
+          "start": 1
+        }
+      },
+      "diff": {}
+    },
+    {
+      "seq": 0,
+      "checkpoint": {
+        "timestamp": "2026-09-10T07:18:42.582408Z",
+        "current_node": "understand",
+        "completed_nodes": [
+          "start",
+          "understand"
+        ],
+        "node_retries": {},
+        "context_values": {
+          "graph.model_stylesheet": "\n            *      { model: glm-5.3; reasoning_effort: high; }\n            .deep  { model: glm-5.3; reasoning_effort: max; }\n            .fast  { model: glm-5.3-flash; }\n        ",
+          "failure_class": "",
+          "internal.thread_id": "build",
+          "internal.retry_count.start": 0,
+          "last_stage": "understand",
+          "internal.work_dir": "/workspace/fabro",
+          "internal.retry_count.understand": 0,
+          "internal.node_visit_count": 1,
+          "graph.stall_timeout": "7200000ms",
+          "graph.on_failure": "exit",
+          "graph.rankdir": "LR",
+          "last_response": "I have enough understanding now. Here is my report.\n\n---\n\n## 1. Repository structure, language, tooling\n\n**Fabro** is an AI-powered workflow orchestration platform. Rust workspace (edition 2021, v0.34",
+          "internal.fidelity": "full",
+          "current_node": "understand",
+          "response.understand": "I have enough understanding now. Here is my report.\n\n---\n\n## 1. Repository structure, language, tooling\n\n**Fabro** is an AI-powered workflow orchestration platform. Rust workspace (edition 2021, v0.345.0-nightly.0) + TypeScript apps, built with `cargo`/`nextest`/`clippy`/`rustfmt` (pinned nightly) and `bun` for TS.\n\n| Layer | Location | Contents |\n|---|---|---|\n| Apps | `lib/apps/` | `fabro-cli`, `fabro-server` (Axum), `fabro-mcp-server`, `fabro-spa` |\n| Components | `lib/components/` | 21 crates incl. **`fabro-github`** (the integration in question), `fabro-sandbox`, `fabro-workflow`, `fabro-tracker`, `fabro-slack`, `fabro-manifest`, `fabro-install` |\n| Foundation | `lib/foundation/` | `fabro-types` (shared domain types/settings), `fabro-static` (env-var registry + secret registry), `fabro-config`, `fabro-http`, `fabro-oauth`, `fabro-vault`, etc. |\n| TS | `apps/fabro-web` (React 19 SPA), `lib/packages/fabro-api-client` (generated from OpenAPI) | |\n| Contract | `docs/public/api-reference/fabro-api.yaml` | OpenAPI-first: spec → progenitor Rust types → TS client |\n| Tests | `test/twin/github` | A **mock GitHub server harness** (\"twin\") used by dual-mode e2e/unit tests |\n\nGovernance rules that matter: AGENTS.md/CLAUDE.md mandate reading internal strategy docs before touching events/errors/tests/server-secrets; OpenAPI is source of truth with `with_replacement` type-unification rules; strum for enum conversions; test helpers must be feature-gated (`test-support`).\n\n## 2. Goal restated in this codebase's terms\n\n\"Add Forgejo support similar to the GitHub integration\" means introducing a second Git-forge integration alongside `fabro-github` such that Fabro can talk to a (self-hosted) Forgejo instance the way it today talks exclusively to github.com. In practice the GitHub integration spans **eight distinct surfaces**, each of which a Forgejo equivalent would have to decide about:\n\n1. **Client crate** — `lib/components/fabro-github` (~4.4k lines): credentials (`Pat` / `App` / `Installation`), JWT signing, installation-token minting, `HttpClient` trait, PR create/find/merge/close/auto-merge, branch HEAD SHA, app-install checks, webhook config updates, URL parsing (`parse_github_owner_repo`, `ssh_url_to_https`, `normalize_repo_origin_url` — all hardcode `github.com`), git credential helper hardwired to `credential.https://github.com.helper`, `InstallationTokenSource` (cached, single-flight), `GitHubRepositoryAccess`.\n2. **Domain types** (`fabro-types`): `PullRequestLink` (serializes a computed `https://github.com/.../pull/N` URL and *rejects non-github.com URLs on deserialize*), `PullRequestGithubDetail`→`PullRequestDetails`, `GitContext`, `RepositoryProvider::{Github,Git,Unknown}`, `GitHubRepositorySlug` (GitHub name-syntax validation), `SystemIntegrationStatus`/`IntegrationProvider::{Github,Slack}`, `AuthMethod::Github`, `IdpIdentity` issuer `https://github.com`.\n3. **Settings** — `[server.integrations.github]` (`GithubIntegrationStrategy::{Token,App}`, app_id/client_id/slug/webhooks), `[run.integrations.github.permissions]` (sandbox token scopes), `[run.scm] provider/owner/repository/github`, `[server.auth] methods/github.allowed_usernames`; env vars `GITHUB_TOKEN`, `GITHUB_BASE_URL`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_WEBHOOK_SECRET` registered in `fabro-static`'s EnvVars **and** secret/redaction registries; vault keys managed by `fabro-install`.\n4. **Server** — `install.rs` wizard (token strategy via `gh auth token`; app strategy via manifest flow + localhost callback), browser OAuth login (`auth/github_endpoints.rs`, `fabro-oauth` PKCE), inbound webhooks (`github_webhooks.rs`, route `/api/v1/webhooks/github`, HMAC `X-Hub-Signature-256`, Tailscale-funnel webhook strategy), `GET /repos/github/{owner}/{name}`, PR supervisor, automation materializer, `git_checkout.rs`, run compiler.\n5. **Sandbox** — Docker/Daytona are *clone-based GitHub-only*: `clone_source.rs` errors \"Clone-based sandboxes currently support GitHub repository origins only\"; `push_credentials.rs` embeds/refreshes tokens in the origin remote.\n6. **Workflow engine** — `git_bridge.rs` (github.com-scoped credential helper, SSH→HTTPS rewrites, `insteadOf`), auto-PR pipeline (`pipeline/pull_request.rs` driven by `GitHubContext`), `Initialize`/`services.rs` env injection of `GITHUB_TOKEN` into sandboxes.\n7. **Tracker** — `fabro-tracker/src/github.rs` (GitHub Projects V2 GraphQL tracker; there's also a Linear tracker as the multi-tracker precedent).\n8. **CLI, web UI, docs, OpenAPI, twin tests** — `gh.rs`, install web flow, `settings-integrations.tsx` GithubPanel, `docs/public/integrations/github.mdx`, ~15 OpenAPI paths/schemas referencing github.com URLs, `test/twin/github`.\n\nSo the concrete task is: design where a Forgejo (self-hosted, Gitea-lineage, `/api/v1` REST, token/OAuth2 auth) forge fits into each of these surfaces, choosing between a parallel `fabro-forgejo` crate and a generalized forge abstraction.\n\n## 3. What I know for certain\n\n- There is **zero existing Forgejo/Gitea code or config** anywhere in the repo (only an incidental mention of \"Gitea\" in a design doc's prior-art list).\n- GitHub is integrated **deeply and by name**, not behind an abstraction: `github.com` is hardcoded in URL parsing, PR-link (de)serialization, the git credential-helper key, sandbox clone decisions, and the OpenAPI schema; `GITHUB_BASE_URL` exists but only retargets the *API* endpoint (used by twins/tests), never the forge host identity.\n- The settings/config surface is TOML-driven with layered resolution (workflow/project/user), migration-aware parsing (`fabro-config/parse.rs` contains deprecation-split messages for the existing github keys), and a vault (`fabro-vault`) plus a central env/secret registry (`fabro-static`) that redacts secrets.\n- Multi-provider precedent exists in adjacent domains: `SandboxProviderKind::{Local,Docker,Daytona}` with per-provider settings; `Tracker` trait with `GitHubTracker` and `LinearTracker`; `IntegrationProvider::{Github,Slack}` for status reporting. These show the house style for adding a peer provider.\n- Auth strategy is a first-class choice (`GithubIntegrationStrategy::{Token,App}`) with capability consequences (token ⇒ no web login/webhooks; app ⇒ OAuth + webhooks), documented in `docs/public/integrations/github.mdx`.\n- The OpenAPI spec is regenerated into Rust (`fabro-api/build.rs` progenitor, with `with_replacement` for type unification) and TS (`fabro-api-client`), and a conformance test catches spec/router drift — any new endpoint or enum variant must flow spec-first.\n- Testing infrastructure includes a full fake GitHub twin (`test/twin/github`) with fixtures/handlers/auth, and mock-HTTP unit tests inside `fabro-github` (`tests_mock.rs`) and `fabro-workflow`.\n- Forge facts that constrain design: Forgejo is self-hostable (no single fixed host), exposes a Gitea-compatible REST API under `/api/v1` with GitHub-shaped-but-not-identical payloads (e.g. `has_merged` vs `merged`, `/pulls/` vs `/pull/` in web URLs, token-style `Authorization: token …`), supports OAuth2 apps and scoped PATs, and has **no equivalent of GitHub App installation tokens**. Webhooks can be delivered in Gitea or GitHub-compatible formats.\n- Repo conventions that would apply: read `docs/internal/{events,error-handling,testing,server-secrets,migrations}-strategy.md` before implementation; strum derives for new enums; feature-gated `test_support`; `shell_quote()` for any shell interpolation; shell command construction in sandbox code.\n\n## 4. What is genuinely ambiguous\n\n1. **Scope of parity.** Does \"similar to github integration\" mean full parity (auth/login, install wizard, webhooks, sandbox cloning, auto-PR/auto-merge, tracker, integrations status, web UI) or a minimal viable slice (PAT + clone + PR creation)? The GitHub integration is ~8 surfaces; two engineers would almost certainly draw the v1 line differently.\n2. **Auth model.** GitHub has three credential kinds (PAT / App / installation token) and the whole token-refresh machinery (`InstallationTokenSource`, `push_credentials.rs`) exists because installation tokens expire. Forgejo has no App/installation-token equivalent. PAT-only? OAuth2 app with refresh? Scoped tokens mapped from `[run.integrations.github.permissions]`? Each changes how much of the token-source architecture is reused vs. bypassed.\n3. **Instance topology.** github.com is one host; Forgejo is N self-hosted instances. Is Forgejo configured **once server-wide** (a single `[server.integrations.forgejo]` with a base URL), or resolved **per origin/per run** (any Forgejo remote works, credentials matched by host)? This single decision drives config schema, credential storage, URL parsing, and security posture (token exfiltration across instances).\n4. **Architecture: parallel crate vs. forge abstraction.** New `fabro-forgejo` mirroring `fabro-github`, or extract a `forge`-provider trait (auth, PR ops, URL math, credential helper) with GitHub and Forgejo implementations? The repo's own \"API type ownership / avoid parallel duplicate types\" guidance pushes toward unification, but the GitHub API surface in the crate is large and the two APIs are *similar, not identical* — where the similarities lie is a judgment call (Forgejo's Gitea-lineage API means partial compat, e.g. `merged` vs `has_merged`).\n5. **Wire/format compatibility and migrations.** `PullRequestLink` currently *rejects* non-github.com URLs; supporting Forgejo PR URLs (`…/pulls/N`) changes a persisted, wire-visible type (runs store this). Do we extend `PullRequestLink` with a host/provider field, add a `PullRequestForgejoDetail`, and migrate stored runs — or treat Forgejo links as a new variant? Same question for `RepositoryProvider` (new `Forgejo` variant ripples into OpenAPI enum + DB), `RunScmSettings` (`[run.scm.forgejo]`?), and `IntegrationProvider`.\n6. **Webhooks.** One shared inbound route or `/api/v1/webhooks/forgejo`? Which payload format (Gitea-native vs GitHub-compatible) and signature header (`X-Gitea-Signature` vs `X-Hub-Signature-256`)? Do webhook strategies (Tailscale funnel / server URL) carry over for self-hosted instances where the server may be on the same network? Do webhooks drive the automation materializer?\n7. **Sandbox clone support.** Must Docker/Daytona accept Forgejo origins (changing the explicit \"GitHub origins only\" contract in `clone_source.rs` and the credential-embedding model), or is Forgejo local-sandbox-only in v1? CLAUDE.md documents the GitHub-only clone-source contract as intentional.\n8. **Browser login / identity.** Does Forgejo become a `ServerAuthMethod` (OAuth2 against the instance, `AuthMethod::Forgejo`, per-instance `IdpIdentity` issuer), or is auth out of scope? The token-vs-app capability matrix (web UI enabled only with app strategy) would need a Forgejo column.\n9. **Does Gitea compatibility come along?** Forgejo is a Gitea fork with a compatible API — build \"Gitea-compatible\" and name it Forgejo, or strictly Forgejo? Affects naming, docs, and any version-specific API behavior.\n10. **Install/UX surface.** Should `fabro install` grow a Forgejo path (base-URL prompt, token/OAuth2-app creation), and does the web install UI + `docs/public/integrations/forgejo.mdx` + twin test harness (`test/twin/forgejo`) belong in the same change? Nothing in the repo pins this down.\n\n**Recommended clarifications before coding:** scope (which of the 8 surfaces), instance topology (single configured instance vs. per-origin), auth model (PAT/OAuth2), and crate architecture (parallel vs. abstracted) — these four determine nearly everything else.",
+          "graph.goal": "Add support for forgejo similar to github integration",
+          "failure_signature": "",
+          "graph.max_node_visits": "32",
+          "internal.run_id": "01M252QA19Z83CECNHGA992YY5",
+          "outcome": "succeeded",
+          "thread.build.current_node": "understand"
+        },
+        "node_outcomes": {
+          "understand": {
+            "status": "succeeded",
+            "context_updates": {
+              "last_response": "I have enough understanding now. Here is my report.\n\n---\n\n## 1. Repository structure, language, tooling\n\n**Fabro** is an AI-powered workflow orchestration platform. Rust workspace (edition 2021, v0.34",
+              "response.understand": "I have enough understanding now. Here is my report.\n\n---\n\n## 1. Repository structure, language, tooling\n\n**Fabro** is an AI-powered workflow orchestration platform. Rust workspace (edition 2021, v0.345.0-nightly.0) + TypeScript apps, built with `cargo`/`nextest`/`clippy`/`rustfmt` (pinned nightly) and `bun` for TS.\n\n| Layer | Location | Contents |\n|---|---|---|\n| Apps | `lib/apps/` | `fabro-cli`, `fabro-server` (Axum), `fabro-mcp-server`, `fabro-spa` |\n| Components | `lib/components/` | 21 crates incl. **`fabro-github`** (the integration in question), `fabro-sandbox`, `fabro-workflow`, `fabro-tracker`, `fabro-slack`, `fabro-manifest`, `fabro-install` |\n| Foundation | `lib/foundation/` | `fabro-types` (shared domain types/settings), `fabro-static` (env-var registry + secret registry), `fabro-config`, `fabro-http`, `fabro-oauth`, `fabro-vault`, etc. |\n| TS | `apps/fabro-web` (React 19 SPA), `lib/packages/fabro-api-client` (generated from OpenAPI) | |\n| Contract | `docs/public/api-reference/fabro-api.yaml` | OpenAPI-first: spec → progenitor Rust types → TS client |\n| Tests | `test/twin/github` | A **mock GitHub server harness** (\"twin\") used by dual-mode e2e/unit tests |\n\nGovernance rules that matter: AGENTS.md/CLAUDE.md mandate reading internal strategy docs before touching events/errors/tests/server-secrets; OpenAPI is source of truth with `with_replacement` type-unification rules; strum for enum conversions; test helpers must be feature-gated (`test-support`).\n\n## 2. Goal restated in this codebase's terms\n\n\"Add Forgejo support similar to the GitHub integration\" means introducing a second Git-forge integration alongside `fabro-github` such that Fabro can talk to a (self-hosted) Forgejo instance the way it today talks exclusively to github.com. In practice the GitHub integration spans **eight distinct surfaces**, each of which a Forgejo equivalent would have to decide about:\n\n1. **Client crate** — `lib/components/fabro-github` (~4.4k lines): credentials (`Pat` / `App` / `Installation`), JWT signing, installation-token minting, `HttpClient` trait, PR create/find/merge/close/auto-merge, branch HEAD SHA, app-install checks, webhook config updates, URL parsing (`parse_github_owner_repo`, `ssh_url_to_https`, `normalize_repo_origin_url` — all hardcode `github.com`), git credential helper hardwired to `credential.https://github.com.helper`, `InstallationTokenSource` (cached, single-flight), `GitHubRepositoryAccess`.\n2. **Domain types** (`fabro-types`): `PullRequestLink` (serializes a computed `https://github.com/.../pull/N` URL and *rejects non-github.com URLs on deserialize*), `PullRequestGithubDetail`→`PullRequestDetails`, `GitContext`, `RepositoryProvider::{Github,Git,Unknown}`, `GitHubRepositorySlug` (GitHub name-syntax validation), `SystemIntegrationStatus`/`IntegrationProvider::{Github,Slack}`, `AuthMethod::Github`, `IdpIdentity` issuer `https://github.com`.\n3. **Settings** — `[server.integrations.github]` (`GithubIntegrationStrategy::{Token,App}`, app_id/client_id/slug/webhooks), `[run.integrations.github.permissions]` (sandbox token scopes), `[run.scm] provider/owner/repository/github`, `[server.auth] methods/github.allowed_usernames`; env vars `GITHUB_TOKEN`, `GITHUB_BASE_URL`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_WEBHOOK_SECRET` registered in `fabro-static`'s EnvVars **and** secret/redaction registries; vault keys managed by `fabro-install`.\n4. **Server** — `install.rs` wizard (token strategy via `gh auth token`; app strategy via manifest flow + localhost callback), browser OAuth login (`auth/github_endpoints.rs`, `fabro-oauth` PKCE), inbound webhooks (`github_webhooks.rs`, route `/api/v1/webhooks/github`, HMAC `X-Hub-Signature-256`, Tailscale-funnel webhook strategy), `GET /repos/github/{owner}/{name}`, PR supervisor, automation materializer, `git_checkout.rs`, run compiler.\n5. **Sandbox** — Docker/Daytona are *clone-based GitHub-only*: `clone_source.rs` errors \"Clone-based sandboxes currently support GitHub repository origins only\"; `push_credentials.rs` embeds/refreshes tokens in the origin remote.\n6. **Workflow engine** — `git_bridge.rs` (github.com-scoped credential helper, SSH→HTTPS rewrites, `insteadOf`), auto-PR pipeline (`pipeline/pull_request.rs` driven by `GitHubContext`), `Initialize`/`services.rs` env injection of `GITHUB_TOKEN` into sandboxes.\n7. **Tracker** — `fabro-tracker/src/github.rs` (GitHub Projects V2 GraphQL tracker; there's also a Linear tracker as the multi-tracker precedent).\n8. **CLI, web UI, docs, OpenAPI, twin tests** — `gh.rs`, install web flow, `settings-integrations.tsx` GithubPanel, `docs/public/integrations/github.mdx`, ~15 OpenAPI paths/schemas referencing github.com URLs, `test/twin/github`.\n\nSo the concrete task is: design where a Forgejo (self-hosted, Gitea-lineage, `/api/v1` REST, token/OAuth2 auth) forge fits into each of these surfaces, choosing between a parallel `fabro-forgejo` crate and a generalized forge abstraction.\n\n## 3. What I know for certain\n\n- There is **zero existing Forgejo/Gitea code or config** anywhere in the repo (only an incidental mention of \"Gitea\" in a design doc's prior-art list).\n- GitHub is integrated **deeply and by name**, not behind an abstraction: `github.com` is hardcoded in URL parsing, PR-link (de)serialization, the git credential-helper key, sandbox clone decisions, and the OpenAPI schema; `GITHUB_BASE_URL` exists but only retargets the *API* endpoint (used by twins/tests), never the forge host identity.\n- The settings/config surface is TOML-driven with layered resolution (workflow/project/user), migration-aware parsing (`fabro-config/parse.rs` contains deprecation-split messages for the existing github keys), and a vault (`fabro-vault`) plus a central env/secret registry (`fabro-static`) that redacts secrets.\n- Multi-provider precedent exists in adjacent domains: `SandboxProviderKind::{Local,Docker,Daytona}` with per-provider settings; `Tracker` trait with `GitHubTracker` and `LinearTracker`; `IntegrationProvider::{Github,Slack}` for status reporting. These show the house style for adding a peer provider.\n- Auth strategy is a first-class choice (`GithubIntegrationStrategy::{Token,App}`) with capability consequences (token ⇒ no web login/webhooks; app ⇒ OAuth + webhooks), documented in `docs/public/integrations/github.mdx`.\n- The OpenAPI spec is regenerated into Rust (`fabro-api/build.rs` progenitor, with `with_replacement` for type unification) and TS (`fabro-api-client`), and a conformance test catches spec/router drift — any new endpoint or enum variant must flow spec-first.\n- Testing infrastructure includes a full fake GitHub twin (`test/twin/github`) with fixtures/handlers/auth, and mock-HTTP unit tests inside `fabro-github` (`tests_mock.rs`) and `fabro-workflow`.\n- Forge facts that constrain design: Forgejo is self-hostable (no single fixed host), exposes a Gitea-compatible REST API under `/api/v1` with GitHub-shaped-but-not-identical payloads (e.g. `has_merged` vs `merged`, `/pulls/` vs `/pull/` in web URLs, token-style `Authorization: token …`), supports OAuth2 apps and scoped PATs, and has **no equivalent of GitHub App installation tokens**. Webhooks can be delivered in Gitea or GitHub-compatible formats.\n- Repo conventions that would apply: read `docs/internal/{events,error-handling,testing,server-secrets,migrations}-strategy.md` before implementation; strum derives for new enums; feature-gated `test_support`; `shell_quote()` for any shell interpolation; shell command construction in sandbox code.\n\n## 4. What is genuinely ambiguous\n\n1. **Scope of parity.** Does \"similar to github integration\" mean full parity (auth/login, install wizard, webhooks, sandbox cloning, auto-PR/auto-merge, tracker, integrations status, web UI) or a minimal viable slice (PAT + clone + PR creation)? The GitHub integration is ~8 surfaces; two engineers would almost certainly draw the v1 line differently.\n2. **Auth model.** GitHub has three credential kinds (PAT / App / installation token) and the whole token-refresh machinery (`InstallationTokenSource`, `push_credentials.rs`) exists because installation tokens expire. Forgejo has no App/installation-token equivalent. PAT-only? OAuth2 app with refresh? Scoped tokens mapped from `[run.integrations.github.permissions]`? Each changes how much of the token-source architecture is reused vs. bypassed.\n3. **Instance topology.** github.com is one host; Forgejo is N self-hosted instances. Is Forgejo configured **once server-wide** (a single `[server.integrations.forgejo]` with a base URL), or resolved **per origin/per run** (any Forgejo remote works, credentials matched by host)? This single decision drives config schema, credential storage, URL parsing, and security posture (token exfiltration across instances).\n4. **Architecture: parallel crate vs. forge abstraction.** New `fabro-forgejo` mirroring `fabro-github`, or extract a `forge`-provider trait (auth, PR ops, URL math, credential helper) with GitHub and Forgejo implementations? The repo's own \"API type ownership / avoid parallel duplicate types\" guidance pushes toward unification, but the GitHub API surface in the crate is large and the two APIs are *similar, not identical* — where the similarities lie is a judgment call (Forgejo's Gitea-lineage API means partial compat, e.g. `merged` vs `has_merged`).\n5. **Wire/format compatibility and migrations.** `PullRequestLink` currently *rejects* non-github.com URLs; supporting Forgejo PR URLs (`…/pulls/N`) changes a persisted, wire-visible type (runs store this). Do we extend `PullRequestLink` with a host/provider field, add a `PullRequestForgejoDetail`, and migrate stored runs — or treat Forgejo links as a new variant? Same question for `RepositoryProvider` (new `Forgejo` variant ripples into OpenAPI enum + DB), `RunScmSettings` (`[run.scm.forgejo]`?), and `IntegrationProvider`.\n6. **Webhooks.** One shared inbound route or `/api/v1/webhooks/forgejo`? Which payload format (Gitea-native vs GitHub-compatible) and signature header (`X-Gitea-Signature` vs `X-Hub-Signature-256`)? Do webhook strategies (Tailscale funnel / server URL) carry over for self-hosted instances where the server may be on the same network? Do webhooks drive the automation materializer?\n7. **Sandbox clone support.** Must Docker/Daytona accept Forgejo origins (changing the explicit \"GitHub origins only\" contract in `clone_source.rs` and the credential-embedding model), or is Forgejo local-sandbox-only in v1? CLAUDE.md documents the GitHub-only clone-source contract as intentional.\n8. **Browser login / identity.** Does Forgejo become a `ServerAuthMethod` (OAuth2 against the instance, `AuthMethod::Forgejo`, per-instance `IdpIdentity` issuer), or is auth out of scope? The token-vs-app capability matrix (web UI enabled only with app strategy) would need a Forgejo column.\n9. **Does Gitea compatibility come along?** Forgejo is a Gitea fork with a compatible API — build \"Gitea-compatible\" and name it Forgejo, or strictly Forgejo? Affects naming, docs, and any version-specific API behavior.\n10. **Install/UX surface.** Should `fabro install` grow a Forgejo path (base-URL prompt, token/OAuth2-app creation), and does the web install UI + `docs/public/integrations/forgejo.mdx` + twin test harness (`test/twin/forgejo`) belong in the same change? Nothing in the repo pins this down.\n\n**Recommended clarifications before coding:** scope (which of the 8 surfaces), instance topology (single configured instance vs. per-origin), auth model (PAT/OAuth2), and crate architecture (parallel vs. abstracted) — these four determine nearly everything else.",
+              "last_stage": "understand"
+            },
+            "notes": "Stage completed: understand",
+            "usage": {
+              "input": {
+                "usage": {
+                  "model": {
+                    "provider": "zai",
+                    "model_id": "glm-5.3"
+                  },
+                  "tokens": {
+                    "input_tokens": 47932,
+                    "output_tokens": 6144,
+                    "reasoning_tokens": 2091,
+                    "cache_read_tokens": 1002816,
+                    "cache_write_tokens": 0
+                  }
+                },
+                "facts": {
+                  "algorithm": "openai"
+                }
+              },
+              "total_usd_micros": 364025
+            },
+            "timing": {
+              "wall_time_ms": 0,
+              "inference_time_ms": 197791,
+              "tool_time_ms": 4526,
+              "active_time_ms": 202317
+            }
+          },
+          "start": {
+            "status": "succeeded",
+            "usage": null
+          }
+        },
+        "next_node_id": "sweep",
+        "node_visits": {
+          "start": 1,
+          "understand": 1
+        }
+      },
+      "diff": {}
+    }
+  ],
   "conclusion": null,
   "sandbox": {
     "kind": "ready",
@@ -1196,5 +1324,261 @@
   "pull_request": null,
   "superseded_by": null,
   "pending_interviews": {},
-  "stages": {}
+  "stages": {
+    "understand@1": {
+      "first_event_seq": 24,
+      "prompt": null,
+      "response": null,
+      "completion": null,
+      "provider_used": {
+        "mode": "agent",
+        "provider": "zai",
+        "model": "glm-5.3",
+        "reasoning_effort": "high"
+      },
+      "diff": null,
+      "script_invocation": null,
+      "script_timing": null,
+      "parallel_results": null,
+      "output": null,
+      "started_at": "2026-09-10T07:15:19.995047Z",
+      "handler": "agent",
+      "graph_visit": 1,
+      "live_inference_ms": 197782,
+      "live_tool_ms": 4502,
+      "usage": {
+        "input_tokens": 47932,
+        "output_tokens": 6144,
+        "total_tokens": 1058983,
+        "reasoning_tokens": 2091,
+        "cache_read_tokens": 1002816,
+        "cache_write_tokens": 0,
+        "total_usd_micros": 364025
+      },
+      "model": {
+        "provider": "zai",
+        "model_id": "glm-5.3"
+      },
+      "skills": {
+        "available": [
+          {
+            "name": "rust-style-guide",
+            "description": "Apply this Rust style guide when writing, reviewing, refactoring, or configuring Rust code for this project. Covers Rust 2024/MSRV, library vs application conventions, public API design, errors, panics, ownership and cloning, async/Tokio/concurrency, tracing, rustfmt/Clippy, testing with nextest, and unsafe/macro policy. Also use when setting up new Rust projects, investigating Rust performance, verifying library releases, or reviewing Rust code changes."
+          }
+        ],
+        "activated": []
+      },
+      "permission_level": "full",
+      "agent_tools": [
+        {
+          "name": "close_agent",
+          "description": "Close a running or completed subagent that is no longer needed.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "subagent",
+          "invoked": false
+        },
+        {
+          "name": "edit_file",
+          "description": "Edit a file by replacing an exact string. The old_string must be an exact match and unique unless replace_all is true; include surrounding context when needed. Read the file first and preserve existing indentation.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "write",
+          "invoked": false
+        },
+        {
+          "name": "glob",
+          "description": "Find files by search-root-relative path using a glob pattern. Use path to choose the search root. `*` stays within one path segment and `**` searches recursively. Prefer this over shell find or ls when locating repository files.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "read",
+          "invoked": true
+        },
+        {
+          "name": "grep",
+          "description": "Search file contents with a regex pattern. Use path to choose the search root, glob_filter to limit matching files, case_insensitive for case folding, and max_results to cap output.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "read",
+          "invoked": false
+        },
+        {
+          "name": "read_file",
+          "description": "Read files before editing them. Returns line-numbered text and supports offset/limit for large files. Use this instead of shell cat, head, tail, or sed when inspecting repository files.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "read",
+          "invoked": true
+        },
+        {
+          "name": "request_user_input",
+          "description": "Ask the human one or more questions and wait for their answers before continuing this stage.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "other",
+          "invoked": false
+        },
+        {
+          "name": "send_input",
+          "description": "Send a follow-up message to a subagent. A running agent receives it at a safe turn boundary. A completed agent starts another turn in the same session with its existing history.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "subagent",
+          "invoked": false
+        },
+        {
+          "name": "shell",
+          "description": "Execute Bash commands for terminal operations, package managers, tests and builds. Use dedicated tools for file reads, file edits, filename searches, and content searches. Provide timeout_ms for long-running commands.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "shell",
+          "invoked": true
+        },
+        {
+          "name": "spawn_agent",
+          "description": "Spawn a subagent for independent work or context isolation. Use it for tasks that can proceed separately, and avoid duplicating the same work in the parent session.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "subagent",
+          "invoked": false
+        },
+        {
+          "name": "update_plan",
+          "description": "Update the multi-step plan for the current task. Submit the entire plan; existing steps are reconciled by exact step text.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "other",
+          "invoked": false
+        },
+        {
+          "name": "use_skill",
+          "description": "Load a skill's instructions by name. Call this when the user's request matches an available skill.",
+          "source": {
+            "kind": "skill"
+          },
+          "category": "other",
+          "invoked": false
+        },
+        {
+          "name": "wait",
+          "description": "Wait for a subagent to complete, then use the result to synthesize the outcome for the user.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "subagent",
+          "invoked": false
+        },
+        {
+          "name": "web_fetch",
+          "description": "Fetch content from a URL that starts with http:// or https://. Pass a prompt to extract specific information or summarize the page; omit prompt to return the page content.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "other",
+          "invoked": false
+        },
+        {
+          "name": "write_file",
+          "description": "Create new files, or overwrite an existing file only when replacement is explicitly intended. Prefer edit_file for targeted changes to existing files because write_file overwrites the full file content.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "write",
+          "invoked": false
+        }
+      ],
+      "context_window": {
+        "provider": "zai",
+        "model": "glm-5.3",
+        "context_window_tokens": 1048576,
+        "input_tokens": 46600,
+        "usage_percent": 4.444122314453125,
+        "count_method": "response_usage_scaled_breakdown",
+        "staleness": "live",
+        "generated_at": "2026-09-10T07:18:42.568431Z",
+        "event_seq": 285,
+        "breakdown": [
+          {
+            "category": "system_prompt",
+            "tokens": 1084,
+            "usage_percent": 0.1033782958984375
+          },
+          {
+            "category": "tools",
+            "tokens": 1485,
+            "usage_percent": 0.14162063598632812
+          },
+          {
+            "category": "skills",
+            "tokens": 213,
+            "usage_percent": 0.020313262939453125
+          },
+          {
+            "category": "memory",
+            "tokens": 4192,
+            "usage_percent": 0.3997802734375
+          },
+          {
+            "category": "conversation",
+            "tokens": 39619,
+            "usage_percent": 3.778362274169922
+          },
+          {
+            "category": "other",
+            "tokens": 7,
+            "usage_percent": 0.000667572021484375
+          }
+        ],
+        "warnings": []
+      },
+      "agent_control": "running",
+      "state": "running"
+    },
+    "start@1": {
+      "first_event_seq": 20,
+      "prompt": null,
+      "response": null,
+      "completion": {
+        "outcome": "succeeded",
+        "notes": null,
+        "failure_reason": null,
+        "timestamp": "2026-09-10T07:15:19.991844Z"
+      },
+      "provider_used": null,
+      "diff": null,
+      "script_invocation": null,
+      "script_timing": null,
+      "parallel_results": null,
+      "output": null,
+      "started_at": "2026-09-10T07:15:19.987418Z",
+      "handler": "start",
+      "graph_visit": 1,
+      "timing": {
+        "wall_time_ms": 0,
+        "inference_time_ms": 0,
+        "tool_time_ms": 0,
+        "active_time_ms": 0
+      },
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "reasoning_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0
+      },
+      "agent_control": "running",
+      "state": "succeeded"
+    }
+  }
 }
