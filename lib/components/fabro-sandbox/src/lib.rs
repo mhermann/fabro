@@ -65,5 +65,5 @@ pub use sandbox::{
     StdioProcessHandle, StdioProcessTermination, WalkOptions, format_lines_numbered,
     redacted_output_tail, setup_git_via_exec, shell_quote,
 };
-pub use sandbox_spec::SandboxSpec;
+pub use sandbox_spec::{ForgejoSandboxCredentials, SandboxSpec};
 pub use terminal::{TerminalSession, TerminalSize, open_terminal_for_run};

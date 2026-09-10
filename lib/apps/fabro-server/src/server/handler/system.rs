@@ -9,7 +9,7 @@ use fabro_slack::config::{
     resolve_credentials_status_with_lookup as resolve_slack_credentials_status_with_lookup,
 };
 use fabro_static::EnvVars;
-use fabro_types::settings::server::GithubIntegrationSettings;
+use fabro_types::settings::server::{ForgejoIntegrationSettings, GithubIntegrationSettings};
 use fabro_vault::Vault;
 use tokio::time::timeout;
 
@@ -29,6 +29,7 @@ const SERVER_DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(25);
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/repos/github/{owner}/{name}", get(get_github_repo))
+        .route("/repos/forgejo/{owner}/{name}", get(get_forgejo_repo))
         .route("/health", get(health))
         .route("/health/diagnostics", post(run_diagnostics))
         .route("/settings", get(get_server_settings))
@@ -112,11 +113,55 @@ async fn get_system_integrations(
         Err(err) => return secret_store_failure(&err),
     };
     let github = github_integration_status(&settings.server.integrations.github, &vault);
+    let forgejo = forgejo_integration_status(&settings.server.integrations.forgejo, &vault);
     let slack = slack_integration_status(state.as_ref(), &vault);
     let response = SystemIntegrationsResponse {
-        data: vec![github, slack],
+        data: vec![github, forgejo, slack],
     };
     (StatusCode::OK, Json(response)).into_response()
+}
+
+fn forgejo_integration_status(
+    settings: &ForgejoIntegrationSettings,
+    vault: &Vault,
+) -> SystemIntegrationStatus {
+    let mut metadata = BTreeMap::new();
+    if let Some(url) = settings.url.as_ref() {
+        metadata.insert("url".to_string(), url.clone());
+    }
+
+    if !settings.enabled {
+        return integration_status(
+            IntegrationProvider::Forgejo,
+            false,
+            false,
+            IntegrationStatus::Disabled,
+            Vec::new(),
+            metadata,
+        );
+    }
+
+    let mut missing = Vec::new();
+    if settings.url.is_none() {
+        missing.push("server.integrations.forgejo.url".to_string());
+    }
+    if missing_vault_secret(vault, EnvVars::FORGEJO_TOKEN) {
+        missing.push(EnvVars::FORGEJO_TOKEN.to_string());
+    }
+
+    let configured = missing.is_empty();
+    integration_status(
+        IntegrationProvider::Forgejo,
+        true,
+        configured,
+        if configured {
+            IntegrationStatus::Configured
+        } else {
+            IntegrationStatus::MissingCredentials
+        },
+        missing,
+        metadata,
+    )
 }
 
 fn github_integration_status(
@@ -675,6 +720,98 @@ async fn get_github_repo(
         })),
     )
         .into_response()
+}
+
+/// Check server access to a repository on the configured Forgejo/Gitea
+/// instance (`GET /repos/forgejo/{owner}/{name}`).
+async fn get_forgejo_repo(
+    _auth: RequiredUser,
+    State(state): State<Arc<AppState>>,
+    Path((owner, name)): Path<(String, String)>,
+) -> Response {
+    if let Err(response) = validate_github_slug("owner", &owner, 39) {
+        return response;
+    }
+    if let Err(response) = validate_github_slug("repo", &name, 100) {
+        return response;
+    }
+    let forgejo_settings = state.forgejo_settings();
+    if !forgejo_settings.enabled {
+        return ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server.integrations.forgejo is not enabled",
+        )
+        .into_response();
+    }
+    let Some(instance_url) = forgejo_settings.url else {
+        return ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server.integrations.forgejo.url is not configured",
+        )
+        .into_response();
+    };
+    let creds = match state.forgejo_credentials().await {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
+            return ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "FORGEJO_TOKEN is not configured -- run fabro install or run fabro secret set FORGEJO_TOKEN",
+            )
+            .into_response();
+        }
+        Err(err) => {
+            tracing::error!(error = ?err, "Loading Forgejo/Gitea credentials failed");
+            return ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Forgejo/Gitea credentials are unavailable",
+            )
+            .into_response();
+        }
+    };
+
+    let ctx = fabro_forgejo::ForgejoContext::new(&creds, &instance_url);
+    let client = match state.http_client() {
+        Ok(http) => http,
+        Err(err) => {
+            return ApiError::new(StatusCode::SERVICE_UNAVAILABLE, err.to_string()).into_response();
+        }
+    };
+    match fabro_forgejo::get_repository_with_client(&client, &ctx, &owner, &name).await {
+        Ok(repo) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "owner": owner,
+                "name": name,
+                "accessible": true,
+                "default_branch": repo.default_branch,
+                "private": repo.private,
+                "permissions": serde_json::Value::Null,
+                "install_url": serde_json::Value::Null,
+            })),
+        )
+            .into_response(),
+        Err(err) if err.to_string().contains("not found") => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "owner": owner,
+                "name": name,
+                "accessible": false,
+                "default_branch": null,
+                "private": null,
+                "permissions": null,
+                "install_url": serde_json::Value::Null,
+            })),
+        )
+            .into_response(),
+        Err(err) => {
+            tracing::error!(error = ?err, "Forgejo/Gitea repo lookup failed");
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                format!("Forgejo/Gitea repo lookup failed: {err}"),
+            )
+            .into_response()
+        }
+    }
 }
 
 async fn run_diagnostics(_auth: RequiredUser, State(state): State<Arc<AppState>>) -> Response {

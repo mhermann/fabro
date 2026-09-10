@@ -15,11 +15,11 @@
 
 
 /**
- * Request body for linking an existing GitHub pull request to a run.
+ * Request body for linking an existing GitHub or Forgejo/Gitea pull request to a run.
  */
 export interface LinkRunPullRequestRequest {
     /**
-     * GitHub pull request URL to associate with the run. Must use the form `https://github.com/{owner}/{repo}/pull/{number}`.
+     * Pull request URL to associate with the run. GitHub URLs must use `https://github.com/{owner}/{repo}/pull/{number}`; Forgejo/Gitea URLs must use `{instance}/{owner}/{repo}/pulls/{number}` on the configured instance.
      */
     'html_url': string;
 }

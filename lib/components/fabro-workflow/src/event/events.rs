@@ -736,17 +736,20 @@ pub enum Event {
         force:       bool,
     },
     PullRequestCreated {
-        pr_url:      String,
-        pr_number:   u64,
-        owner:       String,
-        repo:        String,
-        base_branch: String,
-        head_branch: String,
+        pr_url:       String,
+        pr_number:    u64,
+        owner:        String,
+        repo:         String,
+        base_branch:  String,
+        head_branch:  String,
         /// Absent on events written before the head SHA was recorded.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        head_sha:    Option<String>,
-        title:       String,
-        draft:       bool,
+        head_sha:     Option<String>,
+        /// Forgejo/Gitea instance base URL; absent for github.com.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance_url: Option<String>,
+        title:        String,
+        draft:        bool,
     },
     PullRequestLinked {
         pull_request: PullRequestLink,
@@ -799,6 +802,7 @@ impl Event {
             base_branch: base_branch.to_string(),
             head_branch: head_branch.to_string(),
             head_sha: Some(head_sha.to_string()),
+            instance_url: record.instance_url.clone(),
             title: title.to_string(),
             draft,
         }

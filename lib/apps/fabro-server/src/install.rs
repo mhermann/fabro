@@ -17,12 +17,12 @@ use fabro_config::Storage;
 use fabro_config::bind::{Bind, BindRequest};
 use fabro_config::envfile::{EnvFileRemoval, EnvFileUpdate};
 use fabro_install::{
-    GITHUB_APP_VAULT_KEYS, GITHUB_INSTALL_SECRET_KEYS, InstallListenConfig, InstallPersistencePlan,
-    InstallSandboxSelection, OBJECT_STORE_ACCESS_KEY_ID_ENV, OBJECT_STORE_SECRET_ACCESS_KEY_ENV,
-    PendingSettingsWrite, SecretStoreWrite, merge_server_settings,
-    prepare_dev_token_write_for_install, seed_default_environment_in_storage,
-    write_github_app_settings, write_object_store_settings, write_sandbox_settings,
-    write_token_settings,
+    FORGEJO_INSTALL_SECRET_KEYS, GITHUB_APP_VAULT_KEYS, GITHUB_INSTALL_SECRET_KEYS,
+    InstallListenConfig, InstallPersistencePlan, InstallSandboxSelection,
+    OBJECT_STORE_ACCESS_KEY_ID_ENV, OBJECT_STORE_SECRET_ACCESS_KEY_ENV, PendingSettingsWrite,
+    SecretStoreWrite, merge_server_settings, prepare_dev_token_write_for_install,
+    seed_default_environment_in_storage, write_forgejo_settings, write_github_app_settings,
+    write_object_store_settings, write_sandbox_settings, write_token_settings,
 };
 use fabro_llm::client::Client as LlmClient;
 use fabro_llm::generate::{GenerateParams, generate};
@@ -33,7 +33,7 @@ use fabro_static::EnvVars;
 use fabro_store::ArtifactStore;
 use fabro_types::ServerSettings;
 use fabro_types::settings::run::EnvironmentProvider;
-use fabro_types::settings::server::ObjectStoreSettings;
+use fabro_types::settings::server::{ObjectStoreSettings, validate_instance_url};
 use fabro_types::settings::{is_wildcard_host, validate_public_url_with_label};
 use fabro_util::version::FABRO_VERSION;
 use fabro_util::{Home, session_secret};
@@ -243,6 +243,7 @@ struct PendingInstall {
     object_store:       Option<InstallObjectStoreState>,
     sandbox:            Option<InstallSandboxState>,
     github:             Option<GithubInstallState>,
+    forgejo:            Option<ForgejoInstallInput>,
     pending_github_app: Option<PendingGithubApp>,
 }
 
@@ -486,6 +487,19 @@ enum GithubInstallState {
     App(GithubAppInstall),
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ForgejoTestInput {
+    url:   String,
+    token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ForgejoInstallInput {
+    url:      String,
+    token:    String,
+    username: String,
+}
+
 #[derive(Clone, Debug)]
 struct PendingGithubApp {
     state:            String,
@@ -635,6 +649,8 @@ pub fn build_install_router(state: InstallAppState) -> Router {
             post(post_install_github_token_test),
         )
         .route("/install/github/token", put(put_install_github_token))
+        .route("/install/forgejo/test", post(post_install_forgejo_test))
+        .route("/install/forgejo", put(put_install_forgejo))
         .route(
             "/install/github/app/manifest",
             post(post_install_github_app_manifest),
@@ -781,6 +797,7 @@ async fn get_install_session(
         "object_store": redacted_object_store(&pending_install),
         "sandbox": redacted_sandbox(&pending_install),
         "github": redacted_github(&pending_install),
+        "forgejo": redacted_forgejo(&pending_install),
         "prefill": {
             "canonical_url": detect_canonical_url(&headers),
             "object_store_local_root": default_local_object_store_root(&state),
@@ -1389,6 +1406,83 @@ async fn put_install_github_token(
     StatusCode::NO_CONTENT.into_response()
 }
 
+async fn post_install_forgejo_test(
+    State(state): State<InstallAppState>,
+    headers: HeaderMap,
+    Query(query): Query<InstallTokenQuery>,
+    Json(input): Json<ForgejoTestInput>,
+) -> Response {
+    if let Some(response) = require_valid_token(&state, &headers, query.token.as_deref()) {
+        return response;
+    }
+    observe_operator(&state, &headers);
+
+    if input.url.trim().is_empty() || input.token.trim().is_empty() {
+        return install_error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "url and token are required",
+        );
+    }
+    let instance_url = input.url.trim().trim_end_matches('/').to_string();
+    if let Err(reason) = validate_instance_url(&instance_url) {
+        return install_error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("invalid Forgejo/Gitea instance URL: {reason}"),
+        );
+    }
+
+    match validate_forgejo_token(&instance_url, input.token.trim()).await {
+        Ok((username, version)) => Json(serde_json::json!({
+            "username": username,
+            "version": version,
+        }))
+        .into_response(),
+        Err(err) => {
+            warn!(error = ?err, "install Forgejo/Gitea credential validation failed");
+            install_error_response(StatusCode::UNPROCESSABLE_ENTITY, err.to_string())
+        }
+    }
+}
+
+async fn put_install_forgejo(
+    State(state): State<InstallAppState>,
+    headers: HeaderMap,
+    Query(query): Query<InstallTokenQuery>,
+    Json(input): Json<ForgejoInstallInput>,
+) -> Response {
+    if let Some(response) = require_valid_token(&state, &headers, query.token.as_deref()) {
+        return response;
+    }
+    observe_operator(&state, &headers);
+
+    if input.url.trim().is_empty()
+        || input.token.trim().is_empty()
+        || input.username.trim().is_empty()
+    {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": "url, token, and username are required" })),
+        )
+            .into_response();
+    }
+    let instance_url = input.url.trim().trim_end_matches('/').to_string();
+    if let Err(reason) = validate_instance_url(&instance_url) {
+        return install_error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("invalid Forgejo/Gitea instance URL: {reason}"),
+        );
+    }
+
+    lock_unpoisoned(&state.pending_install, "install session").forgejo =
+        Some(ForgejoInstallInput {
+            url:      instance_url,
+            token:    input.token,
+            username: input.username,
+        });
+    info!(step = "forgejo", "install step completed");
+    StatusCode::NO_CONTENT.into_response()
+}
+
 async fn post_install_github_app_manifest(
     State(state): State<InstallAppState>,
     headers: HeaderMap,
@@ -1680,6 +1774,23 @@ async fn post_install_finish(
         }
     }
 
+    if let Some(forgejo) = pending_install.forgejo {
+        if let Err(err) = write_forgejo_settings(&mut settings_doc, &forgejo.url) {
+            return install_error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+        }
+        vault_secrets.push(SecretStoreWrite {
+            name:        EnvVars::FORGEJO_TOKEN.to_string(),
+            value:       forgejo.token,
+            secret_type: VaultSecretType::Token,
+            description: None,
+        });
+        server_env_removals.extend(
+            FORGEJO_INSTALL_SECRET_KEYS
+                .iter()
+                .map(|k| make_env_removal(k)),
+        );
+    }
+
     let settings_toml = match toml::to_string_pretty(&settings_doc) {
         Ok(value) => value,
         Err(err) => {
@@ -1969,6 +2080,9 @@ fn completed_steps(pending_install: &PendingInstall) -> Vec<&'static str> {
     if pending_install.llm.is_some() {
         steps.push("llm");
     }
+    if pending_install.forgejo.is_some() {
+        steps.push("forgejo");
+    }
     if pending_install.github.is_some() {
         steps.push("github");
     }
@@ -1984,6 +2098,18 @@ fn redacted_llm(pending_install: &PendingInstall) -> serde_json::Value {
                     "provider": provider.provider.to_string(),
                     "configured": true,
                 })).collect::<Vec<_>>()
+            })
+        },
+    )
+}
+
+fn redacted_forgejo(pending_install: &PendingInstall) -> serde_json::Value {
+    pending_install.forgejo.as_ref().map_or_else(
+        || serde_json::Value::Null,
+        |forgejo| {
+            serde_json::json!({
+                "url": forgejo.url,
+                "username": forgejo.username,
             })
         },
     )
@@ -2200,6 +2326,55 @@ fn provider_base_url_override(
         .get(&provider.id)
         .cloned()
         .or_else(|| provider.base_url.clone())
+}
+
+/// Validate a Forgejo/Gitea PAT against the instance, returning the
+/// authenticated username and the instance version.
+async fn validate_forgejo_token(
+    instance_url: &str,
+    token: &str,
+) -> anyhow::Result<(String, String)> {
+    #[derive(serde::Deserialize)]
+    struct ForgejoUserResponse {
+        login: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct ForgejoVersionResponse {
+        version: String,
+    }
+
+    let api_root = format!("{instance_url}/api/v1");
+    let client = install_http_client_for_url(&api_root)?;
+    let response = client
+        .get(format!("{api_root}/user"))
+        .header("Authorization", format!("token {token}"))
+        .header("User-Agent", "fabro-server")
+        .send()
+        .await
+        .map_err(anyhow::Error::new)?;
+    if !response.status().is_success() {
+        bail!(
+            "Forgejo/Gitea returned {} validating the token",
+            response.status()
+        );
+    }
+    let user: ForgejoUserResponse = response.json().await.map_err(anyhow::Error::new)?;
+
+    let version = match client
+        .get(format!("{api_root}/version"))
+        .header("Authorization", format!("token {token}"))
+        .header("User-Agent", "fabro-server")
+        .send()
+        .await
+    {
+        Ok(response) => match response.json::<ForgejoVersionResponse>().await {
+            Ok(v) => v.version,
+            Err(_) => "unknown".to_string(),
+        },
+        Err(_) => "unknown".to_string(),
+    };
+
+    Ok((user.login, version))
 }
 
 async fn validate_github_token(state: &InstallAppState, token: &str) -> anyhow::Result<String> {

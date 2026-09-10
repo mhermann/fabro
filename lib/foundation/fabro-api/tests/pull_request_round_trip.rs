@@ -104,6 +104,26 @@ fn pull_request_link_json_matches_openapi_shape() {
 }
 
 #[test]
+fn forge_pull_request_link_json_matches_openapi_shape() {
+    let fixture = json!({
+        "owner": "acme",
+        "repo": "widgets",
+        "number": 7,
+        "html_url": "https://forgejo.example.com/acme/widgets/pulls/7",
+        "instance_url": "https://forgejo.example.com"
+    });
+
+    let domain_record: PullRequestLink =
+        serde_json::from_value(fixture.clone()).expect("domain link should deserialize");
+    assert_eq!(
+        domain_record.instance_url.as_deref(),
+        Some("https://forgejo.example.com")
+    );
+
+    assert_eq!(serde_json::to_value(domain_record).unwrap(), fixture);
+}
+
+#[test]
 fn pull_request_response_json_matches_openapi_shape() {
     let fixture = json!({
         "data": {

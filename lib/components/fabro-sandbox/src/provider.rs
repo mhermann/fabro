@@ -21,6 +21,7 @@ use futures::future::join_all;
 use crate::daytona::DaytonaConfig;
 #[cfg(feature = "docker")]
 use crate::docker::DockerSandboxOptions;
+use crate::sandbox_spec::ForgejoSandboxCredentials;
 
 pub enum SandboxCreateSpec {
     Local,
@@ -28,6 +29,7 @@ pub enum SandboxCreateSpec {
     Docker {
         config:           DockerSandboxOptions,
         github_app:       Option<GitHubCredentials>,
+        forgejo:          Option<ForgejoSandboxCredentials>,
         run_id:           Option<RunId>,
         clone_origin_url: Option<String>,
         clone_branch:     Option<String>,
@@ -36,6 +38,7 @@ pub enum SandboxCreateSpec {
     Daytona {
         config:           Box<DaytonaConfig>,
         github_app:       Option<GitHubCredentials>,
+        forgejo:          Option<ForgejoSandboxCredentials>,
         run_id:           Option<RunId>,
         clone_origin_url: Option<String>,
         clone_branch:     Option<String>,

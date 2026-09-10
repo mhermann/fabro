@@ -30,13 +30,14 @@ use tokio_util::sync::CancellationToken;
 use crate::clone_source::{self, CloneDecision, EmptyWorkspaceReason};
 use crate::git_retry::{self, CredentialContext};
 use crate::managed_labels::{self, MANAGED_LABEL, RUN_ID_LABEL};
-use crate::push_credentials::{self, PushCredentialState};
+use crate::push_credentials::{self, CredentialSource, PushCredentialState};
 use crate::redact::redact_auth_url;
 use crate::sandbox::{
     self, BASH_ENV_VAR, BASH_PROBE_SCRIPT, BASH_PROBE_TIMEOUT_MS, OutputCaptureBuffer, REMOTE_BASH,
     REMOTE_WALK_TIMEOUT_MS, RefreshOutcome, StdioProcessControl, optional_timeout, resolve_path,
     validate_bash_probe, write_process_stdin,
 };
+use crate::sandbox_spec::ForgejoSandboxCredentials;
 use crate::{
     CommandOutputCallback, DEFAULT_EXEC_OUTPUT_TAIL_BYTES, DirEntry, ExecResult,
     ExecStreamingRequest, ExecStreamingResult, GrepOptions, Sandbox, SandboxEvent,
@@ -153,6 +154,7 @@ pub struct DockerSandbox {
     docker:            Docker,
     config:            DockerSandboxOptions,
     push_credentials:  PushCredentialState,
+    forgejo:           Option<ForgejoSandboxCredentials>,
     run_id:            Option<RunId>,
     clone_origin_url:  Option<String>,
     clone_branch:      Option<String>,
@@ -185,6 +187,7 @@ impl DockerSandbox {
     pub fn new(
         config: DockerSandboxOptions,
         github_app: Option<&GitHubCredentials>,
+        forgejo: Option<ForgejoSandboxCredentials>,
         run_id: Option<RunId>,
         clone_origin_url: Option<String>,
         clone_branch: Option<String>,
@@ -198,6 +201,7 @@ impl DockerSandbox {
                 clone_branch.as_deref(),
                 clone_tag.as_deref(),
                 clone_commit_sha.as_deref(),
+                forgejo.as_ref().map(|f| f.instance_url.as_str()),
             )?;
         }
         let docker = Docker::connect_with_local_defaults().map_err(crate::Error::docker_connect)?;
@@ -205,6 +209,7 @@ impl DockerSandbox {
             docker,
             config,
             github_app,
+            forgejo,
             run_id,
             clone_origin_url,
             clone_branch,
@@ -217,20 +222,24 @@ impl DockerSandbox {
         docker: Docker,
         config: DockerSandboxOptions,
         github_app: Option<&GitHubCredentials>,
+        forgejo: Option<ForgejoSandboxCredentials>,
         run_id: Option<RunId>,
         clone_origin_url: Option<String>,
         clone_branch: Option<String>,
         clone_tag: Option<String>,
         clone_commit_sha: Option<String>,
     ) -> crate::Result<Self> {
-        let push_credentials = PushCredentialState::new(push_credentials::build_token_source(
+        let push_credentials = PushCredentialState::new(push_credentials::build_credential_source(
             github_app,
+            forgejo.as_ref().map(|f| &f.creds),
+            forgejo.as_ref().map(|f| f.instance_url.as_str()),
             clone_origin_url.as_deref(),
         )?);
         Ok(Self {
             docker,
             config,
             push_credentials,
+            forgejo,
             run_id,
             clone_origin_url,
             clone_branch,
@@ -257,6 +266,7 @@ impl DockerSandbox {
     ) -> crate::Result<Self> {
         let sandbox = Self::new(
             DockerSandboxOptions::default(),
+            None,
             None,
             run_id,
             clone_origin_url.clone(),
@@ -796,7 +806,8 @@ impl DockerSandbox {
         let message = match step {
             CloneStep::Network if self.push_credentials.source().is_none() => {
                 "Git clone failed. If this is a private repository, configure a GitHub App with \
-                 `fabro install` and install it for your organization."
+                 `fabro install` and install it for your organization, or configure \
+                 Forgejo/Gitea credentials for your instance with `fabro install`."
             }
             CloneStep::Network => "Failed to clone repository into Docker sandbox",
             CloneStep::Local => "Failed to prepare the cloned repository in the Docker sandbox",
@@ -906,7 +917,7 @@ impl DockerSandbox {
         .await
     }
 
-    async fn clone_github_repo(
+    async fn clone_git_repo(
         &self,
         origin_url: String,
         branch: Option<String>,
@@ -914,15 +925,51 @@ impl DockerSandbox {
         commit_sha: Option<String>,
     ) -> crate::Result<()> {
         self.verify_git_available().await?;
-        let layout = clone_source::github_repo_layout(&origin_url, WORKING_DIRECTORY, REPOS_ROOT)?;
+        let layout = clone_source::repo_layout(
+            &origin_url,
+            WORKING_DIRECTORY,
+            REPOS_ROOT,
+            self.forgejo.as_ref().map(|f| f.instance_url.as_str()),
+        )?;
         // The clone mints its own token (never a warm-cache reuse) and seeds
         // the shared source, so the first refresh compares against the clone
-        // token instead of believing nothing was ever embedded.
-        let resolved_token = match self.push_credentials.source() {
-            Some(source) => Some(source.mint_for_clone().await.map_err(|err| {
-                crate::Error::context_anyhow("Failed to get GitHub App credentials for clone", err)
-            })?),
-            None => None,
+        // token instead of believing nothing was ever embedded. Forgejo
+        // credentials are static: the PAT embeds directly and its
+        // generation-0 snapshot short-circuits later refreshes.
+        let (resolved_token, auth_url) = match self.push_credentials.source() {
+            Some(CredentialSource::GitHub(source)) => {
+                let resolved_token = Some(source.mint_for_clone().await.map_err(|err| {
+                    crate::Error::context_anyhow(
+                        "Failed to get GitHub App credentials for clone",
+                        err,
+                    )
+                })?);
+                let auth_url = resolved_token.as_ref().map(|token| {
+                    fabro_github::embed_token_in_url(&origin_url, token.token.expose()).map_err(
+                        |err| {
+                            crate::Error::context_anyhow(
+                                "Failed to build authenticated GitHub clone URL",
+                                err,
+                            )
+                        },
+                    )
+                });
+                let auth_url = auth_url.transpose()?;
+                (resolved_token, auth_url)
+            }
+            Some(CredentialSource::Forgejo { token, .. }) => {
+                let resolved_token =
+                    push_credentials::PushCredentialState::static_forgejo_token(token);
+                let auth_url = fabro_forgejo::embed_token_in_url(&origin_url, token.expose())
+                    .map_err(|err| {
+                        crate::Error::context_anyhow(
+                            "Failed to build authenticated Forgejo/Gitea clone URL",
+                            err,
+                        )
+                    })?;
+                (Some(resolved_token), Some(auth_url))
+            }
+            None => (None, None),
         };
         // The clone call site maps its mint knowledge onto the credential
         // context: a token minted for this clone is FreshApp; a static
@@ -930,19 +977,6 @@ impl DockerSandbox {
         let clone_credential_context =
             CredentialContext::from_snapshot(resolved_token.as_ref().map(|token| &token.snapshot));
 
-        let auth_url = match &resolved_token {
-            Some(token) => Some(
-                fabro_github::embed_token_in_url(&origin_url, token.token.expose()).map_err(
-                    |err| {
-                        crate::Error::context_anyhow(
-                            "Failed to build authenticated GitHub clone URL",
-                            err,
-                        )
-                    },
-                )?,
-            ),
-            None => None,
-        };
         let clone_url = auth_url
             .as_ref()
             .map_or(origin_url.as_str(), |url| url.as_raw_url().as_str());
@@ -1838,6 +1872,7 @@ impl Sandbox for DockerSandbox {
             self.clone_branch.as_deref(),
             self.clone_tag.as_deref(),
             self.clone_commit_sha.as_deref(),
+            self.forgejo.as_ref().map(|f| f.instance_url.as_str()),
         )
         .map_err(|e| self.fail_init(init_start, e))?;
 
@@ -1860,9 +1895,15 @@ impl Sandbox for DockerSandbox {
                 branch,
                 tag,
                 commit_sha,
+            }
+            | CloneDecision::Forge {
+                origin_url,
+                branch,
+                tag,
+                commit_sha,
             } => {
                 if let Err(e) = self
-                    .clone_github_repo(origin_url, branch, tag, commit_sha)
+                    .clone_git_repo(origin_url, branch, tag, commit_sha)
                     .await
                 {
                     return Err(self.fail_init(init_start, e));
@@ -2447,7 +2488,10 @@ impl Sandbox for DockerSandbox {
     }
 
     fn push_token_source(&self) -> Option<Arc<InstallationTokenSource>> {
-        self.push_credentials.source().cloned()
+        self.push_credentials
+            .source()
+            .and_then(|s| s.as_github())
+            .cloned()
     }
 }
 
@@ -2681,6 +2725,7 @@ mod tests {
             DockerSandboxOptions::default(),
             None,
             None,
+            None,
             Some("https://github.com/acme/widgets".to_string()),
             Some("main".to_string()),
             None,
@@ -2697,6 +2742,7 @@ mod tests {
     fn exact_sha_without_branch_fails_before_docker_connection() {
         let error = DockerSandbox::new(
             DockerSandboxOptions::default(),
+            None,
             None,
             None,
             Some("https://github.com/acme/widgets".to_string()),
@@ -3084,6 +3130,7 @@ mod tests {
         let sandbox = DockerSandbox::with_docker_client(
             docker,
             DockerSandboxOptions::default(),
+            None,
             None,
             None,
             None,

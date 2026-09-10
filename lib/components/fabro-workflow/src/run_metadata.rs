@@ -5,7 +5,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use fabro_checkpoint::git::{FileMode, Store, TreeEntries};
 use fabro_dump::RunDump;
-use fabro_github::token_source::{InstallationTokenSource, ResolvedToken, TokenSnapshot};
+use fabro_github::token_source::{
+    InstallationTokenSource, ResolvedToken, SecretString, TokenProvenance, TokenSnapshot,
+};
 use git2::{
     Cred, Direction, ErrorClass, ErrorCode, FetchOptions, Oid, PushOptions, RemoteCallbacks,
     Repository, Signature,
@@ -171,6 +173,26 @@ impl AuthProvider for GitHubAuthProvider {
     }
 }
 
+/// Static PAT auth for Forgejo/Gitea origins: the token never expires and
+/// there is no mint step.
+struct StaticPatAuthProvider {
+    token: SecretString,
+}
+
+#[async_trait]
+impl AuthProvider for StaticPatAuthProvider {
+    async fn token(&self) -> Result<Option<ResolvedToken>, RunMetadataError> {
+        Ok(Some(ResolvedToken {
+            token:          self.token.clone(),
+            snapshot:       TokenSnapshot {
+                generation: 0,
+                provenance: TokenProvenance::Static,
+            },
+            refresh_failed: false,
+        }))
+    }
+}
+
 #[cfg(test)]
 struct NoAuth;
 
@@ -291,14 +313,34 @@ pub(crate) fn build_metadata_writer(
     else {
         return Ok(None);
     };
-    let Some(creds) = run_options.github_app.as_ref() else {
-        return Ok(None);
-    };
-
     let normalized_url = fabro_github::normalize_repo_origin_url(&git.origin_url);
     if !normalized_url.starts_with("https://") {
         return Ok(None);
     }
+
+    // Forge origins push metadata with the static PAT; GitHub origins keep
+    // the installation-token source.
+    if let Some(forgejo) = run_options
+        .forgejo
+        .as_ref()
+        .filter(|forgejo| fabro_forgejo::is_instance_origin(&normalized_url, &forgejo.instance_url))
+    {
+        let auth = Arc::new(StaticPatAuthProvider {
+            token: SecretString::new(forgejo.creds.token().to_string()),
+        });
+        let writer = RunMetadataWriter::new(
+            normalized_url,
+            meta_branch.clone(),
+            run_options.git_author(),
+            Some(1),
+            run_options.settings.run.meta_branch.push,
+        )?;
+        return Ok(Some(RunMetadataWriterHandle::new(writer, auth)));
+    }
+
+    let Some(creds) = run_options.github_app.as_ref() else {
+        return Ok(None);
+    };
     let Ok((owner, repo)) = fabro_github::parse_github_owner_repo(&normalized_url) else {
         return Ok(None);
     };
@@ -739,6 +781,8 @@ mod tests {
                 run_branch:  None,
                 meta_branch: Some("fabro/meta/test-run".to_string()),
             }),
+
+            forgejo: None,
         }
     }
 

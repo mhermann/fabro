@@ -729,6 +729,8 @@ mod tests {
             branch: "main".to_string(),
             tag:    None,
             sha:    None,
+
+            instance_url: None,
         }
     }
 
@@ -743,6 +745,8 @@ mod tests {
             branch: branch.to_string(),
             tag:    tag.map(str::to_string),
             sha:    sha.map(str::to_string),
+
+            instance_url: None,
         }
     }
 

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::{HeaderValue, header};
+use fabro_types::settings::run::MergeStrategy;
 
 use super::super::{
     ApiError, AppState, CloseRunPullRequestResponse, CreateRunPullRequestRequest, IntoResponse,
@@ -40,17 +41,33 @@ const PULL_REQUEST_CREATION_RETRY_AFTER: Duration = Duration::from_secs(1);
 
 #[expect(
     clippy::disallowed_types,
-    reason = "Pull-request API validates public github.com URLs; these raw URLs are not credential-bearing log output."
+    reason = "Pull-request API validates github.com and instance URLs; these raw URLs are not credential-bearing log output."
 )]
-fn parse_github_owner_repo_from_url(url: &str, kind: &str) -> Result<(String, String), ApiError> {
+fn parse_github_owner_repo_from_url(
+    url: &str,
+    kind: &str,
+    instance_url: Option<&str>,
+) -> Result<(String, String), ApiError> {
     let parsed = fabro_http::Url::parse(url)
         .map_err(|err| ApiError::bad_request(format!("Invalid {kind}: {err}")))?;
     match parsed.host_str() {
         Some("github.com") => {}
+        Some(_)
+            if instance_url
+                .is_some_and(|instance| fabro_forgejo::is_instance_origin(url, instance)) =>
+        {
+            return fabro_forgejo::parse_owner_repo(url, instance_url.unwrap_or_default())
+                .ok_or_else(|| {
+                    ApiError::bad_request(format!("Invalid {kind}: not a repository URL"))
+                });
+        }
         Some(host) => {
             return Err(ApiError::with_code(
                 StatusCode::BAD_REQUEST,
-                format!("Pull request operations support github.com only (got {host})."),
+                format!(
+                    "Pull request operations support github.com and the configured Forgejo/Gitea \
+                     instance only (got {host})."
+                ),
                 "unsupported_host",
             ));
         }
@@ -65,9 +82,21 @@ fn parse_github_owner_repo_from_url(url: &str, kind: &str) -> Result<(String, St
 }
 
 fn pull_request_record_from_link_request(
+    state: &AppState,
     body: &LinkRunPullRequestRequest,
 ) -> Result<PullRequestLink, ApiError> {
-    PullRequestLink::from_github_url(body.html_url.trim()).map_err(|err| {
+    let raw = body.html_url.trim();
+    // A URL on the configured Forgejo/Gitea instance links as a forge pull
+    // request (its `/pulls/{n}` path shape distinguishes it from GitHub).
+    let forgejo_settings = state.forgejo_settings();
+    if forgejo_settings.enabled {
+        if let Some(instance_url) = forgejo_settings.url.as_deref() {
+            if let Ok(record) = PullRequestLink::from_forge_url(raw, instance_url) {
+                return Ok(record);
+            }
+        }
+    }
+    PullRequestLink::from_github_url(raw).map_err(|err| {
         let code = if err.contains("GitHub pull request URL") {
             "unsupported_pull_request_provider"
         } else {
@@ -165,6 +194,52 @@ fn github_coordinates_for_record(record: &PullRequestLink) -> (String, String, u
     (record.owner.clone(), record.repo.clone(), record.number)
 }
 
+/// A stored record's Forgejo credentials when it points at the configured
+/// instance. `None` means the record is a github.com record.
+async fn forgejo_credentials_for_record(
+    state: &AppState,
+    record: &PullRequestLink,
+) -> Option<Result<(String, fabro_forgejo::ForgejoCredentials), ApiError>> {
+    let instance_url = record.instance_url.clone()?;
+    let settings = state.forgejo_settings();
+    if !settings.enabled {
+        return Some(Err(ApiError::with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Forgejo/Gitea integration unavailable on server.",
+            "integration_unavailable",
+        )));
+    }
+    let configured = settings.url.clone().unwrap_or_default();
+    if !instance_url.eq_ignore_ascii_case(&configured) {
+        return Some(Err(ApiError::with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "Pull request belongs to {instance_url}, but the configured instance is {configured}."
+            ),
+            "instance_mismatch",
+        )));
+    }
+    let creds = match state.forgejo_credentials().await {
+        Ok(creds) => creds,
+        Err(err) => {
+            warn!(error = %err, "Forgejo/Gitea integration unavailable on server");
+            return Some(Err(ApiError::with_code(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Forgejo/Gitea integration unavailable on server.",
+                "integration_unavailable",
+            )));
+        }
+    };
+    let Some(creds) = creds else {
+        return Some(Err(ApiError::with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "FORGEJO_TOKEN is not configured -- run fabro install or run fabro secret set FORGEJO_TOKEN",
+            "integration_unavailable",
+        )));
+    };
+    Some(Ok((instance_url, creds)))
+}
+
 async fn load_pull_request_github_context(
     state: &Arc<AppState>,
     id: &RunId,
@@ -193,6 +268,7 @@ pub(in crate::server) struct RunPrInputs<'a> {
 
 impl<'a> RunPrInputs<'a> {
     pub(in crate::server) fn extract(
+        state: &AppState,
         run_state: &'a fabro_store::RunProjection,
         force: bool,
     ) -> Result<Self, ApiError> {
@@ -266,7 +342,16 @@ impl<'a> RunPrInputs<'a> {
             ));
         }
         let normalized_origin = fabro_github::normalize_repo_origin_url(origin_url);
-        parse_github_owner_repo_from_url(&normalized_origin, "repo origin URL")?;
+        let forgejo_settings = state.forgejo_settings();
+        let instance_url = match forgejo_settings.enabled.then_some(forgejo_settings.url) {
+            Some(Some(url)) => Some(url),
+            _ => None,
+        };
+        parse_github_owner_repo_from_url(
+            &normalized_origin,
+            "repo origin URL",
+            instance_url.as_deref(),
+        )?;
         Ok(Self {
             goal: run_spec.graph.goal(),
             base_branch,
@@ -333,7 +418,7 @@ async fn create_run_pull_request(
     {
         return accepted_pull_request_creation_response(&id, creation.clone());
     }
-    if let Err(err) = RunPrInputs::extract(&run_state, body.force) {
+    if let Err(err) = RunPrInputs::extract(state.as_ref(), &run_state, body.force) {
         return err.into_response();
     }
     if let Err(err) = load_server_github_credentials(state.as_ref()).await {
@@ -442,13 +527,107 @@ async fn get_run_pull_request_creation(
     }
 }
 
+/// Merge a stored Forgejo/Gitea pull request through the configured
+/// instance. `None` means the record is a github.com record.
+async fn merge_close_forge_pull_request(
+    state: &AppState,
+    record: &PullRequestLink,
+    method: MergeStrategy,
+) -> Option<Response> {
+    let instance_url = record.instance_url.clone()?;
+    let (_instance_url, creds) = match forgejo_credentials_for_record(state, record).await {
+        Some(Ok(pair)) => pair,
+        Some(Err(err)) => return Some(err.into_response()),
+        None => return None,
+    };
+    let Ok(http_client) = state.http_client() else {
+        return Some(
+            ApiError::with_code(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Forgejo/Gitea integration unavailable on server.",
+                "integration_unavailable",
+            )
+            .into_response(),
+        );
+    };
+    let ctx = fabro_forgejo::ForgejoContext::with_http_client(&creds, &instance_url, http_client);
+    let owner = record.owner.clone();
+    let repo = record.repo.clone();
+    let number = record.number;
+    match fabro_forgejo::merge_pull_request(&ctx, &owner, &repo, number, method).await {
+        Ok(()) => Some(
+            Json(MergeRunPullRequestResponse {
+                number: i64::try_from(number).expect("stored pull request number fits i64"),
+                html_url: record.html_url(),
+                method,
+            })
+            .into_response(),
+        ),
+        Err(fabro_forgejo::PullRequestApiError::NotFound { .. }) => Some(
+            ApiError::with_code(
+                StatusCode::BAD_GATEWAY,
+                format!("Pull request #{number} was deleted on the instance."),
+                "github_not_found",
+            )
+            .into_response(),
+        ),
+        Err(err) => Some(ApiError::new(StatusCode::BAD_GATEWAY, err.to_string()).into_response()),
+    }
+}
+
+/// Close a stored Forgejo/Gitea pull request through the configured
+/// instance. `None` means the record is a github.com record.
+async fn close_forge_pull_request(state: &AppState, record: &PullRequestLink) -> Option<Response> {
+    let instance_url = record.instance_url.clone()?;
+    let (_configured, creds) = match forgejo_credentials_for_record(state, record).await {
+        Some(Ok(pair)) => pair,
+        Some(Err(err)) => return Some(err.into_response()),
+        None => return None,
+    };
+    let http_client = match state.http_client() {
+        Ok(client) => client,
+        Err(err) => {
+            return Some(
+                ApiError::with_code(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("Forgejo/Gitea integration unavailable on server: {err}"),
+                    "integration_unavailable",
+                )
+                .into_response(),
+            );
+        }
+    };
+    let ctx = fabro_forgejo::ForgejoContext::with_http_client(&creds, &instance_url, http_client);
+    let owner = record.owner.clone();
+    let repo = record.repo.clone();
+    let number = record.number;
+    match fabro_forgejo::close_pull_request(&ctx, &owner, &repo, number).await {
+        Ok(()) => Some(
+            Json(CloseRunPullRequestResponse {
+                number:   i64::try_from(number).expect("stored pull request number fits i64"),
+                html_url: record.html_url(),
+            })
+            .into_response(),
+        ),
+        Err(fabro_forgejo::PullRequestApiError::NotFound { .. }) => Some(
+            ApiError::with_code(
+                StatusCode::BAD_GATEWAY,
+                format!("Pull request #{number} was deleted on the instance."),
+                "github_not_found",
+            )
+            .into_response(),
+        ),
+        Err(err) => Some(ApiError::new(StatusCode::BAD_GATEWAY, err.to_string()).into_response()),
+    }
+}
+
 async fn link_run_pull_request(
     RequireRunScoped(id): RequireRunScoped,
     State(state): State<Arc<AppState>>,
     Json(body): Json<LinkRunPullRequestRequest>,
 ) -> Response {
     let _create_guard = state.pull_request_create_locks.lock(id).await;
-    let pull_request = match pull_request_record_from_link_request(&body) {
+    let pull_request = match pull_request_record_from_link_request(&state, &body) {
         Ok(record) => record,
         Err(err) => return err.into_response(),
     };
@@ -503,6 +682,50 @@ async fn get_run_pull_request(
         Ok(record) => record,
         Err(err) => return err.into_response(),
     };
+    // Forge records fetch live details through the configured instance.
+    if record.instance_url.is_some() {
+        let (instance_url, creds) =
+            match forgejo_credentials_for_record(state.as_ref(), &record).await {
+                None => return ApiError::not_found("Run not found.").into_response(),
+                Some(Err(err)) => return err.into_response(),
+                Some(Ok(pair)) => pair,
+            };
+        let http_client = match state.http_client() {
+            Ok(client) => client,
+            Err(err) => {
+                return ApiError::with_code(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("Forgejo/Gitea integration unavailable on server: {err}"),
+                    "integration_unavailable",
+                )
+                .into_response();
+            }
+        };
+        let ctx =
+            fabro_forgejo::ForgejoContext::with_http_client(&creds, &instance_url, http_client);
+        let owner = record.owner.clone();
+        let repo = record.repo.clone();
+        let number = record.number;
+        return match fabro_forgejo::get_pull_request(&ctx, &owner, &repo, number).await {
+            Ok(details) => Json(available_pull_request_response(record, details)).into_response(),
+            Err(fabro_forgejo::PullRequestApiError::NotFound { .. }) => {
+                warn!("Returning stored pull request because the instance no longer has the PR");
+                Json(unavailable_pull_request_response(
+                    record,
+                    fabro_types::PullRequestDetailsUnavailableReason::NotFound,
+                ))
+                .into_response()
+            }
+            Err(err) => {
+                warn!(error = %err, "Returning stored pull request without live instance details");
+                Json(unavailable_pull_request_response(
+                    record,
+                    fabro_types::PullRequestDetailsUnavailableReason::FetchFailed,
+                ))
+                .into_response()
+            }
+        };
+    }
     let (owner, repo, number) = github_coordinates_for_record(&record);
     let creds = match load_server_github_credentials(state.as_ref()).await {
         Ok(creds) => creds,
@@ -557,6 +780,12 @@ async fn merge_run_pull_request(
         Ok(ctx) => ctx,
         Err(err) => return err.into_response(),
     };
+    // Forge records merge through the configured instance.
+    if let Some(result) =
+        merge_close_forge_pull_request(state.as_ref(), &ctx.record, body.method).await
+    {
+        return result;
+    }
     let github = match server_github_context(state.as_ref(), &ctx.creds) {
         Ok(github) => github,
         Err(err) => return err.into_response(),
@@ -587,6 +816,10 @@ async fn close_run_pull_request(
         Ok(ctx) => ctx,
         Err(err) => return err.into_response(),
     };
+    // Forge records close through the configured instance.
+    if let Some(result) = close_forge_pull_request(state.as_ref(), &ctx.record).await {
+        return result;
+    }
     let github = match server_github_context(state.as_ref(), &ctx.creds) {
         Ok(github) => github,
         Err(err) => return err.into_response(),

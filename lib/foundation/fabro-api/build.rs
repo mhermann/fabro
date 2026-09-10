@@ -328,6 +328,11 @@ fn main() {
             &[],
         ),
         (
+            "ForgejoIntegrationSettings",
+            "fabro_types::settings::server::ForgejoIntegrationSettings",
+            &[],
+        ),
+        (
             "GithubIntegrationStrategy",
             "fabro_types::settings::server::GithubIntegrationStrategy",
             &[],

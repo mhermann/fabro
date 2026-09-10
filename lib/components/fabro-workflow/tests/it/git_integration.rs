@@ -163,6 +163,8 @@ fn test_run_options(run_dir: &Path) -> RunOptions {
         base_branch:      None,
         display_base_sha: None,
         workflow_slug:    None,
+
+        forgejo: None,
     }
 }
 

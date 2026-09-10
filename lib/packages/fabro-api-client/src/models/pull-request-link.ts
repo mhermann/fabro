@@ -15,14 +15,18 @@
 
 
 /**
- * Minimal GitHub pull request link associated with a run.
+ * Minimal pull request link associated with a run.
  */
 export interface PullRequestLink {
     'owner': string;
     'repo': string;
     'number': number;
     /**
-     * Computed GitHub web URL for the pull request.
+     * Computed web URL for the pull request.
      */
     'html_url': string;
+    /**
+     * Base URL of the Forgejo/Gitea instance when the pull request lives on a self-hosted instance; absent for github.com.
+     */
+    'instance_url'?: string;
 }

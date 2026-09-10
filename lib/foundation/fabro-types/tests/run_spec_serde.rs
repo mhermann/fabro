@@ -30,6 +30,8 @@ fn run_spec_round_trips_templated_settings() {
             branch: "main".to_string(),
             tag:    None,
             sha:    Some("abc123".to_string()),
+
+            instance_url: None,
         })),
         automation:          Some(AutomationRef {
             id:              "nightly".to_string(),

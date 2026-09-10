@@ -96,6 +96,58 @@ fn bridge_entries(targets: &[&GitHubRepositorySlug], https_base: &str) -> Vec<(S
     entries
 }
 
+/// Merge the Forgejo/Gitea bridging entries into `env` for a run whose
+/// origin lives on the configured instance: a host-scoped credential helper
+/// reading `$FORGEJO_TOKEN`, plus SSH→HTTPS rewrites for the repository's
+/// SSH spellings. Same append-after-user-overlay rules as the GitHub bridge.
+pub(crate) fn merge_forge_bridge_env(
+    env: &mut HashMap<String, String>,
+    instance_url: &str,
+    origin_url: &str,
+) -> Result<(), Error> {
+    let start = user_git_config_count(env)?;
+    let entries = forge_bridge_entries(instance_url, origin_url);
+    let total = start + entries.len();
+    for (offset, (key, value)) in entries.into_iter().enumerate() {
+        let index = start + offset;
+        env.insert(format!("GIT_CONFIG_KEY_{index}"), key);
+        env.insert(format!("GIT_CONFIG_VALUE_{index}"), value);
+    }
+    env.insert("GIT_CONFIG_COUNT".to_string(), total.to_string());
+    env.entry("GIT_TERMINAL_PROMPT".to_string())
+        .or_insert_with(|| "0".to_string());
+    Ok(())
+}
+
+/// The Forgejo bridge's Git config entries in order: the instance-host
+/// credential helper, then the two SSH spellings of the repository.
+fn forge_bridge_entries(instance_url: &str, origin_url: &str) -> Vec<(String, String)> {
+    let normalized_instance = fabro_forgejo::normalize_origin_url(instance_url);
+    let normalized_origin = fabro_forgejo::normalize_origin_url(origin_url);
+    let Some((owner, repo)) =
+        fabro_forgejo::parse_owner_repo(&normalized_origin, &normalized_instance)
+    else {
+        return Vec::new();
+    };
+    let helper_key = fabro_forgejo::forgejo_credential_helper_key(instance_url);
+    let host =
+        fabro_forgejo::instance_host(instance_url).unwrap_or_else(|| normalized_instance.clone());
+    vec![
+        (
+            helper_key,
+            fabro_forgejo::FORGEJO_CREDENTIAL_HELPER.to_string(),
+        ),
+        (
+            format!("url.{normalized_instance}.insteadOf"),
+            format!("git@{host}:{owner}/{repo}"),
+        ),
+        (
+            format!("url.{normalized_instance}.insteadOf"),
+            format!("ssh://git@{host}/{owner}/{repo}"),
+        ),
+    ]
+}
+
 /// Validate and measure a user-provided `GIT_CONFIG_COUNT` overlay so the
 /// bridge appends after it. Orphaned `GIT_CONFIG_KEY_n` entries without a
 /// count are inert to Git and are treated as absent.
@@ -179,6 +231,70 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&fixture, root.join(owner_repo)).unwrap();
         format!("file://{}/", root.display())
+    }
+
+    #[test]
+    fn forge_bridge_entries_cover_helper_and_both_ssh_spellings() {
+        let entries = forge_bridge_entries(
+            "https://forgejo.example.com",
+            "git@forgejo.example.com:acme/widgets.git",
+        );
+        assert_eq!(entries.len(), 3);
+        assert_eq!(
+            entries[0].0,
+            "credential.https://forgejo.example.com.helper"
+        );
+        assert_eq!(
+            entries[1],
+            (
+                "url.https://forgejo.example.com.insteadOf".to_string(),
+                "git@forgejo.example.com:acme/widgets".to_string()
+            )
+        );
+        assert_eq!(
+            entries[2],
+            (
+                "url.https://forgejo.example.com.insteadOf".to_string(),
+                "ssh://git@forgejo.example.com/acme/widgets".to_string()
+            )
+        );
+        // No secrets anywhere in the generated values.
+        for (key, value) in &entries {
+            assert!(!value.contains("token-value"), "{key}={value}");
+        }
+    }
+
+    #[test]
+    fn forge_bridge_entries_are_empty_for_non_forge_origins() {
+        let entries = forge_bridge_entries(
+            "https://forgejo.example.com",
+            "https://github.com/acme/widgets.git",
+        );
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn forge_bridge_merges_after_user_overlay() {
+        let mut env = HashMap::from([
+            ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+            ("GIT_CONFIG_KEY_0".to_string(), "user.name".to_string()),
+            ("GIT_CONFIG_VALUE_0".to_string(), "Overlay User".to_string()),
+        ]);
+        merge_forge_bridge_env(
+            &mut env,
+            "https://forgejo.example.com",
+            "https://forgejo.example.com/acme/widgets",
+        )
+        .unwrap();
+        assert_eq!(env.get("GIT_CONFIG_COUNT").map(String::as_str), Some("4"));
+        assert_eq!(
+            env.get("GIT_CONFIG_KEY_0").map(String::as_str),
+            Some("user.name")
+        );
+        assert_eq!(
+            env.get("GIT_CONFIG_KEY_1").map(String::as_str),
+            Some("credential.https://forgejo.example.com.helper")
+        );
     }
 
     #[test]

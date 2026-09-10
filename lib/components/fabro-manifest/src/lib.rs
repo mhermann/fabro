@@ -326,17 +326,22 @@ pub struct GitRunTargetObservation {
 /// GitHub run target. For a valid target, this operation may contact the
 /// remote and may make one noninteractive best-effort push of the attached
 /// branch so clone-based execution can resolve the observed commit.
+///
+/// `forge_instance_url` is the configured Forgejo/Gitea instance, if any:
+/// origins on that host produce forge run targets carrying the instance URL.
 #[must_use]
 pub fn observe_git_run_target(
     repo_path: &Path,
     configured_repo_origin_url: Option<&str>,
+    forge_instance_url: Option<&str>,
 ) -> Option<GitRunTargetObservation> {
     let local = inspect_local_git(repo_path, configured_repo_origin_url)?;
     let legacy_git_context = local.legacy_git_context;
-    let mut run_target = github_run_target(
+    let mut run_target = run_target_for_origin(
         &legacy_git_context.origin_url,
         &legacy_git_context.branch,
         None,
+        forge_instance_url,
     );
     if let Some(target) = run_target.as_mut() {
         let publish_status = publish_manifest_branch_best_effort(
@@ -414,6 +419,49 @@ fn build_legacy_git_context(
     Some(local.legacy_git_context)
 }
 
+/// Classify an observed origin into a run target.
+///
+/// `github.com` origins take the GitHub path. Origins on the configured
+/// Forgejo/Gitea instance produce a forge target carrying the instance URL.
+/// Every other host has no run-target representation.
+fn run_target_for_origin(
+    origin_url: &str,
+    branch: &str,
+    sha: Option<String>,
+    forge_instance_url: Option<&str>,
+) -> Option<GitRunTarget> {
+    if let Some(instance_url) = forge_instance_url {
+        if fabro_forgejo::is_instance_origin(origin_url, instance_url) {
+            return forge_run_target(origin_url, branch, sha, instance_url);
+        }
+    }
+    github_run_target(origin_url, branch, sha)
+}
+
+fn forge_run_target(
+    origin_url: &str,
+    branch: &str,
+    sha: Option<String>,
+    instance_url: &str,
+) -> Option<GitRunTarget> {
+    let (owner, repository) = fabro_forgejo::parse_owner_repo(origin_url, instance_url)?;
+    // The GitHub slug grammar is shared across forges (see GitRunTarget docs).
+    let slug = GitHubRepositorySlug::try_new(&format!("{owner}/{repository}"))?;
+    let validated = RunTarget::Git(GitRunTarget {
+        repo: slug.to_string(),
+        branch: branch.to_owned(),
+        tag: None,
+        sha,
+        instance_url: Some(instance_url.to_string()),
+    })
+    .validate()
+    .ok()?;
+    let RunTarget::Git(target) = validated.target else {
+        unreachable!("a validated Git target must remain a Git target")
+    };
+    Some(target)
+}
+
 fn github_run_target(origin_url: &str, branch: &str, sha: Option<String>) -> Option<GitRunTarget> {
     let (owner, repository) = fabro_github::parse_github_owner_repo(origin_url).ok()?;
     let slug = GitHubRepositorySlug::try_new(&format!("{owner}/{repository}"))?;
@@ -422,6 +470,7 @@ fn github_run_target(origin_url: &str, branch: &str, sha: Option<String>) -> Opt
         branch: branch.to_owned(),
         tag: None,
         sha,
+        instance_url: None,
     })
     .validate()
     .ok()?;
@@ -1812,7 +1861,8 @@ exit 1
         run_git(&workspace, &["push", "origin", "feature"]);
 
         let observation =
-            observe_git_run_target(&workspace, Some("https://github.com/acme/widgets")).unwrap();
+            observe_git_run_target(&workspace, Some("https://github.com/acme/widgets"), None)
+                .unwrap();
         let target = observation.run_target.as_ref().unwrap();
         let legacy = &observation.legacy_git_context;
 
@@ -1822,6 +1872,102 @@ exit 1
         assert_eq!(target.sha, legacy.sha);
         assert_eq!(legacy.dirty, DirtyStatus::Clean);
         assert_eq!(legacy.origin_url, "https://github.com/acme/widgets");
+    }
+
+    #[test]
+    fn observes_forge_origin_as_a_forge_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let bare_origin = init_bare_origin(temp.path());
+        init_git_repo(
+            &workspace,
+            "feature",
+            "https://forgejo.example.com/acme/widgets.git",
+        );
+        let local_url = format!("file://{}", bare_origin.display());
+        run_git(&workspace, &[
+            "config",
+            &format!("url.{local_url}.insteadOf"),
+            "https://forgejo.example.com/acme/widgets.git",
+        ]);
+        run_git(&workspace, &["push", "origin", "feature"]);
+
+        let observation = observe_git_run_target(
+            &workspace,
+            Some("https://forgejo.example.com/acme/widgets"),
+            Some("https://forgejo.example.com"),
+        )
+        .unwrap();
+        let target = observation.run_target.as_ref().unwrap();
+
+        assert_eq!(target.repo, "acme/widgets");
+        assert_eq!(target.branch, "feature");
+        assert_eq!(
+            target.instance_url.as_deref(),
+            Some("https://forgejo.example.com")
+        );
+        assert_eq!(target.sha, observation.legacy_git_context.sha);
+    }
+
+    #[test]
+    fn forge_configured_github_origin_still_produces_a_github_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let bare_origin = init_bare_origin(temp.path());
+        init_git_repo(&workspace, "feature", "https://github.com/acme/widgets");
+        let local_url = format!("file://{}", bare_origin.display());
+        run_git(&workspace, &[
+            "config",
+            &format!("url.{local_url}.insteadOf"),
+            "https://github.com/acme/widgets",
+        ]);
+        run_git(&workspace, &["push", "origin", "feature"]);
+
+        let observation = observe_git_run_target(
+            &workspace,
+            Some("https://github.com/acme/widgets"),
+            Some("https://forgejo.example.com"),
+        )
+        .unwrap();
+        let target = observation.run_target.as_ref().unwrap();
+
+        assert_eq!(target.repo, "acme/widgets");
+        assert_eq!(target.instance_url, None);
+    }
+
+    #[test]
+    fn forge_origin_with_mismatched_instance_produces_no_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let bare_origin = init_bare_origin(temp.path());
+        init_git_repo(
+            &workspace,
+            "feature",
+            "https://gitea.example.com/acme/widgets",
+        );
+        let local_url = format!("file://{}", bare_origin.display());
+        run_git(&workspace, &[
+            "config",
+            &format!("url.{local_url}.insteadOf"),
+            "https://gitea.example.com/acme/widgets",
+        ]);
+        run_git(&workspace, &["push", "origin", "feature"]);
+
+        let observation = observe_git_run_target(
+            &workspace,
+            Some("https://gitea.example.com/acme/widgets"),
+            Some("https://forgejo.example.com"),
+        )
+        .unwrap();
+
+        assert!(observation.run_target.is_none());
+        assert_eq!(
+            observation.legacy_git_context.origin_url,
+            "https://gitea.example.com/acme/widgets"
+        );
     }
 
     #[test]
@@ -1839,7 +1985,8 @@ exit 1
         ]);
 
         let observation =
-            observe_git_run_target(&workspace, Some("https://github.com/acme/widgets")).unwrap();
+            observe_git_run_target(&workspace, Some("https://github.com/acme/widgets"), None)
+                .unwrap();
         let target = observation.run_target.as_ref().unwrap();
 
         assert_eq!(target.sha, observation.legacy_git_context.sha);
@@ -1874,7 +2021,8 @@ exit 1
         mark_origin_branch_synced(&workspace, "feature");
 
         let observation =
-            observe_git_run_target(&workspace, Some("https://github.com/acme/widgets")).unwrap();
+            observe_git_run_target(&workspace, Some("https://github.com/acme/widgets"), None)
+                .unwrap();
         let target = observation.run_target.as_ref().unwrap();
 
         assert_eq!(target.sha, None);
@@ -1899,7 +2047,7 @@ exit 1
             std::fs::create_dir_all(&workspace).unwrap();
             init_git_repo(&workspace, branch, "https://github.com/acme/widgets");
 
-            let observation = observe_git_run_target(&workspace, None).unwrap();
+            let observation = observe_git_run_target(&workspace, None, None).unwrap();
 
             assert_eq!(observation.run_target, None, "branch {branch}");
             assert_eq!(observation.legacy_git_context.branch, branch);
@@ -1923,9 +2071,12 @@ exit 1
             "https://github.com/acme/widgets",
         ]);
 
-        let failed =
-            observe_git_run_target(&failed_workspace, Some("https://github.com/acme/widgets"))
-                .unwrap();
+        let failed = observe_git_run_target(
+            &failed_workspace,
+            Some("https://github.com/acme/widgets"),
+            None,
+        )
+        .unwrap();
         assert_eq!(failed.run_target.as_ref().unwrap().sha, None);
         assert!(failed.legacy_git_context.sha.is_some());
         assert_eq!(failed.legacy_git_context.dirty, DirtyStatus::Clean);
@@ -1942,6 +2093,7 @@ exit 1
         let mismatched = observe_git_run_target(
             &mismatched_workspace,
             Some("https://github.com/acme/configured"),
+            None,
         )
         .unwrap();
         let target = mismatched.run_target.as_ref().unwrap();
@@ -1959,7 +2111,7 @@ exit 1
         init_git_repo(&workspace, "feature", bare_origin.to_str().unwrap());
         std::fs::write(workspace.join("dirty.txt"), "dirty").unwrap();
 
-        let unsupported = observe_git_run_target(&workspace, None).unwrap();
+        let unsupported = observe_git_run_target(&workspace, None, None).unwrap();
         assert!(unsupported.run_target.is_none());
         assert_eq!(unsupported.legacy_git_context.dirty, DirtyStatus::Dirty);
         assert_eq!(
@@ -1969,15 +2121,15 @@ exit 1
 
         let not_repo = temp.path().join("not-repo");
         std::fs::create_dir_all(&not_repo).unwrap();
-        assert!(observe_git_run_target(&not_repo, None).is_none());
+        assert!(observe_git_run_target(&not_repo, None, None).is_none());
 
         let unborn = temp.path().join("unborn");
         std::fs::create_dir_all(&unborn).unwrap();
         run_git(&unborn, &["init", "--quiet"]);
-        assert!(observe_git_run_target(&unborn, None).is_none());
+        assert!(observe_git_run_target(&unborn, None, None).is_none());
 
         run_git(&workspace, &["checkout", "--detach", "--quiet"]);
-        assert!(observe_git_run_target(&workspace, None).is_none());
+        assert!(observe_git_run_target(&workspace, None, None).is_none());
     }
 
     fn init_git_repo(path: &Path, branch: &str, origin_url: &str) {

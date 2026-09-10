@@ -27,10 +27,11 @@ async fn test_database() -> (tempfile::TempDir, Database) {
 
 fn target() -> RunTarget {
     RunTarget::Git(GitRunTarget {
-        repo:   "fabro-sh/fabro".to_string(),
-        branch: "main".to_string(),
-        tag:    None,
-        sha:    None,
+        repo:         "fabro-sh/fabro".to_string(),
+        branch:       "main".to_string(),
+        tag:          None,
+        sha:          None,
+        instance_url: None,
     })
 }
 
@@ -48,10 +49,11 @@ fn workflow_source(
     sha: Option<&str>,
 ) -> AutomationGitWorkflowSource {
     AutomationGitWorkflowSource {
-        repo:   "fabro-sh/workflows".to_string(),
-        branch: branch.to_string(),
-        tag:    tag.map(str::to_string),
-        sha:    sha.map(str::to_string),
+        repo:         "fabro-sh/workflows".to_string(),
+        branch:       branch.to_string(),
+        tag:          tag.map(str::to_string),
+        sha:          sha.map(str::to_string),
+        instance_url: None,
     }
 }
 

@@ -30,10 +30,11 @@ fn run_created_props_round_trip_templated_settings() {
         workflow_slug:       Some("demo".to_string()),
         workflow_version_id: Some(test_workflow_version_id()),
         target:              Some(RunTarget::Git(GitRunTarget {
-            repo:   "fabro-sh/fabro".to_string(),
-            branch: "main".to_string(),
-            tag:    None,
-            sha:    None,
+            repo:         "fabro-sh/fabro".to_string(),
+            branch:       "main".to_string(),
+            tag:          None,
+            sha:          None,
+            instance_url: None,
         })),
         automation:          Some(AutomationRef {
             id:              "nightly".to_string(),

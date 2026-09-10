@@ -154,6 +154,7 @@ models/failure-reason.ts
 models/file-checkpoint.ts
 models/file-diff.ts
 models/folder-run-target.ts
+models/forgejo-integration-settings.ts
 models/fork-request.ts
 models/fork-response.ts
 models/fork-source-ref.ts
@@ -169,6 +170,10 @@ models/hook-event.ts
 models/idp-identity.ts
 models/index.ts
 models/install-finish-response.ts
+models/install-forgejo-input.ts
+models/install-forgejo-summary.ts
+models/install-forgejo-test-input.ts
+models/install-forgejo-test-response.ts
 models/install-github-app-manifest-input.ts
 models/install-github-app-manifest-response.ts
 models/install-github-app-owner.ts

@@ -94,9 +94,10 @@ fn validate_session_secret(value: &str) -> Result<(), String> {
 }
 
 pub async fn run_all(state: &AppState) -> DiagnosticsReport {
-    let (llm, github, docker_sandbox, cloud_sandbox, web_search, crypto) = tokio::join!(
+    let (llm, github, forgejo, docker_sandbox, cloud_sandbox, web_search, crypto) = tokio::join!(
         check_llm_providers(state),
         check_github_app(state),
+        check_forgejo(state),
         check_docker_sandbox(state),
         check_cloud_sandbox(state),
         check_web_search(state),
@@ -108,7 +109,14 @@ pub async fn run_all(state: &AppState) -> DiagnosticsReport {
         sections: vec![
             CheckSection {
                 title:  "Credentials".to_string(),
-                checks: vec![llm, github, docker_sandbox, cloud_sandbox, web_search],
+                checks: vec![
+                    llm,
+                    github,
+                    forgejo,
+                    docker_sandbox,
+                    cloud_sandbox,
+                    web_search,
+                ],
             },
             CheckSection {
                 title:  "Configuration".to_string(),
@@ -338,6 +346,82 @@ fn short_error_line(rendered: &str) -> String {
         format!("{cutoff}...")
     } else {
         first.to_string()
+    }
+}
+
+/// Best-effort Forgejo/Gitea health: settings present, token resolvable,
+/// and the instance answers `/api/v1/version`.
+async fn check_forgejo(state: &AppState) -> CheckResult {
+    let settings = state.forgejo_settings();
+    if !settings.enabled {
+        return CheckResult {
+            name:        "Forgejo/Gitea".to_string(),
+            status:      CheckStatus::Pass,
+            summary:     "disabled".to_string(),
+            details:     Vec::new(),
+            remediation: None,
+        };
+    }
+    let Some(instance_url) = settings.url.clone() else {
+        return CheckResult {
+            name:        "Forgejo/Gitea".to_string(),
+            status:      CheckStatus::Error,
+            summary:     "enabled without an instance URL".to_string(),
+            details:     Vec::new(),
+            remediation: Some("Set server.integrations.forgejo.url".to_string()),
+        };
+    };
+    let creds = match state.forgejo_credentials().await {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
+            return CheckResult {
+                name:        "Forgejo/Gitea".to_string(),
+                status:      CheckStatus::Error,
+                summary:     "FORGEJO_TOKEN is not configured".to_string(),
+                details:     vec![CheckDetail::new(format!("instance: {instance_url}"))],
+                remediation: Some(
+                    "Run `fabro install` or `fabro secret set FORGEJO_TOKEN`".to_string(),
+                ),
+            };
+        }
+        Err(err) => {
+            return CheckResult {
+                name:        "Forgejo/Gitea".to_string(),
+                status:      CheckStatus::Error,
+                summary:     "failed to resolve FORGEJO_TOKEN".to_string(),
+                details:     vec![CheckDetail::new(format!("{err:#}"))],
+                remediation: Some("Run `fabro secret set FORGEJO_TOKEN`".to_string()),
+            };
+        }
+    };
+    let ctx = fabro_forgejo::ForgejoContext::new(&creds, &instance_url);
+    let client = match state.http_client() {
+        Ok(client) => client,
+        Err(err) => {
+            return CheckResult {
+                name:        "Forgejo/Gitea".to_string(),
+                status:      CheckStatus::Error,
+                summary:     "failed to build HTTP client".to_string(),
+                details:     vec![CheckDetail::new(err.to_string())],
+                remediation: None,
+            };
+        }
+    };
+    match fabro_forgejo::server_version_with_client(&client, &ctx).await {
+        Ok(version) => CheckResult {
+            name:        "Forgejo/Gitea".to_string(),
+            status:      CheckStatus::Pass,
+            summary:     format!("connected (instance {version})"),
+            details:     vec![CheckDetail::new(format!("instance: {instance_url}"))],
+            remediation: None,
+        },
+        Err(err) => CheckResult {
+            name:        "Forgejo/Gitea".to_string(),
+            status:      CheckStatus::Error,
+            summary:     "instance unreachable or token invalid".to_string(),
+            details:     vec![CheckDetail::new(format!("{err:#}"))],
+            remediation: Some("Check the instance URL and FORGEJO_TOKEN validity".to_string()),
+        },
     }
 }
 

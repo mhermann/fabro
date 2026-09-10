@@ -18,10 +18,11 @@ fn run_intent_round_trips_the_openapi_shape() {
     let intent = RunIntent {
         workflow_version_id: test_support::test_workflow_version_id(),
         target:              RunTarget::Git(GitRunTarget {
-            repo:   "fabro-sh/fabro".to_string(),
-            branch: "feature/run-intent".to_string(),
-            tag:    Some("v1.2.3".to_string()),
-            sha:    Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+            repo:         "fabro-sh/fabro".to_string(),
+            branch:       "feature/run-intent".to_string(),
+            tag:          Some("v1.2.3".to_string()),
+            sha:          Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+            instance_url: None,
         }),
         args:                RunIntentArgs {
             model:            Some("gpt-5.6-sol".to_string()),
@@ -47,6 +48,33 @@ fn run_intent_round_trips_the_openapi_shape() {
     assert_eq!(value["args"]["dry_run"], false);
     assert_eq!(value["args"]["auto_approve"], true);
     assert_eq!(value["args"]["preserve_sandbox"], false);
+    assert_eq!(serde_json::to_value(api).unwrap(), value);
+}
+
+#[test]
+fn forge_run_intent_round_trips_the_openapi_shape() {
+    let intent = RunIntent {
+        workflow_version_id: test_support::test_workflow_version_id(),
+        target:              RunTarget::Git(GitRunTarget {
+            repo:         "acme/widgets".to_string(),
+            branch:       "main".to_string(),
+            tag:          None,
+            sha:          None,
+            instance_url: Some("https://forgejo.example.com".to_string()),
+        }),
+        args:                RunIntentArgs::default(),
+        environment_id:      Some("default".to_string()),
+        parent_id:           None,
+        title:               None,
+        goal:                None,
+    };
+
+    let value = serde_json::to_value(&intent).unwrap();
+    assert_eq!(
+        value["target"]["instance_url"],
+        "https://forgejo.example.com"
+    );
+    let api: ApiRunIntent = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(api).unwrap(), value);
 }
 

@@ -2,6 +2,7 @@ use std::any::{TypeId, type_name};
 
 use fabro_api::types::{
     LogDestination as ApiLogDestination, ObjectStoreSettings as ApiObjectStoreSettings,
+    ServerIntegrationsSettings as ApiServerIntegrationsSettings,
     ServerNamespace as ApiServerNamespace,
     ServerSandboxProviderSettings as ApiServerSandboxProviderSettings,
     ServerSandboxProvidersSettings as ApiServerSandboxProvidersSettings,
@@ -11,8 +12,8 @@ use fabro_config::ServerSettingsBuilder;
 use fabro_types::ServerSettings;
 use fabro_types::settings::ServerNamespace;
 use fabro_types::settings::server::{
-    LogDestination, ObjectStoreSettings, ServerSandboxProviderSettings,
-    ServerSandboxProvidersSettings, ServerSandboxSettings,
+    ForgejoIntegrationSettings, LogDestination, ObjectStoreSettings, ServerIntegrationsSettings,
+    ServerSandboxProviderSettings, ServerSandboxProvidersSettings, ServerSandboxSettings,
 };
 
 #[test]
@@ -24,6 +25,45 @@ fn server_settings_family_reuses_domain_types() {
     assert_same_type::<ApiServerSandboxSettings, ServerSandboxSettings>();
     assert_same_type::<ApiServerSandboxProvidersSettings, ServerSandboxProvidersSettings>();
     assert_same_type::<ApiServerSandboxProviderSettings, ServerSandboxProviderSettings>();
+}
+
+#[test]
+fn forgejo_integration_settings_shares_the_integrations_type() {
+    // The whole integrations object is a shared domain type, so the forgejo
+    // settings ride along without a parallel generated type.
+    assert_same_type::<ApiServerIntegrationsSettings, ServerIntegrationsSettings>();
+}
+
+#[test]
+fn forgejo_integration_settings_json_matches_openapi_shape() {
+    let settings = ServerSettingsBuilder::from_toml(
+        r#"
+_version = 1
+
+[server.auth]
+methods = ["dev-token"]
+
+[server.integrations.forgejo]
+url = "https://forgejo.example.com"
+"#,
+    )
+    .expect("settings should resolve");
+
+    let json = serde_json::to_value(&settings).expect("server settings should serialize");
+    assert_eq!(json["server"]["integrations"]["forgejo"]["enabled"], true);
+    assert_eq!(
+        json["server"]["integrations"]["forgejo"]["url"],
+        "https://forgejo.example.com"
+    );
+
+    let forgejo: ForgejoIntegrationSettings =
+        serde_json::from_value(json["server"]["integrations"]["forgejo"].clone())
+            .expect("forgejo integration settings should deserialize");
+    assert_eq!(forgejo, settings.server.integrations.forgejo);
+
+    let round_trip: ApiServerSettings =
+        serde_json::from_value(json).expect("server settings should deserialize");
+    assert_eq!(round_trip, settings);
 }
 
 #[test]

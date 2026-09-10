@@ -524,6 +524,80 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /install/forgejo/test:
+    post:
+      operationId: testInstallForgejo
+      tags: [Install]
+      summary: Validate install Forgejo/Gitea credentials
+      description: Validates a Forgejo/Gitea instance URL and personal access token without persisting them. Requires the one-time install token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstallForgejoTestInput"
+      responses:
+        "200":
+          description: Forgejo/Gitea credentials validated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstallForgejoTestResponse"
+        "401":
+          description: Invalid or missing install token
+          headers:
+            x-request-id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Forgejo/Gitea credential validation failed
+          headers:
+            x-request-id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /install/forgejo:
+    put:
+      operationId: putInstallForgejo
+      tags: [Install]
+      summary: Save install Forgejo/Gitea settings
+      description: Records the Forgejo/Gitea instance URL and personal access token chosen during the browser install. Requires the one-time install token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstallForgejoInput"
+      responses:
+        "204":
+          description: Forgejo/Gitea settings recorded
+        "401":
+          description: Invalid or missing install token
+          headers:
+            x-request-id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Invalid install input
+          headers:
+            x-request-id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /install/finish:
     post:
       operationId: finishInstall
@@ -5646,6 +5720,30 @@ paths:
               schema:
                 $ref: "#/components/schemas/RepoCheckResponse"
 
+  /api/v1/repos/forgejo/{owner}/{name}:
+    get:
+      operationId: getForgejoRepo
+      tags: [Repos]
+      summary: Check server access to a Forgejo/Gitea repository
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Repository access details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RepoCheckResponse"
+
   # ── Models ───────────────────────────────────────────────────────────
 
   /api/v1/models:
@@ -6417,6 +6515,10 @@ components:
           oneOf:
             - $ref: "#/components/schemas/InstallGithubSummary"
             - type: "null"
+        forgejo:
+          oneOf:
+            - $ref: "#/components/schemas/InstallForgejoSummary"
+            - type: "null"
         prefill:
           $ref: "#/components/schemas/InstallPrefill"
 
@@ -6705,6 +6807,60 @@ components:
         slug:
           type: string
         allowed_username:
+          type: string
+
+    InstallForgejoTestInput:
+      description: Input for install-time Forgejo/Gitea credential validation.
+      type: object
+      required:
+        - url
+        - token
+      properties:
+        url:
+          type: string
+          format: uri
+        token:
+          type: string
+
+    InstallForgejoTestResponse:
+      description: Successful response from install-time Forgejo/Gitea credential validation.
+      type: object
+      required:
+        - username
+        - version
+      properties:
+        username:
+          type: string
+        version:
+          type: string
+
+    InstallForgejoInput:
+      description: Forgejo/Gitea instance and personal access token chosen during browser install.
+      type: object
+      required:
+        - url
+        - token
+        - username
+      properties:
+        url:
+          type: string
+          format: uri
+        token:
+          type: string
+        username:
+          type: string
+
+    InstallForgejoSummary:
+      description: Redacted summary of the Forgejo/Gitea install selected during browser install.
+      type: object
+      required:
+        - url
+        - username
+      properties:
+        url:
+          type: string
+          format: uri
+        username:
           type: string
 
     InstallFinishResponse:
@@ -9443,9 +9599,12 @@ components:
 
     GitRunTarget:
       description: >-
-        Public github.com repository target. The branch names the attached
-        working branch. An optional tag selects a release at worker start, and
-        an optional exact SHA is authoritative when both are present.
+        Git repository target. The branch names the attached working branch.
+        An optional tag selects a release at worker start, and an optional
+        exact SHA is authoritative when both are present. Local runs from a
+        checkout on the configured Forgejo/Gitea instance carry
+        `instance_url`; automations and other server-submitted targets remain
+        github.com-only.
       type: object
       additionalProperties: false
       required:
@@ -9458,7 +9617,7 @@ components:
           enum: [git]
         repo:
           type: string
-          description: GitHub repository slug in `owner/name` form.
+          description: Repository slug in `owner/name` form.
           example: acme/my-app
         branch:
           type: string
@@ -9479,6 +9638,12 @@ components:
             Optional exact commit. The server lowercase-normalizes its syntax
             but does not resolve it, prove branch ancestry, or prove that it
             matches an accompanying tag. When present, this exact commit wins.
+        instance_url:
+          type: string
+          format: uri
+          description: >-
+            Base URL of the configured Forgejo/Gitea instance for locally
+            observed targets on that instance. Absent means github.com.
 
     NoneRunTarget:
       description: >-
@@ -12574,7 +12739,7 @@ components:
           example: "Stage 'apply-changes' exceeded maximum retries."
 
     PullRequestLink:
-      description: Minimal GitHub pull request link associated with a run.
+      description: Minimal pull request link associated with a run.
       type: object
       required:
         - owner
@@ -12594,8 +12759,13 @@ components:
         html_url:
           type: string
           format: uri
-          description: Computed GitHub web URL for the pull request.
+          description: Computed web URL for the pull request.
           example: https://github.com/fabro-sh/fabro/pull/123
+        instance_url:
+          type: string
+          format: uri
+          description: Base URL of the Forgejo/Gitea instance when the pull request lives on a self-hosted instance; absent for github.com.
+          example: https://forgejo.example.com
 
     PullRequest:
       description: Stored pull request link plus optional live GitHub details.
@@ -12799,7 +12969,7 @@ components:
           type: ["string", "null"]
 
     LinkRunPullRequestRequest:
-      description: Request body for linking an existing GitHub pull request to a run.
+      description: Request body for linking an existing GitHub or Forgejo/Gitea pull request to a run.
       type: object
       required:
         - html_url
@@ -12807,7 +12977,7 @@ components:
         html_url:
           type: string
           format: uri
-          description: GitHub pull request URL to associate with the run. Must use the form `https://github.com/{owner}/{repo}/pull/{number}`.
+          description: Pull request URL to associate with the run. GitHub URLs must use `https://github.com/{owner}/{repo}/pull/{number}`; Forgejo/Gitea URLs must use `{instance}/{owner}/{repo}/pulls/{number}` on the configured instance.
           example: https://github.com/fabro-sh/fabro/pull/123
 
     MergeMethod:
@@ -14551,12 +14721,24 @@ components:
 
     ServerIntegrationsSettings:
       type: object
-      required: [github, slack]
+      required: [github, forgejo, slack]
       properties:
         github:
           $ref: "#/components/schemas/GithubIntegrationSettings"
+        forgejo:
+          $ref: "#/components/schemas/ForgejoIntegrationSettings"
         slack:
           $ref: "#/components/schemas/SlackIntegrationSettings"
+
+    ForgejoIntegrationSettings:
+      type: object
+      required: [enabled, url]
+      properties:
+        enabled:
+          type: boolean
+        url:
+          type: ["string", "null"]
+          description: Base URL of the single configured Forgejo/Gitea instance.
 
     GithubIntegrationSettings:
       type: object
@@ -15480,7 +15662,7 @@ components:
     IntegrationProvider:
       description: Server integration provider.
       type: string
-      enum: [github, slack]
+      enum: [github, forgejo, slack]
 
     IntegrationStatus:
       description: Computed runtime integration status.

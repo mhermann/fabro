@@ -3,6 +3,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use fabro_auth::CredentialSource;
+use fabro_forgejo::{self as forgejo_client};
 use fabro_github::{self as github_app, ssh_url_to_https};
 use fabro_graphviz::parser;
 use fabro_llm::client::Client;
@@ -444,8 +445,12 @@ pub struct AutoMergeOptions {
 }
 
 /// Inputs for [`open_pull_request`].
+///
+/// Exactly one of `github` / `forgejo` is required; `open_pull_request`
+/// dispatches on the origin host and errors when no context matches.
 pub struct OpenPullRequestRequest<'a> {
-    pub github:            github_app::GitHubContext<'a>,
+    pub github:            Option<github_app::GitHubContext<'a>>,
+    pub forgejo:           Option<forgejo_client::ForgejoContext<'a>>,
     pub origin_url:        &'a str,
     pub base_branch:       &'a str,
     pub head_branch:       &'a str,
@@ -477,12 +482,13 @@ pub struct CreatedPullRequest {
 /// stopped before persisting the result.
 async fn reconcile_existing_pull_request(
     req: &OpenPullRequestRequest<'_>,
+    github: &github_app::GitHubContext<'_>,
     owner: &str,
     repo: &str,
     context: &'static str,
 ) -> anyhow::Result<Option<CreatedPullRequest>> {
     let Some(existing) = github_app::find_open_pull_request(
-        &req.github,
+        github,
         owner,
         repo,
         req.base_branch,
@@ -495,7 +501,7 @@ async fn reconcile_existing_pull_request(
     };
     info!(pr_url = %existing.html_url, pr_number = existing.number, context, "Existing pull request reconciled");
     enable_auto_merge_if_requested(
-        &req.github,
+        github,
         owner,
         repo,
         &existing.node_id,
@@ -505,9 +511,10 @@ async fn reconcile_existing_pull_request(
     .await;
     Ok(Some(CreatedPullRequest {
         link:        PullRequestLink {
-            owner:  owner.to_string(),
-            repo:   repo.to_string(),
-            number: existing.number,
+            owner:        owner.to_string(),
+            repo:         repo.to_string(),
+            number:       existing.number,
+            instance_url: None,
         },
         title:       existing.title,
         base_branch: req.base_branch.to_string(),
@@ -551,12 +558,13 @@ const BRANCH_HEAD_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// not be mistaken for a genuinely stale branch.
 async fn verify_remote_head(
     req: &OpenPullRequestRequest<'_>,
+    github: &github_app::GitHubContext<'_>,
     owner: &str,
     repo: &str,
 ) -> Result<(), String> {
     let mut last_seen = Ok(None);
     for attempt in 1..=BRANCH_HEAD_ATTEMPTS {
-        last_seen = github_app::branch_head_sha(&req.github, owner, repo, req.head_branch).await;
+        last_seen = github_app::branch_head_sha(github, owner, repo, req.head_branch).await;
         match &last_seen {
             Ok(Some(head)) if head == req.expected_head_sha => return Ok(()),
             Ok(head) => debug!(
@@ -587,10 +595,32 @@ async fn verify_remote_head(
 
 /// Open a pull request for a completed run.
 ///
-/// Callers are responsible for skipping runs with an empty diff; reaching here
-/// means a pull request is expected, so every failure is an error.
+/// Dispatches on the origin host: origins on the configured Forgejo/Gitea
+/// instance take the forge path, everything else takes the GitHub path.
+/// Callers are responsible for skipping runs with an empty diff; reaching
+/// here means a pull request is expected, so every failure is an error.
 pub async fn open_pull_request(
     req: OpenPullRequestRequest<'_>,
+) -> Result<CreatedPullRequest, String> {
+    let https_url = ssh_url_to_https(req.origin_url);
+    if let Some(ctx) = req
+        .forgejo
+        .as_ref()
+        .filter(|ctx| forgejo_client::is_instance_origin(&https_url, ctx.instance_url()))
+    {
+        return open_forge_pull_request(&req, ctx).await;
+    }
+    let github = req
+        .github
+        .as_ref()
+        .ok_or_else(|| "pull request creation requires GitHub credentials".to_string())?;
+    open_github_pull_request(&req, github).await
+}
+
+/// The GitHub pull-request path. Byte-for-byte the historical behavior.
+async fn open_github_pull_request(
+    req: &OpenPullRequestRequest<'_>,
+    github: &github_app::GitHubContext<'_>,
 ) -> Result<CreatedPullRequest, String> {
     let https_url = ssh_url_to_https(req.origin_url);
     let (owner, repo) =
@@ -598,11 +628,12 @@ pub async fn open_pull_request(
 
     // Verify before generating content: this is the cheap check, and a stale
     // branch would otherwise cost a full LLM call before failing.
-    verify_remote_head(&req, &owner, &repo).await?;
+    verify_remote_head(req, github, &owner, &repo).await?;
 
-    if let Some(existing) = reconcile_existing_pull_request(&req, &owner, &repo, "before creation")
-        .await
-        .map_err(|err| format!("failed to reconcile an existing pull request: {err:#}"))?
+    if let Some(existing) =
+        reconcile_existing_pull_request(req, github, &owner, &repo, "before creation")
+            .await
+            .map_err(|err| format!("failed to reconcile an existing pull request: {err:#}"))?
     {
         return Ok(existing);
     }
@@ -623,7 +654,7 @@ pub async fn open_pull_request(
     let title = content.title;
 
     let created = match github_app::create_pull_request(
-        &req.github,
+        github,
         &owner,
         &repo,
         req.base_branch,
@@ -636,8 +667,14 @@ pub async fn open_pull_request(
     {
         Ok(created) => created,
         Err(create_err) => {
-            match reconcile_existing_pull_request(&req, &owner, &repo, "after a failed create")
-                .await
+            match reconcile_existing_pull_request(
+                req,
+                github,
+                &owner,
+                &repo,
+                "after a failed create",
+            )
+            .await
             {
                 Ok(Some(existing)) => return Ok(existing),
                 Ok(None) => return Err(format!("{create_err:#}")),
@@ -652,7 +689,7 @@ pub async fn open_pull_request(
 
     info!(pr_url = %created.html_url, created.number, "Pull request created");
     enable_auto_merge_if_requested(
-        &req.github,
+        github,
         &owner,
         &repo,
         &created.node_id,
@@ -665,11 +702,137 @@ pub async fn open_pull_request(
         owner,
         repo,
         number: created.number,
+        instance_url: None,
     };
 
     Ok(CreatedPullRequest {
         link,
-        title,
+        title: created.title,
+        base_branch: req.base_branch.to_string(),
+        head_branch: req.head_branch.to_string(),
+    })
+}
+
+/// The Forgejo/Gitea pull-request path.
+///
+/// Verifies the remote branch, reconciles an open PR already carrying the
+/// head commit, creates the PR (drafts via the `WIP: ` title prefix), and
+/// fails loudly when auto-merge was requested: Forgejo/Gitea have no
+/// auto-merge API.
+async fn open_forge_pull_request(
+    req: &OpenPullRequestRequest<'_>,
+    ctx: &forgejo_client::ForgejoContext<'_>,
+) -> Result<CreatedPullRequest, String> {
+    if req.auto_merge.is_some() {
+        return Err(
+            "auto-merge is not supported for Forgejo/Gitea pull requests; \
+             disable run.pull_request.auto_merge"
+                .to_string(),
+        );
+    }
+
+    let https_url = ssh_url_to_https(req.origin_url);
+    let instance_url = ctx.instance_url();
+    let (owner, repo) = forgejo_client::parse_owner_repo(&https_url, instance_url)
+        .ok_or_else(|| format!("origin does not identify a repository on {instance_url}"))?;
+
+    // Verify before generating content: this is the cheap check, and a stale
+    // branch would otherwise cost a full LLM call before failing.
+    let mut last_seen: Result<Option<String>, anyhow::Error> = Ok(None);
+    for attempt in 1..=BRANCH_HEAD_ATTEMPTS {
+        last_seen = forgejo_client::branch_head_sha(ctx, &owner, &repo, req.head_branch).await;
+        match &last_seen {
+            Ok(Some(head)) if head == req.expected_head_sha => break,
+            Ok(head) => debug!(
+                attempt,
+                head = ?head,
+                expected = req.expected_head_sha,
+                "Remote branch head does not match the final commit yet"
+            ),
+            Err(err) => debug!(attempt, error = %err, "Failed to read remote branch head"),
+        }
+        if attempt < BRANCH_HEAD_ATTEMPTS {
+            sleep(BRANCH_HEAD_RETRY_DELAY).await;
+        }
+    }
+    match &last_seen {
+        Ok(Some(head)) if head == req.expected_head_sha => {}
+        Ok(Some(head)) => {
+            return Err(format!(
+                "remote branch '{}' points to commit {head}, expected final commit {}",
+                req.head_branch, req.expected_head_sha
+            ));
+        }
+        Ok(None) => {
+            return Err(format!(
+                "remote branch '{}' does not exist; expected final commit {}",
+                req.head_branch, req.expected_head_sha
+            ));
+        }
+        Err(err) => return Err(format!("failed to verify remote branch head: {err:#}")),
+    }
+
+    // Reconcile: a PR for this exact commit may already exist from an
+    // interrupted attempt.
+    if let Some(existing) =
+        forgejo_client::find_open_pull_request(ctx, &owner, &repo, req.expected_head_sha)
+            .await
+            .map_err(|err| format!("failed to reconcile an existing pull request: {err:#}"))?
+    {
+        info!(pr_url = %existing.html_url, pr_number = existing.number, "Existing pull request reconciled");
+        return Ok(CreatedPullRequest {
+            link:        PullRequestLink {
+                owner,
+                repo,
+                number: existing.number,
+                instance_url: Some(instance_url.to_string()),
+            },
+            title:       existing.title,
+            base_branch: req.base_branch.to_string(),
+            head_branch: req.head_branch.to_string(),
+        });
+    }
+
+    let content = build_pr_content(
+        req.diff,
+        req.goal,
+        req.model,
+        req.run_store,
+        req.llm_source,
+        Arc::clone(&req.catalog),
+        req.conclusion,
+        req.run_state,
+    )
+    .await
+    .map_err(|err| format!("{err:#}"))?;
+    let body = truncate_pr_body(&content.body);
+    let title = content.title;
+
+    let created = forgejo_client::create_pull_request(
+        ctx,
+        &owner,
+        &repo,
+        req.base_branch,
+        req.head_branch,
+        &title,
+        &body,
+        req.draft,
+    )
+    .await
+    .map_err(|err| format!("{err:#}"))?;
+
+    info!(pr_url = %created.html_url, created.number, "Pull request created");
+
+    let link = PullRequestLink {
+        owner,
+        repo,
+        number: created.number,
+        instance_url: Some(instance_url.to_string()),
+    };
+
+    Ok(CreatedPullRequest {
+        link,
+        title: created.title,
         base_branch: req.base_branch.to_string(),
         head_branch: req.head_branch.to_string(),
     })
@@ -1506,7 +1669,10 @@ mod tests {
         let harness = setup_fallback_test_harness_with_branch_sha(&payload, "stale-sha").await;
         let github_base_url = harness.github_server.url("");
         let error = open_pull_request(OpenPullRequestRequest {
-            github:            fabro_github::GitHubContext::new(&harness.creds, &github_base_url),
+            github:            Some(fabro_github::GitHubContext::new(
+                &harness.creds,
+                &github_base_url,
+            )),
             origin_url:        "https://github.com/owner/repo.git",
             base_branch:       "main",
             head_branch:       "fabro/run/123",
@@ -1521,6 +1687,8 @@ mod tests {
             catalog:           harness.catalog.clone(),
             conclusion:        None,
             run_state:         None,
+
+            forgejo: None,
         })
         .await
         .expect_err("stale remote branch must prevent PR creation");
@@ -1934,21 +2102,23 @@ mod tests {
         let github = github_app::GitHubContext::new(&harness.creds, &github_base_url);
 
         let result = open_pull_request(OpenPullRequestRequest {
-            github,
-            origin_url: "https://github.com/owner/repo.git",
-            base_branch: "main",
-            head_branch: "fabro/run/123",
+            github:            Some(github),
+            origin_url:        "https://github.com/owner/repo.git",
+            base_branch:       "main",
+            head_branch:       "fabro/run/123",
             expected_head_sha: "final-sha",
-            goal: "Fix telemetry leak",
-            diff: "diff --git a/src/lib.rs b/src/lib.rs\n+fn x() {}\n",
-            model: "gpt-5.4",
-            draft: false,
-            auto_merge: None,
-            run_store: &harness.run_store,
-            llm_source: harness.llm_source.as_ref(),
-            catalog: harness.catalog.clone(),
-            conclusion: None,
-            run_state: None,
+            goal:              "Fix telemetry leak",
+            diff:              "diff --git a/src/lib.rs b/src/lib.rs\n+fn x() {}\n",
+            model:             "gpt-5.4",
+            draft:             false,
+            auto_merge:        None,
+            run_store:         &harness.run_store,
+            llm_source:        harness.llm_source.as_ref(),
+            catalog:           harness.catalog.clone(),
+            conclusion:        None,
+            run_state:         None,
+
+            forgejo: None,
         })
         .await
         .expect("reconciliation should adopt the existing pull request");
@@ -1982,21 +2152,23 @@ mod tests {
         let github = github_app::GitHubContext::new(&harness.creds, &github_base_url);
 
         let result = open_pull_request(OpenPullRequestRequest {
-            github,
-            origin_url: "https://github.com/owner/repo.git",
-            base_branch: "main",
-            head_branch: "fabro/run/123",
+            github:            Some(github),
+            origin_url:        "https://github.com/owner/repo.git",
+            base_branch:       "main",
+            head_branch:       "fabro/run/123",
             expected_head_sha: "final-sha",
-            goal: "Fix telemetry leak\n\ndetails...",
-            diff: "diff --git a/src/lib.rs b/src/lib.rs\n+fn x() {}\n",
-            model: "gpt-5.4",
-            draft: false,
-            auto_merge: None,
-            run_store: &harness.run_store,
-            llm_source: harness.llm_source.as_ref(),
-            catalog: harness.catalog.clone(),
-            conclusion: None,
-            run_state: None,
+            goal:              "Fix telemetry leak\n\ndetails...",
+            diff:              "diff --git a/src/lib.rs b/src/lib.rs\n+fn x() {}\n",
+            model:             "gpt-5.4",
+            draft:             false,
+            auto_merge:        None,
+            run_store:         &harness.run_store,
+            llm_source:        harness.llm_source.as_ref(),
+            catalog:           harness.catalog.clone(),
+            conclusion:        None,
+            run_state:         None,
+
+            forgejo: None,
         })
         .await
         .expect("PR creation should succeed");
@@ -2019,21 +2191,23 @@ mod tests {
         let goal = "x".repeat(200);
 
         let result = open_pull_request(OpenPullRequestRequest {
-            github,
-            origin_url: "https://github.com/owner/repo.git",
-            base_branch: "main",
-            head_branch: "fabro/run/123",
+            github:            Some(github),
+            origin_url:        "https://github.com/owner/repo.git",
+            base_branch:       "main",
+            head_branch:       "fabro/run/123",
             expected_head_sha: "final-sha",
-            goal: &goal,
-            diff: "diff --git a/src/lib.rs b/src/lib.rs\n+fn x() {}\n",
-            model: "gpt-5.4",
-            draft: false,
-            auto_merge: None,
-            run_store: &harness.run_store,
-            llm_source: harness.llm_source.as_ref(),
-            catalog: harness.catalog.clone(),
-            conclusion: None,
-            run_state: None,
+            goal:              &goal,
+            diff:              "diff --git a/src/lib.rs b/src/lib.rs\n+fn x() {}\n",
+            model:             "gpt-5.4",
+            draft:             false,
+            auto_merge:        None,
+            run_store:         &harness.run_store,
+            llm_source:        harness.llm_source.as_ref(),
+            catalog:           harness.catalog.clone(),
+            conclusion:        None,
+            run_state:         None,
+
+            forgejo: None,
         })
         .await
         .expect("PR creation should succeed");

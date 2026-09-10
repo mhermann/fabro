@@ -88,6 +88,7 @@ impl SandboxProvider for DockerSandboxProvider {
         let SandboxCreateSpec::Docker {
             config,
             github_app,
+            forgejo,
             run_id,
             clone_origin_url,
             clone_branch,
@@ -101,6 +102,7 @@ impl SandboxProvider for DockerSandboxProvider {
         let sandbox = DockerSandbox::new(
             config,
             github_app.as_ref(),
+            forgejo,
             run_id,
             clone_origin_url,
             clone_branch,

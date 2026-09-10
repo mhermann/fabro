@@ -385,9 +385,10 @@ impl RunProjectionReducer for RunProjection {
             }
             EventBody::PullRequestCreated(props) => {
                 let pull_request = PullRequestLink {
-                    owner:  props.owner.clone(),
-                    repo:   props.repo.clone(),
-                    number: props.pr_number,
+                    owner:        props.owner.clone(),
+                    repo:         props.repo.clone(),
+                    number:       props.pr_number,
+                    instance_url: props.instance_url.clone(),
                 };
                 self.pull_request = Some(pull_request.clone());
                 if let Some(creation) = self
@@ -4768,15 +4769,16 @@ mod tests {
             .apply_event(&test_event(
                 1,
                 EventBody::PullRequestCreated(PullRequestCreatedProps {
-                    pr_url:      "https://github.com/fabro-sh/fabro/pull/123".to_string(),
-                    pr_number:   123,
-                    owner:       "fabro-sh".to_string(),
-                    repo:        "fabro".to_string(),
-                    base_branch: "main".to_string(),
-                    head_branch: "fabro/run/demo".to_string(),
-                    head_sha:    Some("final-sha".to_string()),
-                    title:       "Add run PR chip".to_string(),
-                    draft:       false,
+                    pr_url:       "https://github.com/fabro-sh/fabro/pull/123".to_string(),
+                    pr_number:    123,
+                    owner:        "fabro-sh".to_string(),
+                    repo:         "fabro".to_string(),
+                    base_branch:  "main".to_string(),
+                    head_branch:  "fabro/run/demo".to_string(),
+                    head_sha:     Some("final-sha".to_string()),
+                    instance_url: None,
+                    title:        "Add run PR chip".to_string(),
+                    draft:        false,
                 }),
                 None,
             ))
@@ -4864,15 +4866,16 @@ mod tests {
             .apply_event(&test_event(
                 5,
                 EventBody::PullRequestCreated(PullRequestCreatedProps {
-                    pr_url:      "https://github.com/fabro-sh/fabro/pull/123".to_string(),
-                    pr_number:   123,
-                    owner:       "fabro-sh".to_string(),
-                    repo:        "fabro".to_string(),
-                    base_branch: "main".to_string(),
-                    head_branch: "fabro/run/demo".to_string(),
-                    head_sha:    Some("final-sha".to_string()),
-                    title:       "Create asynchronously".to_string(),
-                    draft:       true,
+                    pr_url:       "https://github.com/fabro-sh/fabro/pull/123".to_string(),
+                    pr_number:    123,
+                    owner:        "fabro-sh".to_string(),
+                    repo:         "fabro".to_string(),
+                    base_branch:  "main".to_string(),
+                    head_branch:  "fabro/run/demo".to_string(),
+                    head_sha:     Some("final-sha".to_string()),
+                    instance_url: None,
+                    title:        "Create asynchronously".to_string(),
+                    draft:        true,
                 }),
                 None,
             ))
@@ -4892,29 +4895,32 @@ mod tests {
 
         let mut state = running_projection();
         let github_pull_request = PullRequestLink {
-            owner:  "fabro-sh".to_string(),
-            repo:   "fabro".to_string(),
-            number: 123,
+            owner:        "fabro-sh".to_string(),
+            repo:         "fabro".to_string(),
+            number:       123,
+            instance_url: None,
         };
         let replacement_pull_request = PullRequestLink {
-            owner:  "acme".to_string(),
-            repo:   "widgets".to_string(),
-            number: 42,
+            owner:        "acme".to_string(),
+            repo:         "widgets".to_string(),
+            number:       42,
+            instance_url: None,
         };
 
         state
             .apply_event(&test_event(
                 1,
                 EventBody::PullRequestCreated(PullRequestCreatedProps {
-                    pr_url:      github_pull_request.html_url(),
-                    pr_number:   github_pull_request.number,
-                    owner:       github_pull_request.owner.clone(),
-                    repo:        github_pull_request.repo.clone(),
-                    base_branch: "main".to_string(),
-                    head_branch: "fabro/run/demo".to_string(),
-                    head_sha:    Some("final-sha".to_string()),
-                    title:       "Add run PR chip".to_string(),
-                    draft:       false,
+                    pr_url:       github_pull_request.html_url(),
+                    pr_number:    github_pull_request.number,
+                    owner:        github_pull_request.owner.clone(),
+                    repo:         github_pull_request.repo.clone(),
+                    base_branch:  "main".to_string(),
+                    head_branch:  "fabro/run/demo".to_string(),
+                    head_sha:     Some("final-sha".to_string()),
+                    instance_url: github_pull_request.instance_url.clone(),
+                    title:        "Add run PR chip".to_string(),
+                    draft:        false,
                 }),
                 None,
             ))

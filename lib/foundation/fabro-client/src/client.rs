@@ -1020,6 +1020,24 @@ impl Client {
         Ok(response.into_inner())
     }
 
+    pub async fn get_forgejo_repo(
+        &self,
+        owner: &str,
+        name: &str,
+    ) -> Result<types::RepoCheckResponse> {
+        let response = self
+            .send_api(|client| async move {
+                client
+                    .get_forgejo_repo()
+                    .owner(owner.to_string())
+                    .name(name.to_string())
+                    .send()
+                    .await
+            })
+            .await?;
+        Ok(response.into_inner())
+    }
+
     pub async fn run_preflight(
         &self,
         manifest: types::RunManifest,

@@ -240,8 +240,9 @@ pub struct ServerLoggingSettings {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerIntegrationsSettings {
-    pub github: GithubIntegrationSettings,
-    pub slack:  SlackIntegrationSettings,
+    pub github:  GithubIntegrationSettings,
+    pub forgejo: ForgejoIntegrationSettings,
+    pub slack:   SlackIntegrationSettings,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,6 +259,56 @@ pub struct GithubIntegrationSettings {
 pub struct SlackIntegrationSettings {
     pub enabled:         bool,
     pub default_channel: Option<String>,
+}
+
+/// Settings for the single supported Forgejo/Gitea instance.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForgejoIntegrationSettings {
+    pub enabled: bool,
+    /// Base URL of the instance, e.g. `https://forgejo.example.com`.
+    pub url:     Option<String>,
+}
+
+impl ForgejoIntegrationSettings {
+    /// Validates the configured instance, returning a human-readable reason
+    /// when the URL is missing or unusable.
+    pub fn validate(&self) -> Result<(), String> {
+        let Some(url) = self.url.as_deref() else {
+            return Err("a Forgejo/Gitea instance URL is required".to_string());
+        };
+        validate_instance_url(url).map_err(str::to_string)
+    }
+}
+
+/// Validates an instance base URL. The instance must be an absolute origin:
+/// scheme with a host, no credentials, query, fragment, or path. Loopback
+/// hosts may use plain `http` for local development and tests; everything
+/// else requires `https` (system trust store, no custom-CA escape hatch).
+pub fn validate_instance_url(url: &str) -> Result<(), &'static str> {
+    let parsed = fabro_redact::DisplaySafeUrl::parse(url).map_err(|_| "must be an absolute URL")?;
+    if parsed.scheme() != "https" && parsed.scheme() != "http" {
+        return Err("must use https (or http for a loopback instance)");
+    }
+    if parsed.scheme() == "http" {
+        let loopback = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+        if !loopback {
+            return Err("must use https; only loopback instances may use http");
+        }
+    }
+    if parsed.host_str().is_none() {
+        return Err("must include a host");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("must not embed credentials");
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("must not include a query or fragment");
+    }
+    let path = parsed.path().trim_end_matches('/');
+    if !path.is_empty() {
+        return Err("must be an origin URL without a path");
+    }
+    Ok(())
 }
 
 impl Default for SlackIntegrationSettings {

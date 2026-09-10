@@ -15,12 +15,12 @@
 
 
 /**
- * Public github.com repository target. The branch names the attached working branch. An optional tag selects a release at worker start, and an optional exact SHA is authoritative when both are present.
+ * Git repository target. The branch names the attached working branch. An optional tag selects a release at worker start, and an optional exact SHA is authoritative when both are present. Local runs from a checkout on the configured Forgejo/Gitea instance carry `instance_url`; automations and other server-submitted targets remain github.com-only.
  */
 export interface GitRunTarget {
     'kind': GitRunTargetKindEnum;
     /**
-     * GitHub repository slug in `owner/name` form.
+     * Repository slug in `owner/name` form.
      */
     'repo': string;
     /**
@@ -35,6 +35,10 @@ export interface GitRunTarget {
      * Optional exact commit. The server lowercase-normalizes its syntax but does not resolve it, prove branch ancestry, or prove that it matches an accompanying tag. When present, this exact commit wins.
      */
     'sha'?: string;
+    /**
+     * Base URL of the configured Forgejo/Gitea instance for locally observed targets on that instance. Absent means github.com.
+     */
+    'instance_url'?: string;
 }
 
 export const GitRunTargetKindEnum = {

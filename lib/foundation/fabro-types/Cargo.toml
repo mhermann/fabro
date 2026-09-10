@@ -18,6 +18,7 @@ test-support = []
 workspace = true
 
 [dependencies]
+fabro-redact = { path = "../fabro-redact" }
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, optional = true }
 dirs.workspace = true

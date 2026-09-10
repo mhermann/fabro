@@ -54,6 +54,13 @@ pub const GITHUB_APP_VAULT_KEYS: &[&str] = &[
     EnvVars::GITHUB_APP_WEBHOOK_SECRET,
 ];
 
+/// Every Forgejo-install secret name. Used to drop stale entries from
+/// `server.env` whenever an install runs.
+pub const FORGEJO_INSTALL_SECRET_KEYS: &[&str] = &[EnvVars::FORGEJO_TOKEN];
+
+/// Vault secret names managed by the Forgejo/Gitea install step.
+pub const FORGEJO_VAULT_KEYS: &[&str] = &[EnvVars::FORGEJO_TOKEN];
+
 pub struct InstallPersistencePlan<'a> {
     pub storage_dir:         &'a Path,
     pub settings_write:      Option<PendingSettingsWrite<'a>>,
@@ -293,6 +300,35 @@ pub fn write_token_settings(doc: &mut toml::Value) -> Result<()> {
     github.remove("app_id");
     github.remove("slug");
     github.remove("client_id");
+    Ok(())
+}
+
+/// Write `[server.integrations.forgejo]` for the single configured
+/// instance. The token itself goes to the vault under `FORGEJO_TOKEN`.
+pub fn write_forgejo_settings(doc: &mut toml::Value, instance_url: &str) -> Result<()> {
+    let root = doc
+        .as_table_mut()
+        .context("settings.toml root is not a table")?;
+    let server = root
+        .entry("server")
+        .or_insert_with(|| toml::Value::Table(toml::Table::default()));
+    let server_table = server
+        .as_table_mut()
+        .context("settings.toml [server] is not a table")?;
+    let integrations = server_table
+        .entry("integrations")
+        .or_insert_with(|| toml::Value::Table(toml::Table::default()));
+    let integrations_table = integrations
+        .as_table_mut()
+        .context("settings.toml [server.integrations] is not a table")?;
+    let forgejo = integrations_table
+        .entry("forgejo")
+        .or_insert_with(|| toml::Value::Table(toml::Table::default()));
+    let forgejo_table = forgejo
+        .as_table_mut()
+        .context("settings.toml [server.integrations.forgejo] is not a table")?;
+    forgejo_table.insert("enabled".into(), toml::Value::Boolean(true));
+    forgejo_table.insert("url".into(), toml::Value::String(instance_url.to_string()));
     Ok(())
 }
 
@@ -713,6 +749,28 @@ pub async fn persist_install_outputs_direct(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn write_forgejo_settings_enables_integration_with_instance_url() {
+        let mut doc = toml::Value::Table(toml::Table::default());
+        write_forgejo_settings(&mut doc, "https://forgejo.example.com").unwrap();
+
+        let forgejo = doc
+            .get("server")
+            .and_then(|s| s.get("integrations"))
+            .and_then(|i| i.get("forgejo"))
+            .cloned()
+            .unwrap();
+        let forgejo = forgejo.as_table().unwrap();
+        assert_eq!(forgejo.get("enabled"), Some(&toml::Value::Boolean(true)));
+        assert_eq!(
+            forgejo.get("url"),
+            Some(&toml::Value::String(
+                "https://forgejo.example.com".to_string()
+            ))
+        );
+    }
+
     use std::path::PathBuf;
 
     use fabro_config::{ServerSettingsBuilder, Storage, UserSettingsBuilder, envfile};
@@ -735,8 +793,8 @@ mod tests {
         OBJECT_STORE_MANAGED_COMMENT, OBJECT_STORE_SECRET_ACCESS_KEY_ENV, PendingSettingsWrite,
         SecretStore, SecretStoreWrite, default_web_url, merge_server_settings,
         persist_install_outputs_direct, prepare_dev_token_write_for_install, set_cli_target_http,
-        set_server_listen, write_github_app_settings, write_object_store_settings,
-        write_sandbox_settings,
+        set_server_listen, write_forgejo_settings, write_github_app_settings,
+        write_object_store_settings, write_sandbox_settings,
     };
 
     fn format_config_toml() -> String {

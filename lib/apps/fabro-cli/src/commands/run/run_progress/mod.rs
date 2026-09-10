@@ -1414,15 +1414,16 @@ mod tests {
             exec_output_tail: None,
         });
         emit(&mut ui, Event::PullRequestCreated {
-            pr_url:      "https://github.com/fabro-sh/fabro/pull/42".into(),
-            pr_number:   42,
-            owner:       "fabro-sh".into(),
-            repo:        "fabro".into(),
-            base_branch: "main".into(),
-            head_branch: "fabro/run/42".into(),
-            head_sha:    Some("final-sha".to_string()),
-            title:       "Ship the change".into(),
-            draft:       true,
+            pr_url:       "https://github.com/fabro-sh/fabro/pull/42".into(),
+            pr_number:    42,
+            owner:        "fabro-sh".into(),
+            repo:         "fabro".into(),
+            base_branch:  "main".into(),
+            head_branch:  "fabro/run/42".into(),
+            head_sha:     Some("final-sha".to_string()),
+            instance_url: None,
+            title:        "Ship the change".into(),
+            draft:        true,
         });
         emit(&mut ui, Event::PullRequestFailed {
             creation_id: None,

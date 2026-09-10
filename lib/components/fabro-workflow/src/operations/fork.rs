@@ -409,6 +409,8 @@ mod tests {
                 branch: "main".to_string(),
                 tag:    None,
                 sha:    None,
+
+                instance_url: None,
             })),
             automation:          None,
             provenance:          test_support::test_run_provenance(),
@@ -503,6 +505,8 @@ mod tests {
                 branch: "main".to_string(),
                 tag:    None,
                 sha:    None,
+
+                instance_url: None,
             }))
         );
         assert_eq!(

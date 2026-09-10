@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use fabro_types::{
-    GitRunTarget, RunIntent, RunIntentArgs, RunTarget, WorkflowVersionId, normalize_git_commit_sha,
+    GitCoordinateValidationError, GitRunTarget, RunIntent, RunIntentArgs, RunTarget,
+    WorkflowVersionId, normalize_git_commit_sha,
 };
 use serde_json::json;
 
@@ -15,10 +16,11 @@ fn intent() -> RunIntent {
     RunIntent {
         workflow_version_id: version_id(),
         target:              RunTarget::Git(GitRunTarget {
-            repo:   "fabro-sh/fabro".to_string(),
-            branch: "feature/run-intent".to_string(),
-            tag:    Some("v1.2.3".to_string()),
-            sha:    Some("ABCDEF0123456789ABCDEF0123456789ABCDEF01".to_string()),
+            repo:         "fabro-sh/fabro".to_string(),
+            branch:       "feature/run-intent".to_string(),
+            tag:          Some("v1.2.3".to_string()),
+            sha:          Some("ABCDEF0123456789ABCDEF0123456789ABCDEF01".to_string()),
+            instance_url: None,
         }),
         args:                RunIntentArgs {
             model:            Some("gpt-5.6".to_string()),
@@ -190,10 +192,11 @@ fn git_commit_sha_normalization_is_exact_and_pure() {
 #[test]
 fn target_validation_normalizes_sha_without_network_resolution() {
     let validated = RunTarget::Git(GitRunTarget {
-        repo:   "fabro-sh/fabro".to_string(),
-        branch: "feature/run-intent".to_string(),
-        tag:    Some("release/v1".to_string()),
-        sha:    Some("ABCDEF0123456789ABCDEF0123456789ABCDEF01".to_string()),
+        repo:         "fabro-sh/fabro".to_string(),
+        branch:       "feature/run-intent".to_string(),
+        tag:          Some("release/v1".to_string()),
+        sha:          Some("ABCDEF0123456789ABCDEF0123456789ABCDEF01".to_string()),
+        instance_url: None,
     })
     .validate()
     .unwrap();
@@ -209,10 +212,11 @@ fn target_validation_normalizes_sha_without_network_resolution() {
     assert_eq!(
         validated.target,
         RunTarget::Git(GitRunTarget {
-            repo:   "fabro-sh/fabro".to_string(),
-            branch: "feature/run-intent".to_string(),
-            tag:    Some("release/v1".to_string()),
-            sha:    Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+            repo:         "fabro-sh/fabro".to_string(),
+            branch:       "feature/run-intent".to_string(),
+            tag:          Some("release/v1".to_string()),
+            sha:          Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+            instance_url: None,
         })
     );
 }
@@ -220,10 +224,11 @@ fn target_validation_normalizes_sha_without_network_resolution() {
 #[test]
 fn git_target_validation_carries_the_parsed_repository_proof() {
     let validated = GitRunTarget {
-        repo:   "Fabro-Sh/Fabro".to_string(),
-        branch: "feature/run-intent".to_string(),
-        tag:    None,
-        sha:    Some("ABCDEF0123456789ABCDEF0123456789ABCDEF01".to_string()),
+        repo:         "Fabro-Sh/Fabro".to_string(),
+        branch:       "feature/run-intent".to_string(),
+        tag:          None,
+        sha:          Some("ABCDEF0123456789ABCDEF0123456789ABCDEF01".to_string()),
+        instance_url: None,
     }
     .validate()
     .unwrap();
@@ -244,6 +249,132 @@ fn run_intent_none_target_validates_without_a_git_projection() {
 }
 
 #[test]
+fn forge_git_target_validates_with_instance_url() {
+    let validated = GitRunTarget {
+        repo:         "Fabro-Sh/Fabro".to_string(),
+        branch:       "feature/run-intent".to_string(),
+        tag:          None,
+        sha:          None,
+        instance_url: Some("https://forgejo.example.com".to_string()),
+    }
+    .validate()
+    .unwrap();
+
+    assert_eq!(
+        validated.instance_url(),
+        Some("https://forgejo.example.com")
+    );
+    assert_eq!(validated.repository().owner(), "Fabro-Sh");
+    assert_eq!(validated.repository().repo(), "Fabro");
+    assert_eq!(
+        validated.target().repo,
+        "Fabro-Sh/Fabro",
+        "the slug stays unchanged for forge targets"
+    );
+}
+
+#[test]
+fn forge_git_target_builds_instance_origin_url() {
+    let validated = RunTarget::Git(GitRunTarget {
+        repo:         "fabro-sh/fabro".to_string(),
+        branch:       "main".to_string(),
+        tag:          None,
+        sha:          Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+        instance_url: Some("http://127.0.0.1:3000".to_string()),
+    })
+    .validate()
+    .unwrap();
+
+    let git = validated
+        .git
+        .as_ref()
+        .expect("forge target has a git projection");
+    assert_eq!(
+        git.origin_url, "http://127.0.0.1:3000/fabro-sh/fabro",
+        "forge targets derive their origin from the instance URL"
+    );
+}
+
+#[test]
+fn forge_git_target_rejects_invalid_instance_url() {
+    for bad in [
+        "forgejo.example.com",
+        "https://",
+        "https://user:pass@forgejo.example.com",
+        "https://forgejo.example.com/gitea",
+        "http://forgejo.example.com",
+    ] {
+        let error = GitRunTarget {
+            repo:         "fabro-sh/fabro".to_string(),
+            branch:       "main".to_string(),
+            tag:          None,
+            sha:          None,
+            instance_url: Some(bad.to_string()),
+        }
+        .validate()
+        .unwrap_err();
+        assert_eq!(error, GitCoordinateValidationError::Repository);
+    }
+}
+
+#[test]
+fn github_git_target_serialization_omits_instance_url() {
+    let target = GitRunTarget {
+        repo:         "fabro-sh/fabro".to_string(),
+        branch:       "main".to_string(),
+        tag:          None,
+        sha:          None,
+        instance_url: None,
+    };
+    let value = serde_json::to_value(RunTarget::Git(target.clone())).unwrap();
+    assert!(
+        serde_json::to_string(&value)
+            .unwrap()
+            .contains("https://github.com/fabro-sh/fabro")
+            || !serde_json::to_string(&value)
+                .unwrap()
+                .contains("instance_url"),
+        "github targets must not carry instance_url on the wire"
+    );
+    assert!(
+        !serde_json::to_string(&value)
+            .unwrap()
+            .contains("instance_url")
+    );
+}
+
+#[test]
+fn forge_git_target_round_trips_with_instance_url() {
+    let target = RunTarget::Git(GitRunTarget {
+        repo:         "acme/widgets".to_string(),
+        branch:       "main".to_string(),
+        tag:          None,
+        sha:          None,
+        instance_url: Some("https://forgejo.example.com".to_string()),
+    });
+    let value = serde_json::to_value(&target).expect("target should serialize");
+    assert_eq!(
+        serde_json::from_value::<RunTarget>(value).expect("target should deserialize"),
+        target
+    );
+}
+
+#[test]
+fn git_target_rejects_instance_url_with_invalid_repo_slug() {
+    // The shared slug grammar still applies on forge targets.
+    let error = GitRunTarget {
+        repo:         "acme".to_string(),
+        branch:       "main".to_string(),
+        tag:          None,
+        sha:          None,
+        instance_url: Some("https://forgejo.example.com".to_string()),
+    }
+    .validate()
+    .unwrap_err();
+    assert_eq!(error, GitCoordinateValidationError::Repository);
+}
+
+#[test]
 fn run_intent_folder_target_is_preserved_for_provider_admission() {
     let target = RunTarget::Folder {
         path: "/srv/fabro/workspaces/example".to_string(),
@@ -261,10 +392,11 @@ fn target_validation_rejects_invalid_grammar() {
 
     let validate = |repo: &str, branch: &str, tag: Option<&str>, sha: Option<&str>| {
         RunTarget::Git(GitRunTarget {
-            repo:   repo.to_string(),
-            branch: branch.to_string(),
-            tag:    tag.map(str::to_string),
-            sha:    sha.map(str::to_string),
+            repo:         repo.to_string(),
+            branch:       branch.to_string(),
+            tag:          tag.map(str::to_string),
+            sha:          sha.map(str::to_string),
+            instance_url: None,
         })
         .validate()
     };
@@ -316,28 +448,32 @@ fn target_validation_rejects_invalid_grammar() {
 fn git_target_round_trips_all_branch_tag_sha_states() {
     for target in [
         GitRunTarget {
-            repo:   "fabro-sh/fabro".to_string(),
-            branch: "main".to_string(),
-            tag:    None,
-            sha:    None,
+            repo:         "fabro-sh/fabro".to_string(),
+            branch:       "main".to_string(),
+            tag:          None,
+            sha:          None,
+            instance_url: None,
         },
         GitRunTarget {
-            repo:   "fabro-sh/fabro".to_string(),
-            branch: "main".to_string(),
-            tag:    None,
-            sha:    Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+            repo:         "fabro-sh/fabro".to_string(),
+            branch:       "main".to_string(),
+            tag:          None,
+            sha:          Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+            instance_url: None,
         },
         GitRunTarget {
-            repo:   "fabro-sh/fabro".to_string(),
-            branch: "release".to_string(),
-            tag:    Some("v1.2.3".to_string()),
-            sha:    None,
+            repo:         "fabro-sh/fabro".to_string(),
+            branch:       "release".to_string(),
+            tag:          Some("v1.2.3".to_string()),
+            sha:          None,
+            instance_url: None,
         },
         GitRunTarget {
-            repo:   "fabro-sh/fabro".to_string(),
-            branch: "release".to_string(),
-            tag:    Some("v1.2.3".to_string()),
-            sha:    Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+            repo:         "fabro-sh/fabro".to_string(),
+            branch:       "release".to_string(),
+            tag:          Some("v1.2.3".to_string()),
+            sha:          Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+            instance_url: None,
         },
     ] {
         let run_target = RunTarget::Git(target);

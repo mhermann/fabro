@@ -57,25 +57,47 @@ impl PullRequestCreation {
     }
 }
 
-/// Minimal GitHub pull request reference stored on a workflow run.
+/// Minimal pull request reference stored on a workflow run.
+///
+/// Links point either at github.com (the default, `instance_url == None`) or
+/// at the configured Forgejo/Gitea instance (`instance_url == Some`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequestLink {
-    pub owner:  String,
-    pub repo:   String,
-    pub number: u64,
+    pub owner:        String,
+    pub repo:         String,
+    pub number:       u64,
+    /// Base URL of the Forgejo/Gitea instance when this link points at a
+    /// self-hosted instance; `None` means github.com.
+    pub instance_url: Option<String>,
 }
 
 impl PullRequestLink {
     #[must_use]
     pub fn html_url(&self) -> String {
-        format!(
-            "https://github.com/{}/{}/pull/{}",
-            self.owner, self.repo, self.number
-        )
+        match &self.instance_url {
+            Some(instance) => format!(
+                "{}/{}/{}/pulls/{}",
+                instance.trim_end_matches('/'),
+                self.owner,
+                self.repo,
+                self.number
+            ),
+            None => format!(
+                "https://github.com/{}/{}/pull/{}",
+                self.owner, self.repo, self.number
+            ),
+        }
     }
 
     pub fn from_github_url(url: &str) -> Result<Self, String> {
         github_pull_request_link_from_url(url)
+    }
+
+    /// Parses a Forgejo/Gitea pull request URL like
+    /// `https://forgejo.example.com/owner/repo/pulls/123`, requiring its host
+    /// to match `expected_instance`.
+    pub fn from_forge_url(url: &str, expected_instance: &str) -> Result<Self, String> {
+        forge_pull_request_link_from_url(url, expected_instance)
     }
 }
 
@@ -84,11 +106,15 @@ impl Serialize for PullRequestLink {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("PullRequestLink", 4)?;
+        let len = if self.instance_url.is_some() { 5 } else { 4 };
+        let mut state = serializer.serialize_struct("PullRequestLink", len)?;
         state.serialize_field("owner", &self.owner)?;
         state.serialize_field("repo", &self.repo)?;
         state.serialize_field("number", &self.number)?;
         state.serialize_field("html_url", &self.html_url())?;
+        if let Some(instance_url) = &self.instance_url {
+            state.serialize_field("instance_url", instance_url)?;
+        }
         state.end()
     }
 }
@@ -102,13 +128,15 @@ impl<'de> Deserialize<'de> for PullRequestLink {
         #[serde(deny_unknown_fields)]
         struct Wire {
             #[serde(default)]
-            html_url: Option<String>,
+            html_url:     Option<String>,
             #[serde(default)]
-            owner:    Option<String>,
+            instance_url: Option<String>,
             #[serde(default)]
-            repo:     Option<String>,
+            owner:        Option<String>,
             #[serde(default)]
-            number:   Option<u64>,
+            repo:         Option<String>,
+            #[serde(default)]
+            number:       Option<u64>,
         }
 
         let wire = Wire::deserialize(deserializer)?;
@@ -119,11 +147,13 @@ impl<'de> Deserialize<'de> for PullRequestLink {
             owner,
             repo,
             number,
+            instance_url: wire.instance_url,
         };
 
         if let Some(html_url) = wire.html_url {
             let url_link =
-                github_pull_request_link_from_url(&html_url).map_err(D::Error::custom)?;
+                pull_request_link_from_stored_url(&html_url, link.instance_url.as_deref())
+                    .map_err(D::Error::custom)?;
             if url_link != link {
                 return Err(D::Error::custom(
                     "pull request html_url does not match owner/repo/number",
@@ -148,14 +178,7 @@ fn github_pull_request_link_from_url(raw_url: &str) -> Result<PullRequestLink, S
                 .to_string(),
         );
     }
-    let segments = parsed
-        .path_segments()
-        .map(|segments| {
-            segments
-                .filter(|segment| !segment.is_empty())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let segments = pull_url_segments(&parsed);
     let [owner, repo, "pull", number] = segments.as_slice() else {
         return Err(
             "Pull request link must use https://github.com/owner/repo/pull/123.".to_string(),
@@ -168,7 +191,69 @@ fn github_pull_request_link_from_url(raw_url: &str) -> Result<PullRequestLink, S
         owner: (*owner).to_string(),
         repo: (*repo).to_string(),
         number,
+        instance_url: None,
     })
+}
+
+#[expect(
+    clippy::disallowed_types,
+    reason = "Pull request links are instance URLs stored for display and coordinate inference."
+)]
+fn forge_pull_request_link_from_url(
+    raw_url: &str,
+    expected_instance: &str,
+) -> Result<PullRequestLink, String> {
+    let expected =
+        url::Url::parse(expected_instance).map_err(|err| format!("Invalid instance URL: {err}"))?;
+    let parsed =
+        url::Url::parse(raw_url).map_err(|err| format!("Invalid pull request URL: {err}"))?;
+    if parsed.host_str() != expected.host_str() || parsed.port() != expected.port() {
+        return Err(format!(
+            "Pull request link must belong to the configured Forgejo/Gitea instance {expected_instance}."
+        ));
+    }
+    let segments = pull_url_segments(&parsed);
+    let [owner, repo, "pulls", number] = segments.as_slice() else {
+        return Err(format!(
+            "Pull request link must use {expected_instance}/owner/repo/pulls/123."
+        ));
+    };
+    let number = number
+        .parse()
+        .map_err(|_| "Pull request URL number must be an unsigned integer.".to_string())?;
+    Ok(PullRequestLink {
+        owner: (*owner).to_string(),
+        repo: (*repo).to_string(),
+        number,
+        instance_url: Some(expected_instance.trim_end_matches('/').to_string()),
+    })
+}
+
+/// Validates a stored `html_url` against the link's own instance: forge links
+/// are checked against their instance, GitHub links against github.com.
+fn pull_request_link_from_stored_url(
+    raw_url: &str,
+    instance_url: Option<&str>,
+) -> Result<PullRequestLink, String> {
+    match instance_url {
+        Some(instance) => forge_pull_request_link_from_url(raw_url, instance),
+        None => github_pull_request_link_from_url(raw_url),
+    }
+}
+
+#[expect(
+    clippy::disallowed_types,
+    reason = "Pull request URLs are validated credential-free web URLs; the redacted wrapper is not needed for segment parsing."
+)]
+fn pull_url_segments(parsed: &url::Url) -> Vec<&str> {
+    parsed
+        .path_segments()
+        .map(|segments| {
+            segments
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 /// Stored pull request link plus optional live GitHub details.
@@ -327,9 +412,10 @@ mod tests {
     #[test]
     fn pull_request_link_serializes_computed_html_url() {
         let link = PullRequestLink {
-            owner:  "fabro-sh".to_string(),
-            repo:   "fabro".to_string(),
-            number: 270,
+            owner:        "fabro-sh".to_string(),
+            repo:         "fabro".to_string(),
+            number:       270,
+            instance_url: None,
         };
 
         assert_eq!(
@@ -355,5 +441,83 @@ mod tests {
         }));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn forge_pull_request_link_renders_pulls_url() {
+        let link = PullRequestLink {
+            owner:        "fabro-sh".to_string(),
+            repo:         "fabro".to_string(),
+            number:       12,
+            instance_url: Some("https://forgejo.example.com".to_string()),
+        };
+
+        assert_eq!(
+            link.html_url(),
+            "https://forgejo.example.com/fabro-sh/fabro/pulls/12"
+        );
+        assert_eq!(
+            serde_json::to_value(&link).unwrap(),
+            json!({
+                "owner": "fabro-sh",
+                "repo": "fabro",
+                "number": 12,
+                "html_url": "https://forgejo.example.com/fabro-sh/fabro/pulls/12",
+                "instance_url": "https://forgejo.example.com"
+            })
+        );
+    }
+
+    #[test]
+    fn forge_pull_request_link_round_trips() {
+        let link = PullRequestLink::from_forge_url(
+            "https://forgejo.example.com/acme/widget/pulls/7",
+            "https://forgejo.example.com",
+        )
+        .unwrap();
+
+        assert_eq!(link, PullRequestLink {
+            owner:        "acme".to_string(),
+            repo:         "widget".to_string(),
+            number:       7,
+            instance_url: Some("https://forgejo.example.com".to_string()),
+        });
+        assert_eq!(
+            serde_json::from_value::<PullRequestLink>(serde_json::to_value(&link).unwrap())
+                .unwrap(),
+            link
+        );
+    }
+
+    #[test]
+    fn forge_pull_request_link_rejects_other_instance_hosts() {
+        let result = PullRequestLink::from_forge_url(
+            "https://other.example.com/acme/widget/pulls/7",
+            "https://forgejo.example.com",
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn forge_pull_request_link_rejects_github_style_pull_path() {
+        let result = PullRequestLink::from_forge_url(
+            "https://forgejo.example.com/acme/widget/pull/7",
+            "https://forgejo.example.com",
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn forge_pull_request_link_serialization_omits_instance_url_for_github() {
+        let link =
+            PullRequestLink::from_github_url("https://github.com/acme/widget/pull/3").unwrap();
+        let value = serde_json::to_value(&link).unwrap();
+        assert!(value.get("instance_url").is_none());
+        assert_eq!(
+            serde_json::from_value::<PullRequestLink>(value).unwrap(),
+            link
+        );
     }
 }

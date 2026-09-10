@@ -762,6 +762,8 @@ mod tests {
                 run_branch:  None,
                 meta_branch: Some(meta_branch.to_string()),
             }),
+
+            forgejo: None,
         })
     }
 

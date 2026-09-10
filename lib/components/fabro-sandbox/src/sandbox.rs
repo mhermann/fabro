@@ -2027,7 +2027,7 @@ mod push_tests {
 
     use super::*;
     use crate::git_retry::{GitRetryReason, RetryPlan};
-    use crate::push_credentials::{PushCredentialState, RefreshErrorKind};
+    use crate::push_credentials::{CredentialSource, PushCredentialState, RefreshErrorKind};
 
     const ORIGIN: &str = "https://github.com/fabro-testing/repo";
     const REFSPEC: &str = "refs/heads/fabro/run/01M0DH033P2XSTHAGVBHG6922F";
@@ -2259,13 +2259,18 @@ mod push_tests {
             "fabro-testing/repo",
             std::sync::Arc::clone(&minter) as std::sync::Arc<dyn InstallationTokenMinter>,
         );
-        (PushCredentialState::new(Some(source)), minter)
+        (
+            PushCredentialState::new(Some(CredentialSource::GitHub(source))),
+            minter,
+        )
     }
 
     async fn seed_clone_token(state: &PushCredentialState) {
         let clone_token = state
             .source()
             .expect("state has a source")
+            .as_github()
+            .expect("test state holds a GitHub source")
             .mint_for_clone()
             .await
             .expect("clone mint succeeds");
@@ -2391,7 +2396,7 @@ mod push_tests {
             serde_json::json!({ "contents": "write" }),
         )
         .unwrap();
-        let state = PushCredentialState::new(Some(source));
+        let state = PushCredentialState::new(Some(CredentialSource::GitHub(source)));
         seed_clone_token(&state).await;
         let sandbox = ScriptedGitSandbox::new(vec![failed_exec(
             "fatal: Authentication failed for 'https://github.com/fabro-testing/repo'",
@@ -2666,7 +2671,7 @@ mod push_tests {
     #[tokio::test(start_paused = true)]
     async fn retry_deadline_includes_credential_lease_acquisition() {
         let source = installation_token_source("fabro-testing/repo", Arc::new(SlowMinter));
-        let state = PushCredentialState::new(Some(source));
+        let state = PushCredentialState::new(Some(CredentialSource::GitHub(source)));
         let sandbox = ScriptedGitSandbox::new(vec![]);
         let mut plan = RetryPlan::checkpoint_push();
         plan.max_elapsed = Some(Duration::from_secs(1));

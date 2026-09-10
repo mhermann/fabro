@@ -172,6 +172,8 @@ mod tests {
             branch: "main".to_string(),
             tag:    None,
             sha:    Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+
+            instance_url: None,
         })
     }
 
@@ -350,9 +352,10 @@ mod tests {
         .unwrap();
         event::append_event(&source_store, &source_run_id, &Event::PullRequestLinked {
             pull_request: PullRequestLink {
-                owner:  "fabro-sh".to_string(),
-                repo:   "fabro".to_string(),
-                number: 42,
+                owner:        "fabro-sh".to_string(),
+                repo:         "fabro".to_string(),
+                number:       42,
+                instance_url: None,
             },
         })
         .await

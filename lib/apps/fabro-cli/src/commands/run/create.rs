@@ -11,6 +11,7 @@ use super::overrides::prepare_intent_overrides;
 use crate::args::RunArgs;
 use crate::command_context::CommandContext;
 use crate::commands::resolve_run_id;
+use crate::shared::forgejo::resolve_forgejo_instance_url;
 use crate::user_config::{RunSettingsKeyPresence, read_project_run_settings_key_presence};
 
 pub(crate) struct CreatedRun {
@@ -158,19 +159,49 @@ fn run_target_for_environment(
             false,
         ));
     }
-    let Some(observation) = fabro_manifest::observe_git_run_target(canonical_cwd, None) else {
+    let forge_instance_url = resolve_forgejo_instance_url();
+    let Some(observation) =
+        fabro_manifest::observe_git_run_target(canonical_cwd, None, forge_instance_url.as_deref())
+    else {
         return Ok((none_target_for_unversioned_directory(canonical_cwd)?, false));
     };
     let dirty = observation.legacy_git_context.dirty == DirtyStatus::Dirty;
     let target = observation.run_target.ok_or_else(|| {
-        anyhow!("the caller Git checkout cannot be represented as a canonical GitHub run target")
+        anyhow!(
+            "the caller Git checkout cannot be represented as a canonical {} run target",
+            canonical_forge_name(
+                observation.legacy_git_context.origin_url.as_str(),
+                forge_instance_url.as_deref()
+            )
+        )
     })?;
     if target.sha.is_none() {
         bail!(
-            "the exact local Git commit could not be made available from the canonical GitHub origin; push the commit and try again"
+            "the exact local Git commit could not be made available from the canonical {} origin; push the commit and try again",
+            canonical_forge_name(
+                target
+                    .instance_url
+                    .as_deref()
+                    .unwrap_or(observation.legacy_git_context.origin_url.as_str()),
+                forge_instance_url.as_deref(),
+            )
         );
     }
     Ok((RunTarget::Git(target), dirty))
+}
+
+/// The provider name used in run-target errors: the configured forge for
+/// origins on its instance, GitHub otherwise.
+fn canonical_forge_name<'a>(
+    origin_or_instance_url: &'a str,
+    forge_instance_url: Option<&'a str>,
+) -> &'a str {
+    match forge_instance_url {
+        Some(instance) if fabro_forgejo::is_instance_origin(origin_or_instance_url, instance) => {
+            "Forgejo/Gitea"
+        }
+        _ => "GitHub",
+    }
 }
 
 fn none_target_for_unversioned_directory(canonical_cwd: &Path) -> anyhow::Result<RunTarget> {

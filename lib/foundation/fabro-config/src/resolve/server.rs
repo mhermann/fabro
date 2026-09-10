@@ -1,13 +1,13 @@
 use std::path::Path;
 
 use fabro_types::settings::server::{
-    GithubIntegrationSettings, GithubIntegrationStrategy, IntegrationWebhooksSettings,
-    ObjectStoreProvider, ObjectStoreSettings, ServerApiSettings, ServerArtifactsSettings,
-    ServerAuthGithubSettings, ServerAuthMethod, ServerAuthSettings, ServerIntegrationsSettings,
-    ServerListenSettings, ServerLoggingSettings, ServerNamespace, ServerSandboxProviderSettings,
-    ServerSandboxProvidersSettings, ServerSandboxSettings, ServerSchedulerSettings,
-    ServerSlateDbSettings, ServerStorageSettings, ServerWebSettings, SlackIntegrationSettings,
-    WebhookStrategy,
+    ForgejoIntegrationSettings, GithubIntegrationSettings, GithubIntegrationStrategy,
+    IntegrationWebhooksSettings, ObjectStoreProvider, ObjectStoreSettings, ServerApiSettings,
+    ServerArtifactsSettings, ServerAuthGithubSettings, ServerAuthMethod, ServerAuthSettings,
+    ServerIntegrationsSettings, ServerListenSettings, ServerLoggingSettings, ServerNamespace,
+    ServerSandboxProviderSettings, ServerSandboxProvidersSettings, ServerSandboxSettings,
+    ServerSchedulerSettings, ServerSlateDbSettings, ServerStorageSettings, ServerWebSettings,
+    SlackIntegrationSettings, WebhookStrategy,
 };
 use fabro_util::Home;
 
@@ -30,6 +30,7 @@ pub fn resolve_server(layer: &ServerLayer, errors: &mut Vec<ResolveError>) -> Se
     let auth = resolve_auth(layer.auth.as_ref(), errors);
     let integrations = resolve_integrations(layer.integrations.as_ref());
     validate_github_webhook_strategy(&integrations, layer.api.as_ref(), errors);
+    validate_forgejo_settings(&integrations, errors);
 
     let api_url = layer.api.as_ref().and_then(|api| api.url.clone());
     warn_if_demoted_template("server.api.url", api_url.as_deref());
@@ -335,7 +336,7 @@ fn object_store_default_root(storage_root: &str, domain: &str) -> String {
 
 fn resolve_integrations(layer: Option<&ServerIntegrationsLayer>) -> ServerIntegrationsSettings {
     ServerIntegrationsSettings {
-        github: layer
+        github:  layer
             .and_then(|integrations| integrations.github.as_ref())
             .map(|github| {
                 warn_if_demoted_template(
@@ -357,7 +358,16 @@ fn resolve_integrations(layer: Option<&ServerIntegrationsLayer>) -> ServerIntegr
                 }
             })
             .unwrap_or_default(),
-        slack:  layer
+        forgejo: layer
+            .and_then(|integrations| integrations.forgejo.as_ref())
+            .map(|forgejo| ForgejoIntegrationSettings {
+                // Presence of the section enables the integration; a valid
+                // instance URL is enforced by `validate_forgejo_settings`.
+                enabled: forgejo.enabled.unwrap_or(true),
+                url:     forgejo.url.clone(),
+            })
+            .unwrap_or_default(),
+        slack:   layer
             .and_then(|integrations| integrations.slack.as_ref())
             .map_or(
                 SlackIntegrationSettings {
@@ -382,4 +392,22 @@ fn resolve_github_webhooks(layer: &IntegrationWebhooksLayer) -> IntegrationWebho
     IntegrationWebhooksSettings {
         strategy: layer.strategy,
     }
+}
+
+/// The single configured Forgejo/Gitea instance must be a usable origin.
+fn validate_forgejo_settings(
+    integrations: &ServerIntegrationsSettings,
+    errors: &mut Vec<ResolveError>,
+) {
+    let forgejo = &integrations.forgejo;
+    if !forgejo.enabled {
+        return;
+    }
+    let Some(reason) = forgejo.validate().err() else {
+        return;
+    };
+    errors.push(ResolveError::Invalid {
+        path: "server.integrations.forgejo.url".to_string(),
+        reason,
+    });
 }

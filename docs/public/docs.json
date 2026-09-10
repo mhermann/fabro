@@ -93,6 +93,7 @@
             "icon": "puzzle-piece",
             "pages": [
               "integrations/github",
+              "integrations/forgejo",
               "integrations/daytona",
               "integrations/litellm",
               "integrations/bedrock",
@@ -309,7 +310,8 @@
             "group": "September 2026",
             "icon": "clock-rotate-left",
             "pages": [
-              "changelog/2026-09-04"
+              "changelog/2026-09-04",
+              "changelog/2026-09-10"
             ]
           },
           {

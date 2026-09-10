@@ -2,8 +2,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use fabro_api::types as api_types;
-use fabro_config::user::active_settings_path;
+use fabro_config::Storage;
+use fabro_config::user::{active_settings_path, default_storage_dir};
+use fabro_static::EnvVars;
 use fabro_types::settings::replace_wildcard_host;
+use fabro_types::settings::server::{ForgejoIntegrationSettings, validate_instance_url};
 pub(crate) use fabro_util::check_report::{
     CheckDetail, CheckReport, CheckResult, CheckSection, CheckStatus,
 };
@@ -15,6 +18,127 @@ use fabro_util::version::FABRO_VERSION;
 use crate::args::DoctorArgs;
 use crate::command_context::CommandContext;
 use crate::shared::{cyan_spinner, print_json_pretty};
+
+/// Local Forgejo/Gitea check: when `[server.integrations.forgejo]` is
+/// enabled, the instance URL must be a valid origin and a token must be
+/// resolvable from the environment or the vault. Runs a best-effort
+/// version probe when both are present.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "doctor reads the documented FORGEJO_URL/FORGEJO_TOKEN overrides from the process env."
+)]
+async fn check_forgejo_local(settings_path: Option<std::path::PathBuf>) -> CheckResult {
+    let name = "Forgejo/Gitea".to_string();
+    let settings = load_server_integrations_forgejo(settings_path.as_deref());
+    if !settings.enabled {
+        return CheckResult {
+            name,
+            status: CheckStatus::Pass,
+            summary: "disabled".to_string(),
+            details: Vec::new(),
+            remediation: None,
+        };
+    }
+    let Some(url) = settings.url.clone() else {
+        return CheckResult {
+            name,
+            status: CheckStatus::Error,
+            summary: "enabled without an instance URL".to_string(),
+            details: Vec::new(),
+            remediation: Some("Set server.integrations.forgejo.url in settings.toml".to_string()),
+        };
+    };
+    if let Err(reason) = validate_instance_url(&url) {
+        return CheckResult {
+            name,
+            status: CheckStatus::Error,
+            summary: format!("invalid instance URL {url}"),
+            details: Vec::new(),
+            remediation: Some(reason.to_string()),
+        };
+    }
+    let env_token = std::env::var(EnvVars::FORGEJO_TOKEN)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let vault_token = if env_token.is_some() {
+        env_token
+    } else {
+        let storage_dir = default_storage_dir();
+        let storage = Storage::new(storage_dir);
+        let store =
+            fabro_vault::SecretStore::open_snapshot(storage.sqlite_path(), storage.secrets_path())
+                .await
+                .ok();
+        // The snapshot lookup is synchronous and returns the raw value.
+        store
+            .and_then(|snapshot| snapshot.get("FORGEJO_TOKEN").map(str::to_string))
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let Some(token) = vault_token else {
+        return CheckResult {
+            name,
+            status: CheckStatus::Error,
+            summary: "FORGEJO_TOKEN is not configured".to_string(),
+            details: vec![CheckDetail::new(format!("instance: {url}"))],
+            remediation: Some(
+                "Run `fabro install` or `fabro secret set FORGEJO_TOKEN`".to_string(),
+            ),
+        };
+    };
+    let creds = fabro_forgejo::ForgejoCredentials::Pat(token);
+    let ctx = fabro_forgejo::ForgejoContext::new(&creds, &url);
+    match fabro_forgejo::server_version(&ctx).await {
+        Ok(version) => CheckResult {
+            name,
+            status: CheckStatus::Pass,
+            summary: format!("connected (instance {version})"),
+            details: vec![CheckDetail::new(format!("instance: {url}"))],
+            remediation: None,
+        },
+        Err(err) => CheckResult {
+            name,
+            status: CheckStatus::Warning,
+            summary: "instance unreachable or token invalid".to_string(),
+            details: vec![CheckDetail::new(format!("{err:#}"))],
+            remediation: Some("Check the instance URL and FORGEJO_TOKEN".to_string()),
+        },
+    }
+}
+
+/// Load `[server.integrations.forgejo]` from settings, falling back to the
+/// FORGEJO_URL env override.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "doctor reads the documented FORGEJO_URL override and a small settings file synchronously, off any hot path."
+)]
+fn load_server_integrations_forgejo(
+    settings_path: Option<&std::path::Path>,
+) -> ForgejoIntegrationSettings {
+    let mut settings = settings_path.and_then(|path| {
+        let text = std::fs::read_to_string(path).ok()?;
+        let value: toml::Value = toml::from_str(&text).ok()?;
+        let url = value
+            .get("server")?
+            .get("integrations")?
+            .get("forgejo")?
+            .get("url")?
+            .as_str()?
+            .to_string();
+        Some(url)
+    });
+    if settings.is_none() {
+        settings = std::env::var(EnvVars::FORGEJO_URL)
+            .ok()
+            .filter(|v| !v.is_empty());
+    }
+    let enabled = settings.is_some() || std::env::var_os(EnvVars::FORGEJO_URL).is_some();
+    ForgejoIntegrationSettings {
+        enabled,
+        url: settings,
+    }
+}
 
 pub(crate) fn check_config(settings_path: Option<PathBuf>) -> CheckResult {
     match settings_path {
@@ -254,11 +378,19 @@ pub(crate) async fn run_doctor(
 
     let settings_config_path = active_settings_path(None);
 
-    let local_checks = vec![check_config(
-        settings_config_path
-            .exists()
-            .then_some(settings_config_path),
-    )];
+    let local_checks = vec![
+        check_config(
+            settings_config_path
+                .exists()
+                .then_some(settings_config_path.clone()),
+        ),
+        check_forgejo_local(
+            settings_config_path
+                .exists()
+                .then_some(settings_config_path),
+        )
+        .await,
+    ];
 
     let mut report = CheckReport {
         title:    "Fabro Doctor".to_string(),

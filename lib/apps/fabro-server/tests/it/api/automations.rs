@@ -79,10 +79,11 @@ fn automation_app() -> (axum::Router, tempfile::TempDir, PathBuf) {
 
 fn automation_app_with_fake_materializer() -> (axum::Router, tempfile::TempDir, PathBuf) {
     automation_app_with_materializer(TestAutomationRunMaterializer::succeed(GitRunTarget {
-        repo:   "fabro-sh/fabro".to_string(),
-        branch: "main".to_string(),
-        tag:    None,
-        sha:    Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+        repo:         "fabro-sh/fabro".to_string(),
+        branch:       "main".to_string(),
+        tag:          None,
+        sha:          Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+        instance_url: None,
     }))
 }
 
@@ -1038,10 +1039,11 @@ async fn incomplete_legacy_automation_fails_before_materialization() {
 #[tokio::test]
 async fn api_triggered_run_passes_saved_workflow_source_to_materialization() {
     let materializer = TestAutomationRunMaterializer::succeed(GitRunTarget {
-        repo:   "fabro-sh/fabro".to_string(),
-        branch: "main".to_string(),
-        tag:    None,
-        sha:    Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+        repo:         "fabro-sh/fabro".to_string(),
+        branch:       "main".to_string(),
+        tag:          None,
+        sha:          Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+        instance_url: None,
     });
     let (app, _temp_dir, _automation_dir) = automation_app_with_materializer(materializer.clone());
     let mut body = automation_body("nightly", "Nightly");
@@ -1059,10 +1061,11 @@ async fn api_triggered_run_passes_saved_workflow_source_to_materialization() {
     assert_eq!(
         captured[0],
         Some(AutomationGitWorkflowSource {
-            repo:   "fabro-sh/workflows".to_string(),
-            branch: "main".to_string(),
-            tag:    Some("release-v1".to_string()),
-            sha:    None,
+            repo:         "fabro-sh/workflows".to_string(),
+            branch:       "main".to_string(),
+            tag:          Some("release-v1".to_string()),
+            sha:          None,
+            instance_url: None,
         })
     );
     assert_eq!(
@@ -1079,10 +1082,11 @@ async fn api_triggered_run_passes_saved_workflow_source_to_materialization() {
 #[tokio::test]
 async fn api_triggered_automation_with_missing_version_does_not_create_or_start_a_run() {
     let materializer = TestAutomationRunMaterializer::return_unstored_version(GitRunTarget {
-        repo:   "fabro-sh/fabro".to_string(),
-        branch: "main".to_string(),
-        tag:    None,
-        sha:    Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+        repo:         "fabro-sh/fabro".to_string(),
+        branch:       "main".to_string(),
+        tag:          None,
+        sha:          Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+        instance_url: None,
     });
     let (app, _temp_dir, _automation_dir) = automation_app_with_materializer(materializer);
     create_automation(&app, "nightly", "Nightly").await;

@@ -403,6 +403,13 @@ fn validate_target(target: RunTarget) -> Result<RunTarget, AutomationValidationE
             kind: target.kind_name().to_string(),
         });
     }
+    // Automations resolve remotes through GitHub App credentials only; a
+    // server-submitted Forgejo/Gitea target has no usable credential source.
+    if let RunTarget::Git(git) = &target {
+        if git.instance_url.is_some() {
+            return Err(AutomationValidationError::ForgejoTargetNotSupported);
+        }
+    }
     target
         .validate()
         .map(|validated| validated.target)
@@ -486,6 +493,8 @@ mod tests {
             branch: "main".to_string(),
             tag:    None,
             sha:    None,
+
+            instance_url: None,
         })
     }
 
@@ -518,6 +527,8 @@ mod tests {
             branch: branch.to_string(),
             tag:    tag.map(str::to_string),
             sha:    sha.map(str::to_string),
+
+            instance_url: None,
         }
     }
 
@@ -765,6 +776,8 @@ enabled = true
             branch: "main;rm".to_string(),
             tag:    None,
             sha:    None,
+
+            instance_url: None,
         }))
         .unwrap_err();
 
@@ -805,6 +818,8 @@ enabled = true
                     branch: "main".to_string(),
                     tag:    None,
                     sha:    None,
+
+                    instance_url: None,
                 }),
                 workflow:        "release".to_string(),
                 workflow_source: None,
@@ -819,6 +834,8 @@ enabled = true
                     branch: "main;rm".to_string(),
                     tag:    None,
                     sha:    None,
+
+                    instance_url: None,
                 }),
                 workflow:        "release".to_string(),
                 workflow_source: None,

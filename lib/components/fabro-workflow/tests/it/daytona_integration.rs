@@ -206,6 +206,7 @@ async fn create_env_with_github_app(
         None,
         None,
         None,
+        None,
     )
     .await
     .expect("Failed to create Daytona client — is DAYTONA_API_KEY set?")
@@ -414,9 +415,19 @@ async fn daytona_snapshot_sandbox() {
     };
 
     let creds = load_github_app_credentials();
-    let env = DaytonaSandbox::new(config, Some(creds), None, None, None, None, None, None)
-        .await
-        .expect("Failed to create Daytona client — is DAYTONA_API_KEY set?");
+    let env = DaytonaSandbox::new(
+        config,
+        Some(creds),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("Failed to create Daytona client — is DAYTONA_API_KEY set?");
     env.initialize().await.unwrap();
 
     // Verify rg is available (installed by snapshot)
@@ -566,6 +577,8 @@ async fn daytona_pipeline_artifact_offload_and_sync() {
         pre_run_git:      None,
         fork_source_ref:  None,
         git:              None,
+
+        forgejo: None,
     };
     let outcome = engine
         .run(&graph, &run_options)
@@ -758,6 +771,8 @@ async fn daytona_git_checkpoint_remote_emits_events() {
             run_branch:  Some(branch_name),
             meta_branch: None,
         }),
+
+        forgejo: None,
     };
     let outcome = engine
         .run(&graph, &run_options)
@@ -902,6 +917,8 @@ async fn daytona_git_checkpoint_with_shadow_branch() {
             run_branch:  Some(branch_name),
             meta_branch: Some(meta_branch.clone()),
         }),
+
+        forgejo: None,
     };
     let outcome = engine
         .run(&graph, &run_options)
@@ -1056,6 +1073,8 @@ async fn daytona_asset_collection() {
         pre_run_git:      None,
         fork_source_ref:  None,
         git:              None,
+
+        forgejo: None,
     };
     let outcome = engine
         .run(&graph, &run_options)
@@ -1328,6 +1347,8 @@ async fn daytona_git_push_run_branch_to_origin() {
             run_branch:  Some(branch_name.clone()),
             meta_branch: None,
         }),
+
+        forgejo: None,
     };
     let outcome = engine
         .run(&graph, &run_options)
@@ -1619,7 +1640,7 @@ async fn daytona_computer_use_browser_screenshot() {
         skip_clone: true,
         ..DaytonaConfig::default()
     };
-    let env = DaytonaSandbox::new(config, None, None, None, None, None, None, None)
+    let env = DaytonaSandbox::new(config, None, None, None, None, None, None, None, None)
         .await
         .expect("DAYTONA_API_KEY must be set");
     env.initialize().await.unwrap();
@@ -1767,7 +1788,7 @@ async fn daytona_playwright_mcp_sandbox_transport() {
         skip_clone: true,
         ..DaytonaConfig::default()
     };
-    let sandbox = DaytonaSandbox::new(config, None, None, None, None, None, None, None)
+    let sandbox = DaytonaSandbox::new(config, None, None, None, None, None, None, None, None)
         .await
         .expect("DAYTONA_API_KEY must be set");
     sandbox.initialize().await.unwrap();

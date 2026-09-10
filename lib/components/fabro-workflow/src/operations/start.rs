@@ -80,11 +80,13 @@ struct RunSession {
     artifact_sink:     Option<ArtifactSink>,
     git:               Option<GitCheckpointOptions>,
     github_app:        Option<fabro_github::GitHubCredentials>,
+    forgejo:           Option<fabro_sandbox::ForgejoSandboxCredentials>,
     registry_override: Option<Arc<HandlerRegistry>>,
     preserve_sandbox:  bool,
     stop_on_terminal:  bool,
     pr_config:         Option<PullRequestSettings>,
     pr_github_app:     Option<fabro_github::GitHubCredentials>,
+    pr_forgejo:        Option<fabro_sandbox::ForgejoSandboxCredentials>,
     pr_origin_url:     Option<String>,
     pr_model:          String,
     workflow_path:     Option<ManifestPath>,
@@ -112,6 +114,9 @@ pub struct StartServices {
     pub artifact_sink:      Option<ArtifactSink>,
     pub run_control:        Option<Arc<RunControlState>>,
     pub github_app:         Option<fabro_github::GitHubCredentials>,
+    /// Forgejo/Gitea credentials for runs cloning from the configured
+    /// instance.
+    pub forgejo:            Option<fabro_sandbox::ForgejoSandboxCredentials>,
     /// The resolved GitHub integration request (interpolated permissions
     /// plus declared additional repositories) to inject into the sandbox
     /// env. Empty when the github integration requests no token.
@@ -535,6 +540,7 @@ impl RunSession {
                 SandboxSpec::Docker {
                     config,
                     github_app: services.github_app.clone(),
+                    forgejo: services.forgejo.clone(),
                     run_id: Some(record.run_id),
                     clone_origin_url: clone_source.origin_url,
                     clone_branch: clone_source.branch,
@@ -551,6 +557,7 @@ impl RunSession {
                 SandboxSpec::Daytona {
                     config: Box::new(config),
                     github_app: services.github_app.clone(),
+                    forgejo: services.forgejo.clone(),
                     run_id: Some(record.run_id),
                     clone_origin_url: clone_source.origin_url,
                     clone_branch: clone_source.branch,
@@ -617,11 +624,13 @@ impl RunSession {
             artifact_sink: services.artifact_sink,
             git,
             github_app: services.github_app.clone(),
+            forgejo: services.forgejo.clone(),
             registry_override: services.registry_override,
             preserve_sandbox: resolved.environment.lifecycle.preserve,
             stop_on_terminal: resolved.environment.lifecycle.stop_on_terminal,
             pr_config,
             pr_github_app: services.github_app,
+            pr_forgejo: services.forgejo.clone(),
             pr_origin_url: runtime_origin_url,
             pr_model: llm.model,
             workflow_path,
@@ -927,6 +936,7 @@ impl RunSession {
             labels:           record.labels.clone(),
             workflow_slug:    record.workflow_slug.clone(),
             github_app:       self.github_app.clone(),
+            forgejo:          self.forgejo.clone(),
             pre_run_git:      record.git.clone(),
             fork_source_ref:  record.fork_source_ref.clone(),
             base_branch:      record.base_branch().map(str::to_string),
@@ -1065,6 +1075,7 @@ impl RunSession {
         let publish_opts = PublishOptions {
             pr_config:  self.pr_config,
             github_app: self.pr_github_app,
+            forgejo:    self.pr_forgejo,
             origin_url: self.pr_origin_url,
             model:      self.pr_model,
         };
@@ -2069,6 +2080,8 @@ reasoning = false
                 branch: "main".to_string(),
                 tag:    None,
                 sha:    Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+
+                instance_url: None,
             }),
         ] {
             let temp = tempfile::tempdir().unwrap();
@@ -2583,6 +2596,8 @@ reasoning = false
             on_node: None,
             registry_override: Some(registry),
             fabro_run_tools: None,
+
+            forgejo: None,
         }
     }
 
@@ -3366,6 +3381,8 @@ reasoning = false
             branch: "feature/run-intent".to_string(),
             tag:    Some("v1.2.3".to_string()),
             sha:    Some(submitted_sha.to_string()),
+
+            instance_url: None,
         }));
         spec.git = Some(fabro_types::GitContext {
             origin_url: "https://github.com/fabro-sh/fabro".to_string(),
@@ -3393,6 +3410,8 @@ reasoning = false
             branch: "feature/run-intent".to_string(),
             tag:    None,
             sha:    None,
+
+            instance_url: None,
         }));
         spec.git = Some(fabro_types::GitContext {
             origin_url: "https://github.com/fabro-sh/fabro".to_string(),
@@ -3415,6 +3434,8 @@ reasoning = false
             branch: "release-work".to_string(),
             tag:    Some("v1.2.3".to_string()),
             sha:    None,
+
+            instance_url: None,
         }));
 
         let source = clone_source_for_run(&spec).unwrap();
@@ -3432,6 +3453,8 @@ reasoning = false
             branch: "main".to_string(),
             tag:    None,
             sha:    None,
+
+            instance_url: None,
         }));
         // A drifted (or absent) projection never feeds the clone source: the
         // validated target alone does.

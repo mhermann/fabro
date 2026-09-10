@@ -363,16 +363,20 @@ pub struct PullRequestCreationRequestedProps {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PullRequestCreatedProps {
-    pub pr_url:      String,
-    pub pr_number:   u64,
-    pub owner:       String,
-    pub repo:        String,
-    pub base_branch: String,
-    pub head_branch: String,
+    pub pr_url:       String,
+    pub pr_number:    u64,
+    pub owner:        String,
+    pub repo:         String,
+    pub base_branch:  String,
+    pub head_branch:  String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head_sha:    Option<String>,
-    pub title:       String,
-    pub draft:       bool,
+    pub head_sha:     Option<String>,
+    /// Forgejo/Gitea instance base URL when the pull request lives on a
+    /// self-hosted instance; absent for github.com.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_url: Option<String>,
+    pub title:        String,
+    pub draft:        bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

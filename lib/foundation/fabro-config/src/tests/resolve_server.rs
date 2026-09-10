@@ -123,11 +123,96 @@ fn resolved_server_integrations_disable_slack_when_config_is_absent() {
                 "slug": null,
                 "webhooks": null,
             },
+            "forgejo": {
+                "enabled": false,
+                "url": null,
+            },
             "slack": {
                 "enabled": false,
                 "default_channel": null,
             },
         })
+    );
+}
+
+#[test]
+fn resolved_server_integrations_enable_forgejo_when_config_is_present() {
+    let settings = resolve_server(&parse(
+        r#"
+_version = 1
+
+[server.integrations.forgejo]
+url = "https://forgejo.example.com"
+"#,
+    ));
+
+    assert!(settings.integrations.forgejo.enabled);
+    assert_eq!(
+        settings.integrations.forgejo.url.as_deref(),
+        Some("https://forgejo.example.com")
+    );
+}
+
+#[test]
+fn forgejo_url_is_required_when_the_section_is_present() {
+    let error = ServerSettingsBuilder::from_toml(
+        r"
+_version = 1
+
+[server.integrations.forgejo]
+",
+    )
+    .expect_err("forgejo without a url should fail to resolve");
+
+    assert!(render_resolve_error_lines(error).contains(
+        "server.integrations.forgejo.url: invalid value - a Forgejo/Gitea instance URL is required"
+    ));
+}
+
+#[test]
+fn forgejo_url_must_be_a_valid_https_origin() {
+    for bad in [
+        "forgejo.example.com",
+        "ftp://forgejo.example.com",
+        "https://",
+        "https://user:pass@forgejo.example.com",
+        "https://forgejo.example.com/gitea",
+        "https://forgejo.example.com?x=1",
+        "http://forgejo.example.com",
+    ] {
+        let error = ServerSettingsBuilder::from_toml(&format!(
+            r#"
+_version = 1
+
+[server.integrations.forgejo]
+url = "{bad}"
+"#
+        ))
+        .expect_err(&format!("forgejo url {bad:?} should fail to resolve"));
+
+        let rendered = render_resolve_error_lines(error);
+        assert!(
+            rendered.contains("server.integrations.forgejo.url: invalid value"),
+            "unexpected error for {bad:?}: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn forgejo_url_allows_loopback_http_for_tests() {
+    let settings = resolve_server(&parse(
+        r#"
+_version = 1
+
+[server.integrations.forgejo]
+url = "http://127.0.0.1:3000"
+"#,
+    ));
+
+    assert!(settings.integrations.forgejo.enabled);
+    assert_eq!(
+        settings.integrations.forgejo.url.as_deref(),
+        Some("http://127.0.0.1:3000")
     );
 }
 

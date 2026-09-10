@@ -563,6 +563,8 @@ mod tests {
             branch: branch.to_string(),
             tag:    tag.map(str::to_string),
             sha:    sha.map(str::to_string),
+
+            instance_url: None,
         }
     }
 
@@ -572,6 +574,8 @@ mod tests {
             branch: branch.to_string(),
             tag:    tag.map(str::to_string),
             sha:    sha.map(str::to_string),
+
+            instance_url: None,
         }
     }
 

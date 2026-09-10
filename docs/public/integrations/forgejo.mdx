@@ -1,0 +1,81 @@
+# Forgejo / Gitea
+
+Fabro supports [Forgejo](https://forgejo.org) and Gitea — the codeberg-style
+forges — as run origins for clone-based environments (Docker and Daytona).
+Because Forgejo and Gitea share a REST API, one integration covers both.
+
+## Scope in v1
+
+- **One instance per server.** `[server.integrations.forgejo]` configures a
+  single `url`; run and pull-request origins must match that host.
+- **Personal access token auth.** Forgejo has no GitHub Apps equivalent, so
+  the credential is a scoped PAT with `write:repository` and `read:user`.
+- **No OAuth login, no inbound webhooks, no automations.** Automations
+  remain github.com-only; a server-submitted Forgejo target is rejected
+  with an explicit error. The `[run.scm]` origin override also stays
+  GitHub-only — Forgejo runs always take their origin from the checkout's
+  own remote.
+
+## Setup
+
+1. On your Forgejo/Gitea instance, create a personal access token with
+   `write:repository` and `read:user` scopes.
+2. Configure the instance URL:
+
+   ```toml
+   # settings.toml
+   [server.integrations.forgejo]
+   enabled = true
+   url = "https://forgejo.example.com"
+   ```
+
+3. Store the token in the vault:
+
+   ```sh
+   fabro secret set FORGEJO_TOKEN
+   ```
+
+   Alternatively set the `FORGEJO_TOKEN` / `FORGEJO_URL` environment
+   variables for the Fabro process; they override the settings and vault
+   values respectively.
+
+The `FORGEJO_URL` override and a loopback `http://` scheme exist for local
+development and tests. Production instances must use `https`.
+
+## Running from a Forgejo checkout
+
+Run `fabro run` from any attached checkout whose `origin` points at the
+configured instance (HTTPS or SSH). The checkout is observed exactly as a
+GitHub checkout would be: branch, exact SHA after a best-effort push, and
+dirty-worktree detection all behave identically. The resulting run target
+carries the instance URL so workers clone with your token embedded
+(`oauth2:<token>` over HTTPS, the Forgejo convention).
+
+Pull requests work through the same workflow settings as GitHub:
+`[run.pull_request]` opens a PR against the run's base branch. Drafts use
+the `WIP: ` title prefix because the creation API has no draft flag; the
+instance then reports the PR as a draft automatically. Every merge strategy
+(`merge`, `squash`, `rebase`) maps to the instance's merge verb.
+
+## Limitations
+
+- **No auto-merge.** Forgejo/Gitea have no auto-merge API. Requesting
+  `auto_merge` on a Forgejo run fails with an explicit error; disable it in
+  `[run.pull_request]`.
+- **Draft detection is prefix-based.** Fabro uses the `WIP: ` prefix, which
+  matches Forgejo/Gitea defaults. Instances that customize
+  `[repository] WORK_IN_PROGRESS_PREFIXES` may report such PRs with
+  `draft: false`; Fabro also checks the common prefixes itself.
+- **No per-run permission scoping.** The PAT's scopes bound everything a
+  run can do, unlike GitHub's per-run minted tokens.
+- **No diff stats.** PR details (`additions`, `deletions`, `changed_files`)
+  are always zero; the API does not report them.
+- **GitHub slug rules apply.** Owner and repository names are validated
+  with GitHub's grammar (39/100 character limits), which Forgejo/Gitea
+  names fit inside.
+
+## `fabro pr` commands
+
+`fabro pr view`, `pr merge`, and `pr close` work against stored Forgejo
+pull requests. A stored link records its instance URL, so links remain
+valid if you widen the deployment to multiple instances later.

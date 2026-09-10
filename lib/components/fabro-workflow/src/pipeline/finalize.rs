@@ -727,6 +727,8 @@ mod tests {
             base_branch:      None,
             display_base_sha: None,
             git:              None,
+
+            forgejo: None,
         }
     }
 
@@ -770,6 +772,8 @@ mod tests {
             github_app: None,
             origin_url: None,
             model:      "test-model".to_string(),
+
+            forgejo: None,
         })
         .await;
         finalize(published, options).await
@@ -1394,6 +1398,8 @@ mod tests {
             github_app: None,
             origin_url: None,
             model:      "test-model".to_string(),
+
+            forgejo: None,
         })
         .await;
 
@@ -1448,6 +1454,8 @@ mod tests {
             github_app: None,
             origin_url: Some("https://github.com/owner/repo.git".to_string()),
             model:      "test-model".to_string(),
+
+            forgejo: None,
         })
         .await;
 
@@ -1548,6 +1556,8 @@ mod tests {
             github_app: None,
             origin_url: Some("https://github.com/owner/repo.git".to_string()),
             model:      "test-model".to_string(),
+
+            forgejo: None,
         })
         .await;
 
@@ -1613,6 +1623,8 @@ mod tests {
             github_app: None,
             origin_url: Some("https://github.com/owner/repo.git".to_string()),
             model:      "test-model".to_string(),
+
+            forgejo: None,
         })
         .await;
         let finalized = finalize(published, &options).await.unwrap();
@@ -1672,6 +1684,8 @@ mod tests {
             github_app: None,
             origin_url: Some("https://github.com/owner/repo.git".to_string()),
             model:      "test-model".to_string(),
+
+            forgejo: None,
         })
         .await;
         let finalized = finalize(published, &options).await.unwrap();

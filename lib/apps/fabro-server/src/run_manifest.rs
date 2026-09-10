@@ -459,6 +459,7 @@ async fn build_preflight_report(
         ));
     }
     run_environment_capability_check(&mut checks, &resolved_run);
+    forgejo_env_override_check(&mut checks, state, &resolved_run);
     let model_fallbacks_ok = run_model_fallback_check(
         &mut checks,
         catalog.as_ref(),
@@ -484,12 +485,20 @@ async fn build_preflight_report(
     };
 
     let daytona_api_key = state.vault_secret(EnvVars::DAYTONA_API_KEY).await?;
+    let forgejo = state
+        .forgejo_sandbox_credentials()
+        .await
+        .unwrap_or_else(|_| {
+            tracing::warn!("Forgejo/Gitea credentials unavailable for preflight");
+            None
+        });
     let sandbox_ok = run_sandbox_check(
         &mut checks,
         sandbox_provider,
         prepared,
         &resolved_run,
         github_app.clone(),
+        forgejo,
         daytona_api_key,
     )
     .await;
@@ -692,6 +701,37 @@ fn clone_disabled_for_provider(provider: SandboxProviderKind, resolved_run: &Run
         SandboxProviderKind::Docker | SandboxProviderKind::Daytona => !resolved_run.clone.enabled,
         SandboxProviderKind::Local => false,
     }
+}
+
+/// A user-defined FORGEJO_TOKEN in the resolved run environment overrides
+/// the managed credential inside the sandbox. Warn without failing; the
+/// value is the workflow author's responsibility.
+fn forgejo_env_override_check(
+    checks: &mut Vec<CheckResult>,
+    state: &AppState,
+    resolved_run: &RunNamespace,
+) {
+    if !resolved_run
+        .environment
+        .env
+        .contains_key(EnvVars::FORGEJO_TOKEN)
+    {
+        return;
+    }
+    let settings = state.forgejo_settings();
+    if !settings.enabled || settings.url.is_none() {
+        return;
+    }
+    checks.push(CheckResult {
+        name:        "FORGEJO_TOKEN Override".into(),
+        status:      CheckStatus::Warning,
+        summary:     "the run environment overrides the managed Forgejo/Gitea token".into(),
+        details:     vec![],
+        remediation: Some(
+            "The resolved run environment defines FORGEJO_TOKEN, which overrides the managed              credential for Git operations against the configured instance."
+                .to_string(),
+        ),
+    });
 }
 
 fn run_environment_capability_check(checks: &mut Vec<CheckResult>, resolved_run: &RunNamespace) {
@@ -914,6 +954,7 @@ fn preflight_sandbox_spec(
     prepared: &PreparedManifest,
     resolved_run: &RunNamespace,
     github_app: Option<fabro_github::GitHubCredentials>,
+    forgejo: Option<fabro_sandbox::ForgejoSandboxCredentials>,
     daytona_api_key: Option<String>,
 ) -> std::result::Result<SandboxSpec, fabro_sandbox::Error> {
     let clone_origin_url = prepared
@@ -936,6 +977,7 @@ fn preflight_sandbox_spec(
             SandboxSpec::Docker {
                 config,
                 github_app,
+                forgejo,
                 run_id: None,
                 clone_origin_url,
                 clone_branch,
@@ -949,6 +991,7 @@ fn preflight_sandbox_spec(
             SandboxSpec::Daytona {
                 config: Box::new(config),
                 github_app,
+                forgejo,
                 run_id: None,
                 clone_origin_url,
                 clone_branch,
@@ -966,6 +1009,7 @@ async fn run_sandbox_check(
     prepared: &PreparedManifest,
     resolved_run: &RunNamespace,
     github_app: Option<fabro_github::GitHubCredentials>,
+    forgejo: Option<fabro_sandbox::ForgejoSandboxCredentials>,
     daytona_api_key: Option<String>,
 ) -> bool {
     let spec = match preflight_sandbox_spec(
@@ -973,6 +1017,7 @@ async fn run_sandbox_check(
         prepared,
         resolved_run,
         github_app.clone(),
+        forgejo,
         daytona_api_key,
     ) {
         Ok(spec) => spec,
@@ -2231,6 +2276,7 @@ provider = "local"
             SandboxProviderKind::Docker,
             &prepared,
             &resolved,
+            None,
             None,
             None,
         );

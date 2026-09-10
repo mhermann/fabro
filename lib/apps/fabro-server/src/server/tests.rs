@@ -3831,6 +3831,8 @@ docker = "workflow-owned:latest"
             branch: "feature/run-intent".to_string(),
             tag:    Some("v1.2.3".to_string()),
             sha:    Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+
+            instance_url: None,
         }))
     );
     assert_eq!(
@@ -5074,6 +5076,8 @@ async fn create_run_from_manifest_helper_persists_automation_metadata_and_exact_
         branch: "main".to_string(),
         tag:    Some("v1.2.3".to_string()),
         sha:    Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+
+        instance_url: None,
     });
 
     let response = Box::pin(handler::runs::create_run_from_manifest(
@@ -5134,6 +5138,8 @@ async fn create_run_from_intent_helper_persists_automation_version_and_exact_tar
         branch: "main".to_string(),
         tag:    Some("v1.2.3".to_string()),
         sha:    Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+
+        instance_url: None,
     });
 
     let response = Box::pin(handler::runs::create_run_from_intent(
@@ -5546,6 +5552,8 @@ async fn fake_automation_materializer_injection_captures_input_and_returns_versi
         branch: "main".to_string(),
         tag:    None,
         sha:    Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+
+        instance_url: None,
     });
     let state = TestAppStateBuilder::new()
         .automation_materializer(fake.clone())
@@ -5557,6 +5565,8 @@ async fn fake_automation_materializer_injection_captures_input_and_returns_versi
         branch: "main".to_string(),
         tag:    None,
         sha:    None,
+
+        instance_url: None,
     };
 
     let output = state
@@ -6780,6 +6790,8 @@ channel = "#deploys"
             head_sha:    Some("final-sha".to_string()),
             title:       "Ship <prod> & notify".to_string(),
             draft:       false,
+
+            instance_url: None,
         },
     )
     .await
@@ -8721,6 +8733,8 @@ async fn create_run_with_pull_request_record(
             head_sha: Some("final-sha".to_string()),
             title: title.to_string(),
             draft: false,
+
+            instance_url: None,
         },
     ])
     .await;
@@ -12138,9 +12152,10 @@ async fn merge_run_pull_request_uses_stored_link_coordinates() {
     let (state, app, run_id) = pr_test_app(Some("ghu_test"), Some(github.base_url()));
 
     create_run_with_linked_pull_request_record(&state, run_id, PullRequestLink {
-        owner:  "acme".to_string(),
-        repo:   "widgets".to_string(),
-        number: 42,
+        owner:        "acme".to_string(),
+        repo:         "widgets".to_string(),
+        number:       42,
+        instance_url: None,
     })
     .await;
 
@@ -19538,6 +19553,8 @@ async fn list_runs_includes_live_metadata_from_run_state() {
             head_sha:    Some("final-sha".to_string()),
             title:       "Fix board metadata".to_string(),
             draft:       false,
+
+            instance_url: None,
         },
         workflow_event::Event::InterviewStarted {
             question_id:     "q-1".to_string(),

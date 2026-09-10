@@ -170,7 +170,7 @@ async fn attempt_pull_request_creation(
     run_state: &fabro_store::RunProjection,
     creation: &PullRequestCreation,
 ) -> anyhow::Result<Result<(), String>> {
-    let inputs = match RunPrInputs::extract(run_state, creation.force) {
+    let inputs = match RunPrInputs::extract(state, run_state, creation.force) {
         Ok(inputs) => inputs,
         Err(err) => return Ok(Err(err.detail().to_string())),
     };
@@ -182,10 +182,24 @@ async fn attempt_pull_request_creation(
         Ok(github) => github,
         Err(err) => return Ok(Err(err.detail().to_string())),
     };
+    // Forge origins create pull requests through the configured instance;
+    // everything else stays on the GitHub path.
+    let forgejo = state
+        .forgejo_sandbox_credentials()
+        .await
+        .ok()
+        .flatten()
+        .filter(|forgejo| {
+            fabro_forgejo::is_instance_origin(&inputs.normalized_origin, &forgejo.instance_url)
+        });
+    let forge_ctx = forgejo
+        .as_ref()
+        .map(|forgejo| fabro_forgejo::ForgejoContext::new(&forgejo.creds, &forgejo.instance_url));
     let catalog = state.catalog();
     let run_store_handle = run_store.clone().into();
     let request = pull_request::OpenPullRequestRequest {
-        github,
+        github: forge_ctx.is_none().then_some(github),
+        forgejo: forge_ctx,
         origin_url: &inputs.normalized_origin,
         base_branch: inputs.base_branch,
         head_branch: inputs.run_branch,

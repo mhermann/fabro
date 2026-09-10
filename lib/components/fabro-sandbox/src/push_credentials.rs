@@ -1,17 +1,21 @@
 //! Shared push-credential state for clone-based sandbox providers.
 //!
-//! Docker and Daytona embed GitHub credentials into the cloned repository's
-//! `origin` remote and refresh them before pushes. Both providers hold this
-//! state so the compare → `set-url` → record sequence, the generation
-//! tracking, and the refresh-error logging behave identically across
-//! providers. The token cache itself sits below the providers, in
-//! [`fabro_github::token_source::InstallationTokenSource`].
+//! Docker and Daytona embed GitHub or Forgejo/Gitea credentials into the
+//! cloned repository's `origin` remote and refresh them before pushes. Both
+//! providers hold this state so the compare → `set-url` → record sequence,
+//! the generation tracking, and the refresh-error logging behave identically
+//! across providers. The GitHub token cache sits below the providers, in
+//! [`fabro_github::token_source::InstallationTokenSource`]; Forgejo/Gitea
+//! credentials are static personal access tokens with nothing to mint.
 
 use std::future::Future;
 use std::sync::Arc;
 
+use fabro_forgejo::ForgejoCredentials;
 use fabro_github::GitHubCredentials;
-use fabro_github::token_source::{InstallationTokenSource, ResolvedToken, TokenSnapshot};
+use fabro_github::token_source::{
+    InstallationTokenSource, ResolvedToken, SecretString, TokenProvenance, TokenSnapshot,
+};
 use fabro_redact::DisplaySafeUrl;
 pub use fabro_types::run_event::GitCredentialRefreshError as RefreshErrorKind;
 use tokio::sync::{Mutex, MutexGuard};
@@ -19,25 +23,94 @@ use tokio::sync::{Mutex, MutexGuard};
 use crate::redact;
 use crate::sandbox::{RefreshOutcome, RemoteCredentialAction};
 
-/// Build the shared installation-token source for a clone-based sandbox.
+/// Credentials for one run's sandbox, classified by the origin the run
+/// clones from.
+#[derive(Clone)]
+pub(crate) enum CredentialSource {
+    GitHub(Arc<InstallationTokenSource>),
+    /// A static PAT plus the instance it authenticates to. Never mints and
+    /// never expires.
+    Forgejo {
+        instance_url: String,
+        token:        SecretString,
+    },
+}
+
+impl std::fmt::Debug for CredentialSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GitHub(_) => f.write_str("CredentialSource::GitHub(<token source>)"),
+            Self::Forgejo { instance_url, .. } => f
+                .debug_struct("CredentialSource::Forgejo")
+                .field("instance_url", instance_url)
+                .field("token", &SecretString::new(String::new()))
+                .finish(),
+        }
+    }
+}
+
+impl CredentialSource {
+    /// The GitHub installation-token source, when this is a GitHub
+    /// credential. Forgejo/Gitea credentials have no token source.
+    pub(crate) fn as_github(&self) -> Option<&Arc<InstallationTokenSource>> {
+        match self {
+            Self::GitHub(source) => Some(source),
+            Self::Forgejo { .. } => None,
+        }
+    }
+
+    /// Resolve the operation's target token. Forgejo resolves to a static
+    /// generation-0 token; GitHub mints or reuses through the token source.
+    async fn resolve(&self) -> anyhow::Result<ResolvedToken> {
+        match self {
+            Self::GitHub(source) => source.resolve().await,
+            Self::Forgejo { token, .. } => Ok(PushCredentialState::static_forgejo_token(token)),
+        }
+    }
+
+    /// Embed a token in an origin URL with the forge's username convention.
+    fn embed_token_in_url(&self, origin_url: &str, token: &str) -> crate::Result<DisplaySafeUrl> {
+        let embed = match self {
+            Self::Forgejo { .. } => fabro_forgejo::embed_token_in_url(origin_url, token),
+            Self::GitHub(_) => fabro_github::embed_token_in_url(origin_url, token),
+        };
+        embed.map_err(|err| {
+            crate::Error::context_anyhow("Failed to build authenticated origin URL", err)
+        })
+    }
+}
+
+/// Build the shared credential source for a clone-based sandbox.
 ///
-/// Returns `None` when there are no managed credentials or no GitHub origin
-/// to scope them to. Minted tokens carry the same `contents: write`
-/// permission the clone token uses.
-pub(crate) fn build_token_source(
+/// Forgejo/Gitea credentials win when the clone origin lives on the
+/// configured instance. Returns `None` when there are no managed
+/// credentials or no recognizable origin to scope them to.
+pub(crate) fn build_credential_source(
     github_app: Option<&GitHubCredentials>,
+    forgejo: Option<&ForgejoCredentials>,
+    forgejo_instance_url: Option<&str>,
     clone_origin_url: Option<&str>,
-) -> crate::Result<Option<Arc<InstallationTokenSource>>> {
-    let Some(creds) = github_app else {
-        return Ok(None);
-    };
+) -> crate::Result<Option<CredentialSource>> {
     let Some(origin_url) = clone_origin_url.filter(|url| !url.trim().is_empty()) else {
         return Ok(None);
     };
     let normalized = fabro_github::normalize_repo_origin_url(origin_url);
+
+    if let (Some(creds), Some(instance_url)) = (forgejo, forgejo_instance_url) {
+        if fabro_forgejo::is_instance_origin(&normalized, instance_url) {
+            return Ok(Some(CredentialSource::Forgejo {
+                instance_url: instance_url.to_string(),
+                token:        SecretString::new(creds.token().to_string()),
+            }));
+        }
+    }
+
+    let Some(creds) = github_app else {
+        return Ok(None);
+    };
     let Ok((owner, repo)) = fabro_github::parse_github_owner_repo(&normalized) else {
-        // Non-GitHub origins never clone in these providers, so there is no
-        // remote to keep credentials fresh for.
+        // Unrecognized origins never clone in these providers, so there is
+        // no remote to keep credentials fresh for.
         return Ok(None);
     };
     InstallationTokenSource::for_repository(
@@ -46,14 +119,14 @@ pub(crate) fn build_token_source(
         repo,
         serde_json::json!({ "contents": "write" }),
     )
-    .map(Some)
+    .map(|source| Some(CredentialSource::GitHub(source)))
     .map_err(|err| crate::Error::context_anyhow("Failed to build GitHub token source", err))
 }
 
 /// Push-credential state one provider instance tracks for its `origin`
 /// remote.
 pub(crate) struct PushCredentialState {
-    source:   Option<Arc<InstallationTokenSource>>,
+    source:   Option<CredentialSource>,
     /// Serializes compare → `set-url` → record. The token source's
     /// single-flight ends before the sandbox exec, so without this lock a
     /// refresh-ahead tick and a push could both see the old embedded
@@ -67,14 +140,14 @@ pub(crate) struct PushCredentialState {
 }
 
 impl PushCredentialState {
-    pub(crate) fn new(source: Option<Arc<InstallationTokenSource>>) -> Self {
+    pub(crate) fn new(source: Option<CredentialSource>) -> Self {
         Self {
             source,
             embedded: Mutex::new(None),
         }
     }
 
-    pub(crate) fn source(&self) -> Option<&Arc<InstallationTokenSource>> {
+    pub(crate) fn source(&self) -> Option<&CredentialSource> {
         self.source.as_ref()
     }
 
@@ -86,12 +159,27 @@ impl PushCredentialState {
         *self.embedded.lock().await = Some(token);
     }
 
+    /// Build a static resolved token for a Forgejo/Gitea credential: no
+    /// mint step and no expiry, so a refresh never needs to re-embed.
+    pub(crate) fn static_forgejo_token(token: &SecretString) -> ResolvedToken {
+        ResolvedToken {
+            token:          token.clone(),
+            snapshot:       TokenSnapshot {
+                generation: 0,
+                provenance: TokenProvenance::Static,
+            },
+            refresh_failed: false,
+        }
+    }
+
     /// Refresh the credentials embedded in `origin`.
     ///
     /// Resolves through the shared source, skips the `set-url` exec when the
     /// resolved generation is already embedded, and records the new
     /// generation only after `set_url` succeeds. `set_url` receives the
-    /// authenticated URL to embed and runs under the embed lock.
+    /// authenticated URL to embed and runs under the embed lock. Forgejo
+    /// tokens are static, so their resolve always reports generation 0 and
+    /// the first compare short-circuits after the clone seeded the state.
     pub(crate) async fn refresh<F, Fut>(
         &self,
         origin_url: &str,
@@ -105,31 +193,34 @@ impl PushCredentialState {
             return Ok(RefreshOutcome::none());
         };
         let mut embedded = self.embedded.lock().await;
-        let resolved = match source.resolve().await {
-            Ok(resolved) => resolved,
-            Err(err) => {
-                // The refresh-error path is defined, not incidental: the push
-                // proceeds with the last embedded token, so log which one
-                // that is instead of losing the credential state.
-                if let Some(prev) = embedded.as_ref() {
-                    tracing::warn!(
-                        error = %format!("{err:#}"),
-                        generation = prev.snapshot.generation,
-                        provenance = %prev.snapshot.provenance,
-                        token_age_ms = prev.snapshot.age_ms(),
-                        "GitHub token refresh failed; origin keeps the last embedded credentials"
-                    );
-                } else {
-                    tracing::warn!(
-                        error = %format!("{err:#}"),
-                        "GitHub token refresh failed and no credentials were ever embedded"
-                    );
+        let resolved = match source {
+            CredentialSource::GitHub(source) => match source.resolve().await {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    // The refresh-error path is defined, not incidental: the push
+                    // proceeds with the last embedded token, so log which one
+                    // that is instead of losing the credential state.
+                    if let Some(prev) = embedded.as_ref() {
+                        tracing::warn!(
+                            error = %format!("{err:#}"),
+                            generation = prev.snapshot.generation,
+                            provenance = %prev.snapshot.provenance,
+                            token_age_ms = prev.snapshot.age_ms(),
+                            "GitHub token refresh failed; origin keeps the last embedded credentials"
+                        );
+                    } else {
+                        tracing::warn!(
+                            error = %format!("{err:#}"),
+                            "GitHub token refresh failed and no credentials were ever embedded"
+                        );
+                    }
+                    return Err(crate::Error::context_anyhow(
+                        "Failed to refresh push credentials",
+                        err,
+                    ));
                 }
-                return Err(crate::Error::context_anyhow(
-                    "Failed to refresh push credentials",
-                    err,
-                ));
-            }
+            },
+            CredentialSource::Forgejo { token, .. } => Self::static_forgejo_token(token),
         };
         if embedded
             .as_ref()
@@ -137,10 +228,18 @@ impl PushCredentialState {
         {
             return Ok(RefreshOutcome::unchanged(resolved.snapshot));
         }
-        let auth_url = fabro_github::embed_token_in_url(origin_url, resolved.token.expose())
-            .map_err(|err| {
-                crate::Error::context_anyhow("Failed to build authenticated origin URL", err)
-            })?;
+        // Each forge embeds credentials with its own username convention.
+        let auth_url = match source {
+            CredentialSource::Forgejo { .. } => {
+                fabro_forgejo::embed_token_in_url(origin_url, resolved.token.expose())
+            }
+            CredentialSource::GitHub(_) => {
+                fabro_github::embed_token_in_url(origin_url, resolved.token.expose())
+            }
+        }
+        .map_err(|err| {
+            crate::Error::context_anyhow("Failed to build authenticated origin URL", err)
+        })?;
         set_url(auth_url).await?;
         let snapshot = resolved.snapshot;
         *embedded = Some(resolved);
@@ -172,7 +271,7 @@ pub(crate) struct EnsureOutcome {
 /// embed. The token source's refresh margin exceeds every push plan's elapsed
 /// bound, so the pinned token always outlives the operation.
 pub(crate) struct CredentialLease<'a> {
-    source:             Option<&'a InstallationTokenSource>,
+    source:             Option<&'a CredentialSource>,
     /// Embed-mutex guard: the last successfully embedded token.
     embedded:           MutexGuard<'a, Option<ResolvedToken>>,
     /// The operation's resolved target, including a cached fallback when a
@@ -192,7 +291,7 @@ impl PushCredentialState {
     /// backoff. A resolve with no cached or embedded token fails acquisition.
     pub(crate) async fn lease(&self) -> crate::Result<CredentialLease<'_>> {
         let embedded = self.embedded.lock().await;
-        let Some(source) = self.source.as_deref() else {
+        let Some(source) = self.source.as_ref() else {
             return Ok(CredentialLease {
                 source: None,
                 embedded,
@@ -310,7 +409,7 @@ impl CredentialLease<'_> {
                 refresh_error,
             });
         }
-        match set_url_via_exec(sandbox, origin_url, &desired).await {
+        match set_url_via_exec(sandbox, origin_url, &desired, source).await {
             Ok(()) => {
                 let snapshot = desired.snapshot;
                 *self.embedded = Some(desired);
@@ -348,9 +447,11 @@ async fn set_url_via_exec(
     sandbox: &dyn crate::Sandbox,
     origin_url: &str,
     token: &ResolvedToken,
+    source: &CredentialSource,
 ) -> crate::Result<()> {
-    let auth_url =
-        fabro_github::embed_token_in_url(origin_url, token.token.expose()).map_err(|err| {
+    let auth_url = source
+        .embed_token_in_url(origin_url, token.token.expose())
+        .map_err(|err| {
             crate::Error::context(
                 "Failed to build authenticated origin URL",
                 RedactedSetUrlError(fabro_redact::redact_string(&format!("{err:#}"))),
@@ -428,13 +529,13 @@ mod tests {
     }
 
     fn minting_state(ttl: chrono::Duration) -> PushCredentialState {
-        PushCredentialState::new(Some(installation_token_source(
+        PushCredentialState::new(Some(CredentialSource::GitHub(installation_token_source(
             "owner/repo",
             Arc::new(FixedMinter {
                 calls: AtomicUsize::new(0),
                 ttl,
             }),
-        )))
+        ))))
     }
 
     const ORIGIN: &str = "https://github.com/owner/repo";
@@ -543,7 +644,14 @@ mod tests {
     #[tokio::test]
     async fn clone_seed_makes_the_first_refresh_a_no_op() {
         let state = minting_state(chrono::Duration::minutes(60));
-        let clone_token = state.source().unwrap().mint_for_clone().await.unwrap();
+        let clone_token = state
+            .source()
+            .unwrap()
+            .as_github()
+            .unwrap()
+            .mint_for_clone()
+            .await
+            .unwrap();
         state.record_embedded(clone_token).await;
 
         let outcome = state
@@ -581,8 +689,15 @@ mod tests {
             serde_json::json!({ "contents": "write" }),
         )
         .unwrap();
-        let state = PushCredentialState::new(Some(source));
-        let clone_token = state.source().unwrap().mint_for_clone().await.unwrap();
+        let state = PushCredentialState::new(Some(CredentialSource::GitHub(source)));
+        let clone_token = state
+            .source()
+            .unwrap()
+            .as_github()
+            .unwrap()
+            .mint_for_clone()
+            .await
+            .unwrap();
         state.record_embedded(clone_token).await;
 
         let outcome = state
@@ -595,9 +710,8 @@ mod tests {
 
     #[tokio::test]
     async fn mint_failure_preserves_the_mint_error_chain() {
-        let state = PushCredentialState::new(Some(installation_token_source(
-            "owner/repo",
-            Arc::new(FailingMinter),
+        let state = PushCredentialState::new(Some(CredentialSource::GitHub(
+            installation_token_source("owner/repo", Arc::new(FailingMinter)),
         )));
 
         let err = state
@@ -612,18 +726,72 @@ mod tests {
 
     #[test]
     fn token_source_requires_managed_credentials_and_a_github_origin() {
-        assert!(build_token_source(None, Some(ORIGIN)).unwrap().is_none());
-        let pat = GitHubCredentials::Pat("ghp_pat".to_string());
-        assert!(build_token_source(Some(&pat), None).unwrap().is_none());
         assert!(
-            build_token_source(Some(&pat), Some("https://gitlab.com/owner/repo"))
+            build_credential_source(None, None, None, Some(ORIGIN))
+                .unwrap()
+                .is_none()
+        );
+        let pat = GitHubCredentials::Pat("ghp_pat".to_string());
+        assert!(
+            build_credential_source(Some(&pat), None, None, None)
                 .unwrap()
                 .is_none()
         );
         assert!(
-            build_token_source(Some(&pat), Some(ORIGIN))
+            build_credential_source(
+                Some(&pat),
+                None,
+                None,
+                Some("https://gitlab.com/owner/repo")
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            build_credential_source(Some(&pat), None, None, Some(ORIGIN))
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn forge_credentials_win_for_origins_on_the_configured_instance() {
+        let pat = GitHubCredentials::Pat("ghp_pat".to_string());
+        let forgejo = ForgejoCredentials::Pat("forgejo-pat".to_string());
+
+        let source = build_credential_source(
+            Some(&pat),
+            Some(&forgejo),
+            Some("https://forgejo.example.com"),
+            Some("https://forgejo.example.com/acme/widgets.git"),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(source, CredentialSource::Forgejo { .. }));
+
+        // A github.com origin keeps the GitHub source even with forge
+        // credentials configured.
+        let source = build_credential_source(
+            Some(&pat),
+            Some(&forgejo),
+            Some("https://forgejo.example.com"),
+            Some(ORIGIN),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(source, CredentialSource::GitHub(_)));
+
+        // Forge credentials on an unknown host produce no credential at all
+        // (the origin will be rejected by decide_clone).
+        assert!(
+            build_credential_source(
+                None,
+                Some(&forgejo),
+                Some("https://forgejo.example.com"),
+                Some("https://other.example.com/acme/widgets"),
+            )
+            .unwrap()
+            .is_none()
         );
     }
 }

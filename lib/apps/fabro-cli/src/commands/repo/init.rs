@@ -11,6 +11,7 @@ use tokio::task::spawn_blocking;
 
 use crate::args::{RepoInitArgs, ServerTargetArgs};
 use crate::command_context::CommandContext;
+use crate::shared::forgejo::resolve_forgejo_instance_url;
 
 #[expect(
     clippy::disallowed_methods,
@@ -192,10 +193,27 @@ async fn check_github_app_installation(target: &ServerTargetArgs, base_ctx: &Com
         Err(_) => return,
     };
 
-    // Convert SSH URL to HTTPS and parse owner/repo
+    // Convert SSH URL to HTTPS and parse owner/repo. Origins on the
+    // configured Forgejo/Gitea instance probe the forge repo endpoint
+    // instead of GitHub's.
     let https_url = fabro_github::ssh_url_to_https(&remote_url);
-    let Ok((owner, repo)) = fabro_github::parse_github_owner_repo(&https_url) else {
-        return; // Not a GitHub repo — skip silently
+    let forge_instance_url = resolve_forgejo_instance_url();
+    let forge_origin = forge_instance_url
+        .as_deref()
+        .is_some_and(|instance| fabro_forgejo::is_instance_origin(&https_url, instance));
+    let (owner, repo) = if forge_origin {
+        match fabro_forgejo::parse_owner_repo(
+            &https_url,
+            forge_instance_url.as_deref().unwrap_or_default(),
+        ) {
+            Some(pair) => pair,
+            None => return,
+        }
+    } else {
+        let Ok((owner, repo)) = fabro_github::parse_github_owner_repo(&https_url) else {
+            return; // Not a GitHub repo — skip silently
+        };
+        (owner, repo)
     };
 
     let ctx = match base_ctx.with_target(target) {
@@ -220,19 +238,37 @@ async fn check_github_app_installation(target: &ServerTargetArgs, base_ctx: &Com
         }
     };
 
-    let check = match server.get_github_repo(&owner, &repo).await {
-        Ok(response) => response,
-        Err(err) => {
-            fabro_util::printerr!(printer, "\n  Warning: could not check GitHub access: {err}");
-            return;
+    let check = if forge_origin {
+        match server.get_forgejo_repo(&owner, &repo).await {
+            Ok(response) => response,
+            Err(err) => {
+                fabro_util::printerr!(
+                    printer,
+                    "\n  Warning: could not check Forgejo/Gitea access: {err}"
+                );
+                return;
+            }
+        }
+    } else {
+        match server.get_github_repo(&owner, &repo).await {
+            Ok(response) => response,
+            Err(err) => {
+                fabro_util::printerr!(printer, "\n  Warning: could not check GitHub access: {err}");
+                return;
+            }
         }
     };
 
     if check.accessible {
         let green = console::Style::new().green();
+        let forge_label = if forge_origin {
+            "Forgejo/Gitea"
+        } else {
+            "GitHub"
+        };
         fabro_util::printerr!(
             printer,
-            "\n  {} GitHub access is configured for {owner}/{repo}",
+            "\n  {} {forge_label} access is configured for {owner}/{repo}",
             green.apply_to("✔")
         );
         return;

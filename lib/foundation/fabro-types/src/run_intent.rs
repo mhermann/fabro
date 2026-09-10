@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::settings::server::validate_instance_url;
 use crate::{DirtyStatus, GitContext, GitHubRepositorySlug, RunId, WorkflowVersionId, repository};
 
 /// A request to create a run from an immutable workflow version.
@@ -61,15 +62,22 @@ pub enum RunTarget {
 /// `branch` is always the attached working branch. When present, `tag` names
 /// the requested release identity. An exact `sha` is authoritative over both
 /// selectors while preserving the tag in durable state.
+///
+/// `instance_url` is the base URL of the configured Forgejo/Gitea instance
+/// when the target lives on a self-hosted instance; `None` means
+/// github.com. Only a locally observed checkout produces an instance URL —
+/// automations and other server-submitted targets stay GitHub-only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitRunTarget {
-    pub repo:   String,
-    pub branch: String,
+    pub repo:         String,
+    pub branch:       String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tag:    Option<String>,
+    pub tag:          Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sha:    Option<String>,
+    pub sha:          Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_url: Option<String>,
 }
 
 impl GitRunTarget {
@@ -78,17 +86,25 @@ impl GitRunTarget {
     ///
     /// # Errors
     ///
-    /// Returns an error when the repository slug, branch, tag, or exact commit
-    /// does not use the canonical grammar accepted for Git-backed runs.
+    /// Returns an error when the repository slug, branch, tag, instance URL,
+    /// or exact commit does not use the canonical grammar accepted for
+    /// Git-backed runs.
     pub fn validate(self) -> Result<ValidatedGitRunTarget, GitCoordinateValidationError> {
         let Self {
             repo,
             branch,
             tag,
             sha,
+            instance_url,
         } = self;
         let repository =
             GitHubRepositorySlug::try_new(&repo).ok_or(GitCoordinateValidationError::Repository)?;
+        // GitHub's owner/name grammar (39/100 character limits included) is
+        // enforced for every forge; Forgejo/Gitea names fit inside it.
+        if let Some(instance_url) = &instance_url {
+            validate_instance_url(instance_url)
+                .map_err(|_| GitCoordinateValidationError::Repository)?;
+        }
         if !repository::is_valid_git_branch_name(&branch) {
             return Err(GitCoordinateValidationError::Branch);
         }
@@ -103,11 +119,22 @@ impl GitRunTarget {
                 repository::normalize_git_commit_sha(&sha).ok_or(GitCoordinateValidationError::Sha)
             })
             .transpose()?;
+        let origin_url = instance_url.as_deref().map_or_else(
+            || repository.https_url(),
+            |instance_url| {
+                format!(
+                    "{}/{}/{}",
+                    instance_url.trim_end_matches('/'),
+                    repository.owner(),
+                    repository.repo()
+                )
+            },
+        );
         let git = GitContext {
-            origin_url: repository.https_url(),
-            branch:     branch.clone(),
-            sha:        sha.clone(),
-            dirty:      DirtyStatus::Clean,
+            origin_url,
+            branch: branch.clone(),
+            sha: sha.clone(),
+            dirty: DirtyStatus::Clean,
         };
         Ok(ValidatedGitRunTarget {
             target: Self {
@@ -115,6 +142,7 @@ impl GitRunTarget {
                 branch,
                 tag,
                 sha,
+                instance_url,
             },
             repository,
             git,
@@ -176,9 +204,19 @@ impl ValidatedGitRunTarget {
     }
 
     /// The parsed GitHub repository named by the target.
+    ///
+    /// The slug grammar is shared across forges; forge consumers need
+    /// [`Self::instance_url`] to know which instance the slug belongs to.
     #[must_use]
     pub fn repository(&self) -> &GitHubRepositorySlug {
         &self.repository
+    }
+
+    /// The Forgejo/Gitea instance backing this target, or `None` for
+    /// github.com.
+    #[must_use]
+    pub fn instance_url(&self) -> Option<&str> {
+        self.target.instance_url.as_deref()
     }
 
     /// Consume the validation proof and return the canonical Git target.

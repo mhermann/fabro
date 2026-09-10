@@ -52,6 +52,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::RunWorkerMode;
 use crate::server_client;
+use crate::shared::forgejo::{build_forgejo_credentials, resolve_forgejo_instance_url};
 use crate::shared::github::build_github_credentials;
 
 const RUN_STORE_RETRY_DELAYS: [Duration; 3] = [
@@ -141,6 +142,10 @@ pub(crate) async fn execute(
         let vault_guard = vault.read().await;
         maybe_build_github_credentials(&run_spec.settings, &vault_guard)?
     };
+    let forgejo = {
+        let vault_guard = vault.read().await;
+        maybe_build_forgejo_credentials(&vault_guard)
+    };
     let services = StartServices {
         run_id,
         cancel_token: cancel_token.clone(),
@@ -161,6 +166,7 @@ pub(crate) async fn execute(
         artifact_sink,
         run_control: Some(run_control),
         github_app,
+        forgejo,
         github_integration: run_spec
             .settings
             .run
@@ -1141,6 +1147,27 @@ fn requires_github_credentials(run: &RunNamespace) -> bool {
         return true;
     }
     run.execution.mode != RunMode::DryRun && run.environment.provider.is_clone_based()
+}
+
+/// Resolve Forgejo/Gitea sandbox credentials when the instance is
+/// configured. Missing credentials are a soft skip: the run may not touch a
+/// forge origin at all, and `decide_clone` rejects unmatched origins before
+/// any clone code runs.
+fn maybe_build_forgejo_credentials(
+    vault: &fabro_vault::Vault,
+) -> Option<fabro_sandbox::ForgejoSandboxCredentials> {
+    let instance_url = resolve_forgejo_instance_url()?;
+    let Some(creds) = build_forgejo_credentials(vault) else {
+        tracing::warn!(
+            "Forgejo/Gitea instance is configured but FORGEJO_TOKEN is not set; \
+             forge origins will not authenticate"
+        );
+        return None;
+    };
+    Some(fabro_sandbox::ForgejoSandboxCredentials::new(
+        instance_url,
+        creds,
+    ))
 }
 
 fn install_signal_handlers(

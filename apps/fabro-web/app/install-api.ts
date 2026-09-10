@@ -227,3 +227,34 @@ export async function finishInstall(token: string): Promise<InstallFinishRespons
     }),
   );
 }
+
+export async function testInstallForgejo(
+  token: string,
+  url: string,
+  forgejoToken: string,
+): Promise<{ username: string; version: string }> {
+  return installCall("install forgejo validation failed", () =>
+    apiData(() => installApi.testInstallForgejo(
+      { url, token: forgejoToken },
+      installOptions(token),
+    ), {
+      redirectOnUnauthorized: false,
+    }),
+  );
+}
+
+export async function putInstallForgejo(
+  token: string,
+  url: string,
+  forgejoToken: string,
+  username: string,
+): Promise<void> {
+  await installCall("install forgejo request failed", () =>
+    apiData(() => installApi.putInstallForgejo(
+      { url, token: forgejoToken, username },
+      installOptions(token),
+    ), {
+      redirectOnUnauthorized: false,
+    }),
+  );
+}

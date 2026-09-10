@@ -1,0 +1,25 @@
+# Forgejo / Gitea support
+
+Clone-based runs now work from self-hosted Forgejo and Gitea checkouts.
+Configure one instance under `[server.integrations.forgejo]`, store its
+personal access token as `FORGEJO_TOKEN`, and `fabro run` from any checkout
+on that instance: admission, cloning, run-branch pushes, and pull-request
+creation all go through the instance.
+
+Highlights:
+
+- New `fabro-forgejo` client crate mirroring the GitHub API surface
+  (validate token, repositories, branches, pull-request
+  create/find/get/merge/close).
+- Forgejo run targets carry their instance URL end to end, so admission,
+  sandbox clones, and stored pull-request links all stay host-aware.
+- The browser install wizard gained a skippable Forgejo/Gitea step, plus
+  `POST /install/forgejo/test` and `PUT /install/forgejo` endpoints, a
+  `GET /repos/forgejo/{owner}/{name}` access check, system-integrations
+  status, diagnostics, and doctor coverage.
+- `PullRequestLink` gained an optional `instance_url`; GitHub links are
+  unchanged on the wire.
+
+Known limitations: no auto-merge (it fails with an explicit error), drafts
+use the `WIP: ` title prefix, and PR details omit diff stats. See
+[integrations/forgejo](/integrations/forgejo).

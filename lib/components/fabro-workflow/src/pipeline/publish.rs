@@ -160,13 +160,32 @@ impl Concluded {
         let base_branch = self.run_options.base_branch.as_deref().ok_or_else(|| {
             self.pull_request_error("pull request creation requires a base branch")
         })?;
-        let credentials = options.github_app.as_ref().ok_or_else(|| {
-            self.pull_request_error("pull request creation requires GitHub credentials")
-        })?;
-        let github_base_url = fabro_github::github_api_base_url();
+        // Dispatch on the origin host: forge contexts only serve origins on
+        // the configured instance; everything else falls to GitHub.
+        let forge_ctx = options
+            .forgejo
+            .as_ref()
+            .filter(|forgejo| fabro_forgejo::is_instance_origin(origin_url, &forgejo.instance_url));
+        let forgejo = forge_ctx.map(|forgejo| {
+            fabro_forgejo::ForgejoContext::new(&forgejo.creds, &forgejo.instance_url)
+        });
+        let github_base_url;
+        let github = if forgejo.is_none() {
+            let credentials = options.github_app.as_ref().ok_or_else(|| {
+                self.pull_request_error("pull request creation requires GitHub credentials")
+            })?;
+            github_base_url = fabro_github::github_api_base_url();
+            Some(fabro_github::GitHubContext::new(
+                credentials,
+                &github_base_url,
+            ))
+        } else {
+            None
+        };
 
         let created = open_pull_request(OpenPullRequestRequest {
-            github: fabro_github::GitHubContext::new(credentials, &github_base_url),
+            github,
+            forgejo,
             origin_url,
             base_branch,
             head_branch: run_branch,

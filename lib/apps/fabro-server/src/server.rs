@@ -94,7 +94,8 @@ use fabro_types::BlockedReason;
 use fabro_types::settings::RunNamespace;
 use fabro_types::settings::run::{NotificationRouteSettings, RunMode};
 use fabro_types::settings::server::{
-    GithubIntegrationSettings, GithubIntegrationStrategy, LogDestination,
+    ForgejoIntegrationSettings, GithubIntegrationSettings, GithubIntegrationStrategy,
+    LogDestination,
 };
 use fabro_types::{
     AgentBackend, AskFabro, AskFabroUnavailableReason, BlobHash, EventBody,
@@ -1367,7 +1368,9 @@ impl AppState {
         self.refresh_manifest_run_settings_from_catalogs();
     }
 
-    fn http_client(&self) -> Result<fabro_http::HttpClient, fabro_http::HttpClientBuildError> {
+    pub(crate) fn http_client(
+        &self,
+    ) -> Result<fabro_http::HttpClient, fabro_http::HttpClientBuildError> {
         match &self.http_client {
             Some(client) => Ok(client.clone()),
             None => fabro_http::http_client(),
@@ -1619,6 +1622,55 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// The resolved Forgejo/Gitea integration settings.
+    pub(crate) fn forgejo_settings(&self) -> ForgejoIntegrationSettings {
+        self.server_settings().server.integrations.forgejo.clone()
+    }
+
+    /// Resolve Forgejo/Gitea credentials: `FORGEJO_TOKEN` overrides the
+    /// vault value, mirroring the CLI resolution order.
+    pub(crate) async fn forgejo_credentials(
+        &self,
+    ) -> anyhow::Result<Option<fabro_forgejo::ForgejoCredentials>> {
+        let env_token = (self.env_lookup)(EnvVars::FORGEJO_TOKEN);
+        let token = match env_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+        {
+            Some(token) => Some(token),
+            None => self
+                .vault_secret(EnvVars::FORGEJO_TOKEN)
+                .await
+                .map_err(anyhow::Error::new)?
+                .as_deref()
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .map(str::to_string),
+        };
+        Ok(token.map(fabro_forgejo::ForgejoCredentials::Pat))
+    }
+
+    /// Forgejo/Gitea sandbox credentials for run execution: settings URL
+    /// plus resolved token. `None` when the integration is disabled,
+    /// unconfigured, or unauthenticated.
+    pub(crate) async fn forgejo_sandbox_credentials(
+        &self,
+    ) -> anyhow::Result<Option<fabro_sandbox::ForgejoSandboxCredentials>> {
+        let settings = self.forgejo_settings();
+        if !settings.enabled {
+            return Ok(None);
+        }
+        let Some(url) = settings.url else {
+            return Ok(None);
+        };
+        Ok(self
+            .forgejo_credentials()
+            .await?
+            .map(|creds| fabro_sandbox::ForgejoSandboxCredentials::new(url, creds)))
     }
 
     fn begin_shutdown(&self) {
@@ -4162,6 +4214,13 @@ async fn execute_run_in_process(state: Arc<AppState>, run_id: RunId) {
             return;
         }
     };
+    let forgejo = match state.forgejo_sandbox_credentials().await {
+        Ok(forgejo) => forgejo,
+        Err(err) => {
+            tracing::warn!(run_id = %run_id, error = %err, "Forgejo/Gitea credentials unavailable; run will use origin-only classification");
+            None
+        }
+    };
     let services = operations::StartServices {
         run_id,
         cancel_token: cancel_token.clone(),
@@ -4173,6 +4232,7 @@ async fn execute_run_in_process(state: Arc<AppState>, run_id: RunId) {
         artifact_sink: Some(ArtifactSink::Store(state.artifact_store.clone())),
         run_control: None,
         github_app,
+        forgejo,
         github_integration,
         vault: Arc::new(AsyncRwLock::new(vault.into_vault())),
         catalog: state.catalog(),

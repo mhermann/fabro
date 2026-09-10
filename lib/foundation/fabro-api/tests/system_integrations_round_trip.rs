@@ -56,12 +56,23 @@ fn system_integrations_round_trips_representative_json() {
                 "metadata": {
                     "strategy": "token"
                 }
+            },
+            {
+                "provider": "forgejo",
+                "enabled": true,
+                "configured": true,
+                "status": "configured",
+                "missing_credentials": [],
+                "connection": null,
+                "metadata": {
+                    "url": "https://forgejo.example.com"
+                }
             }
         ]
     });
 
     let response: SystemIntegrationsResponse = serde_json::from_value(value.clone()).unwrap();
-    assert_eq!(response.data.len(), 2);
+    assert_eq!(response.data.len(), 3);
     assert_eq!(response.data[0].provider, IntegrationProvider::Slack);
     assert_eq!(response.data[0].status, IntegrationStatus::Connected);
     assert_eq!(
@@ -72,6 +83,7 @@ fn system_integrations_round_trips_representative_json() {
         response.data[0].metadata,
         BTreeMap::from([("default_channel".to_string(), "#feed-fabro".to_string())])
     );
+    assert_eq!(response.data[2].provider, IntegrationProvider::Forgejo);
     assert_eq!(serde_json::to_value(response).unwrap(), value);
 }
 

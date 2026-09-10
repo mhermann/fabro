@@ -414,6 +414,7 @@ pub struct FinalizeOptions {
 pub struct PublishOptions {
     pub pr_config:  Option<PullRequestSettings>,
     pub github_app: Option<fabro_github::GitHubCredentials>,
+    pub forgejo:    Option<fabro_sandbox::ForgejoSandboxCredentials>,
     pub origin_url: Option<String>,
     pub model:      String,
 }

@@ -19,6 +19,10 @@ pub enum AutomationValidationError {
     MissingEnvironment,
     #[error("automation target kind {kind:?} is not supported; only Git targets are accepted")]
     UnsupportedTarget { kind: String },
+    #[error(
+        "Forgejo/Gitea automation targets are not supported; automations only run from github.com repositories"
+    )]
+    ForgejoTargetNotSupported,
     #[error("automation Git target is invalid")]
     InvalidTarget {
         #[source]

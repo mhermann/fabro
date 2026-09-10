@@ -241,10 +241,11 @@ impl StoredAutomation {
             last_error: row.try_get("last_error")?,
             api_enabled: row.try_get("api_enabled")?,
             target: RunTarget::Git(GitRunTarget {
-                repo:   row.try_get("target_repository")?,
-                branch: row.try_get("target_branch")?,
-                tag:    row.try_get("target_tag")?,
-                sha:    row.try_get("target_sha")?,
+                repo:         row.try_get("target_repository")?,
+                branch:       row.try_get("target_branch")?,
+                tag:          row.try_get("target_tag")?,
+                sha:          row.try_get("target_sha")?,
+                instance_url: None,
             }),
             workflow: row.try_get("target_workflow")?,
             workflow_source,
@@ -399,11 +400,13 @@ fn stored_workflow_source(
     let sha = row.try_get::<Option<String>, _>("workflow_source_sha")?;
     match (repository, branch) {
         (None, None) if tag.is_none() && sha.is_none() => Ok(None),
+        // Automations are GitHub-only; forge targets never reach the store.
         (Some(repo), Some(branch)) => Ok(Some(AutomationGitWorkflowSource {
             repo,
             branch,
             tag,
             sha,
+            instance_url: None,
         })),
         _ => Err(AutomationStoreError::StoredWorkflowSourceShape { id: id.clone() }),
     }

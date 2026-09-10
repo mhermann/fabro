@@ -32,6 +32,10 @@ pub struct RunOptions {
     pub workflow_slug:    Option<String>,
     /// GitHub credentials for pushing metadata branches to origin.
     pub github_app:       Option<fabro_github::GitHubCredentials>,
+    /// Forgejo/Gitea credentials for runs whose origin lives on the
+    /// configured instance. Authenticated pushes, metadata branches, and
+    /// pull requests derive their context from this when the origin matches.
+    pub forgejo:          Option<fabro_sandbox::ForgejoSandboxCredentials>,
     /// Submitter-side git context captured before the run was created.
     pub pre_run_git:      Option<GitContext>,
     /// Source checkpoint ref used by fork/rewind-created runs.

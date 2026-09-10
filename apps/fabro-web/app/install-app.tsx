@@ -30,12 +30,14 @@ import {
   finishInstall,
   getInstallSession,
   persistInstallToken,
+  putInstallForgejo,
   putInstallGithubToken,
   putInstallLlm,
   putInstallObjectStore,
   putInstallSandbox,
   putInstallServer,
   readStoredInstallToken,
+  testInstallForgejo,
   testInstallGithubToken,
   testInstallLlm,
   testInstallObjectStore,
@@ -89,6 +91,17 @@ type AppForm = {
   allowedUsername: string;
 };
 
+type ForgejoForm = {
+  url: string;
+  token: string;
+  username: string;
+  saved: boolean;
+};
+
+function defaultForgejoForm(): ForgejoForm {
+  return { url: "", token: "", username: "", saved: false };
+}
+
 type ProviderSelection = Record<string, { apiKey: string }>;
 type ObjectStoreProvider = "local" | "s3";
 type ObjectStoreCredentialMode = "runtime" | "access_key";
@@ -126,6 +139,7 @@ type InstallState = {
   githubStrategy: GithubStrategy;
   tokenForm: TokenForm;
   appForm: AppForm;
+  forgejoForm: ForgejoForm;
   saveError: string | null;
   submitting: boolean;
   finishState: FinishState;
@@ -151,7 +165,8 @@ type InstallAction =
   | { type: "tokenFormReplaced"; value: TokenForm }
   | { type: "appFormPatched"; patch: Partial<AppForm> }
   | { type: "githubOwnerChanged"; kind: GithubOwnerKind }
-  | { type: "githubOrgSlugChanged"; slug: string };
+  | { type: "githubOrgSlugChanged"; slug: string }
+  | { type: "forgejoFormPatched"; patch: Partial<ForgejoForm> };
 
 function initialInstallState(): InstallState {
   return {
@@ -168,6 +183,7 @@ function initialInstallState(): InstallState {
       appName:         "Fabro",
       allowedUsername: "",
     },
+    forgejoForm:      defaultForgejoForm(),
     saveError:        null,
     submitting:       false,
     finishState:      null,
@@ -199,6 +215,12 @@ function hydrateInstallState(
     };
   }
 
+  const forgejoForm = state.forgejoForm.saved
+    ? state.forgejoForm
+    : session.forgejo
+      ? { url: session.forgejo.url, token: "", username: session.forgejo.username, saved: true }
+      : state.forgejoForm;
+
   return {
     ...state,
     sessionState:    { status: "ready", token, data: session },
@@ -212,6 +234,7 @@ function hydrateInstallState(
     githubStrategy,
     tokenForm,
     appForm,
+    forgejoForm,
   };
 }
 
@@ -274,6 +297,8 @@ function installReducer(state: InstallState, action: InstallAction): InstallStat
               : { kind: "personal" },
         },
       };
+    case "forgejoFormPatched":
+      return { ...state, forgejoForm: { ...state.forgejoForm, ...action.patch } };
     case "githubOrgSlugChanged":
       return {
         ...state,
@@ -411,6 +436,7 @@ export default function InstallApp() {
     githubStrategy,
     tokenForm,
     appForm,
+    forgejoForm,
     saveError,
     submitting,
     finishState,
@@ -566,6 +592,16 @@ export default function InstallApp() {
           githubStrategy={githubStrategy}
           tokenForm={tokenForm}
           appForm={appForm}
+          saveError={saveError}
+          submitting={submitting}
+          runStepSubmit={runStepSubmit}
+          dispatchInstall={dispatchInstall}
+        />
+      ) : pathname === "/install/forgejo" ? (
+        <ForgejoStep
+          installToken={installToken}
+          session={session}
+          forgejoForm={forgejoForm}
           saveError={saveError}
           submitting={submitting}
           runStepSubmit={runStepSubmit}
@@ -1123,6 +1159,128 @@ function SandboxStep({
           access to <code className="font-mono text-fg-2">/var/run/docker.sock</code>.
         </p>
       )}
+    </StepPanel>
+  );
+}
+
+function ForgejoStep({
+  installToken,
+  session,
+  forgejoForm,
+  saveError,
+  submitting,
+  runStepSubmit,
+  dispatchInstall,
+}: {
+  installToken: string;
+  session: InstallSessionResponse;
+  forgejoForm: ForgejoForm;
+  saveError: string | null;
+  submitting: boolean;
+  runStepSubmit: RunStepSubmit;
+  dispatchInstall: (action: InstallAction) => void;
+}) {
+  const saved = session.forgejo != null;
+  return (
+    <StepPanel
+      title="Connect Forgejo / Gitea"
+      description="Optional. Point Fabro at a self-hosted Forgejo or Gitea instance with a personal access token (write:repository, read:user). Skip if you only use github.com."
+      error={saveError}
+      submitting={submitting}
+      submitLabel="Continue"
+      backHref="/install/github"
+      secondaryAction={
+        <Link to="/install/review" className={SECONDARY_BUTTON_CLASS}>
+          Skip
+        </Link>
+      }
+      onSubmit={async () => {
+        const url = forgejoForm.url.trim().replace(/\/+$/, "");
+        const trimmedToken = forgejoForm.token.trim();
+        if (!url) {
+          dispatchInstall({
+            type:    "saveErrorChanged",
+            message: "Enter the Forgejo/Gitea instance URL before continuing.",
+          });
+          return;
+        }
+        if (!saved && !trimmedToken) {
+          dispatchInstall({
+            type:    "saveErrorChanged",
+            message: "Enter the Forgejo/Gitea token before continuing.",
+          });
+          return;
+        }
+        await runStepSubmit({
+          action: async () => {
+            const { username } = await testInstallForgejo(
+              installToken,
+              url,
+              saved && !trimmedToken ? "saved" : trimmedToken,
+            );
+            await putInstallForgejo(installToken, url, trimmedToken || "saved", username);
+            dispatchInstall({
+              type:    "forgejoFormPatched",
+              patch:   { url, username, saved: true },
+            });
+          },
+          fallback: "Failed to start Forgejo/Gitea setup.",
+          next:     "/install/review",
+        });
+      }}
+    >
+      <div className="space-y-5">
+        <div>
+          <label
+            htmlFor="forgejo_url"
+            className="text-sm font-medium text-fg"
+          >
+            Instance URL
+          </label>
+          <input
+            id="forgejo_url"
+            type="url"
+            required
+            value={forgejoForm.url}
+            placeholder="https://forgejo.example.com"
+            className={INPUT_CLASS}
+            onChange={(event) =>
+              dispatchInstall({
+                type:  "forgejoFormPatched",
+                patch: { url: event.target.value },
+              })
+            }
+          />
+        </div>
+        {!saved ? (
+          <div>
+            <label
+              htmlFor="forgejo_token"
+              className="text-sm font-medium text-fg"
+            >
+              Personal access token
+            </label>
+            <input
+              id="forgejo_token"
+              type="password"
+              value={forgejoForm.token}
+              placeholder="token"
+              className={INPUT_CLASS}
+              onChange={(event) =>
+                dispatchInstall({
+                  type:  "forgejoFormPatched",
+                  patch: { token: event.target.value },
+                })
+              }
+            />
+          </div>
+        ) : (
+          <p className="text-sm text-muted">
+            Connected as {forgejoForm.username} on {forgejoForm.url}. Submit a new token to
+            replace it.
+          </p>
+        )}
+      </div>
     </StepPanel>
   );
 }

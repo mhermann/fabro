@@ -141,6 +141,7 @@ fn legacy_target(
         branch,
         tag,
         sha,
+        instance_url: None,
     })
     .validate()
     .map(|validated| validated.target)

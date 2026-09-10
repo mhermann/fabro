@@ -29,13 +29,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::clone_source::{self, CloneDecision, EmptyWorkspaceReason, PinnedRevision};
 use crate::git_retry::{self, CredentialContext, GitRetryReason};
-use crate::push_credentials::{self, PushCredentialState};
+use crate::push_credentials::{self, CredentialSource, PushCredentialState};
 use crate::redact::redact_auth_url;
 use crate::sandbox::{
     self, BASH_ENV_VAR, BASH_PROBE_MARKER, BASH_PROBE_SCRIPT, BASH_PROBE_TIMEOUT_MS,
     OutputCaptureBuffer, OutputCaptureStats, REMOTE_BASH, REMOTE_WALK_TIMEOUT_MS, RefreshOutcome,
     optional_timeout, resolve_path, validate_bash_probe,
 };
+use crate::sandbox_spec::ForgejoSandboxCredentials;
 use crate::{
     CommandOutputCallback, DirEntry, ExecResult, ExecStreamingRequest, ExecStreamingResult,
     GrepOptions, Sandbox, SandboxEvent, SandboxEventCallback, SandboxFile, StdioProcess,
@@ -498,6 +499,7 @@ pub struct DaytonaSandbox {
     client:            daytona_sdk::Client,
     api_key:           Option<String>,
     push_credentials:  PushCredentialState,
+    forgejo:           Option<ForgejoSandboxCredentials>,
     sandbox:           OnceCell<daytona_sdk::Sandbox>,
     snapshot_name:     OnceCell<String>,
     rg_available:      OnceCell<bool>,
@@ -524,6 +526,7 @@ impl DaytonaSandbox {
     pub async fn new(
         config: DaytonaConfig,
         github_app: Option<GitHubCredentials>,
+        forgejo: Option<ForgejoSandboxCredentials>,
         run_id: Option<RunId>,
         clone_origin_url: Option<String>,
         clone_branch: Option<String>,
@@ -538,14 +541,17 @@ impl DaytonaSandbox {
                 clone_branch.as_deref(),
                 clone_tag.as_deref(),
                 clone_commit_sha.as_deref(),
+                forgejo.as_ref().map(|f| f.instance_url.as_str()),
             )?;
         }
         let api_key = resolve_daytona_api_key(api_key);
         let client = build_daytona_client(api_key.clone())
             .await
             .map_err(|e| crate::Error::context("Failed to create Daytona client", e))?;
-        let push_credentials = PushCredentialState::new(push_credentials::build_token_source(
+        let push_credentials = PushCredentialState::new(push_credentials::build_credential_source(
             github_app.as_ref(),
+            forgejo.as_ref().map(|f| &f.creds),
+            forgejo.as_ref().map(|f| f.instance_url.as_str()),
             clone_origin_url.as_deref(),
         )?);
         Ok(Self {
@@ -553,6 +559,7 @@ impl DaytonaSandbox {
             client,
             api_key,
             push_credentials,
+            forgejo,
             sandbox: OnceCell::new(),
             snapshot_name: OnceCell::new(),
             rg_available: OnceCell::const_new(),
@@ -607,6 +614,7 @@ impl DaytonaSandbox {
             client,
             api_key,
             push_credentials: PushCredentialState::new(None),
+            forgejo: None,
             sandbox: sandbox_cell,
             snapshot_name: OnceCell::new(),
             rg_available: OnceCell::const_new(),
@@ -1550,6 +1558,7 @@ impl Sandbox for DaytonaSandbox {
             self.clone_branch.as_deref(),
             self.clone_tag.as_deref(),
             self.clone_commit_sha.as_deref(),
+            self.forgejo.as_ref().map(|f| f.instance_url.as_str()),
         )
         .map_err(|e| self.fail_init(init_start, e))?;
 
@@ -1579,10 +1588,20 @@ impl Sandbox for DaytonaSandbox {
                 branch,
                 tag,
                 commit_sha,
+            }
+            | CloneDecision::Forge {
+                origin_url,
+                branch,
+                tag,
+                commit_sha,
             } => {
-                let layout =
-                    clone_source::github_repo_layout(&origin_url, WORKING_DIRECTORY, REPOS_ROOT)
-                        .map_err(|err| self.fail_init(init_start, err))?;
+                let layout = clone_source::repo_layout(
+                    &origin_url,
+                    WORKING_DIRECTORY,
+                    REPOS_ROOT,
+                    self.forgejo.as_ref().map(|f| f.instance_url.as_str()),
+                )
+                .map_err(|err| self.fail_init(init_start, err))?;
                 self.emit(SandboxEvent::GitCloneStarted {
                     url:    origin_url.clone(),
                     branch: branch.clone(),
@@ -1592,26 +1611,43 @@ impl Sandbox for DaytonaSandbox {
                 // The clone mints its own token (never a warm-cache reuse) and
                 // seeds the shared source, so the first refresh compares
                 // against the clone token instead of believing nothing was
-                // ever embedded.
+                // ever embedded. Forgejo credentials are static: the PAT is
+                // the password and never expires.
                 let resolved_token = match self.push_credentials.source() {
-                    Some(source) => Some(source.mint_for_clone().await.map_err(|source| {
-                        let err = crate::Error::context_anyhow(
-                            "Failed to get GitHub App credentials for clone",
-                            source,
-                        );
-                        self.emit(SandboxEvent::GitCloneFailed {
-                            url:    origin_url.clone(),
-                            error:  err.to_string(),
-                            causes: err.causes(),
-                        });
-                        self.fail_init(init_start, err)
-                    })?),
+                    Some(CredentialSource::GitHub(source)) => {
+                        Some(source.mint_for_clone().await.map_err(|source| {
+                            let err = crate::Error::context_anyhow(
+                                "Failed to get GitHub App credentials for clone",
+                                source,
+                            );
+                            self.emit(SandboxEvent::GitCloneFailed {
+                                url:    origin_url.clone(),
+                                error:  err.to_string(),
+                                causes: err.causes(),
+                            });
+                            self.fail_init(init_start, err)
+                        })?)
+                    }
+                    Some(CredentialSource::Forgejo { token, .. }) => {
+                        Some(PushCredentialState::static_forgejo_token(token))
+                    }
                     None => None,
                 };
                 let clone_credential_context = CredentialContext::from_snapshot(
                     resolved_token.as_ref().map(|token| &token.snapshot),
                 );
                 let (username, password) = match &resolved_token {
+                    Some(token)
+                        if matches!(
+                            self.push_credentials.source(),
+                            Some(CredentialSource::Forgejo { .. })
+                        ) =>
+                    {
+                        (
+                            Some(fabro_forgejo::FORGEJO_TOKEN_USERNAME.to_string()),
+                            Some(token.token.expose().to_string()),
+                        )
+                    }
                     Some(token) => (
                         Some("x-access-token".to_string()),
                         Some(token.token.expose().to_string()),
@@ -1706,7 +1742,9 @@ impl Sandbox for DaytonaSandbox {
                     Err(e) if self.push_credentials.source().is_none() => {
                         let err = crate::Error::context(
                             "Git clone failed. If this is a private repository, configure a \
-                             GitHub App with `fabro install` and install it for your organization.",
+                             GitHub App with `fabro install` and install it for your organization, \
+                             or configure Forgejo/Gitea credentials for your instance with \
+                             `fabro install`.",
                             e,
                         );
                         return Err(self
@@ -2056,7 +2094,10 @@ impl Sandbox for DaytonaSandbox {
     }
 
     fn push_token_source(&self) -> Option<Arc<InstallationTokenSource>> {
-        self.push_credentials.source().cloned()
+        self.push_credentials
+            .source()
+            .and_then(|s| s.as_github())
+            .cloned()
     }
 
     async fn set_autostop_interval(&self, minutes: i32) -> crate::Result<()> {
@@ -3250,6 +3291,7 @@ mod tests {
             DaytonaConfig::default(),
             None,
             None,
+            None,
             Some("https://github.com/acme/widgets".to_string()),
             Some("main".to_string()),
             None,
@@ -3268,6 +3310,7 @@ mod tests {
     async fn exact_sha_without_branch_fails_before_daytona_client_construction() {
         let error = DaytonaSandbox::new(
             DaytonaConfig::default(),
+            None,
             None,
             None,
             Some("https://github.com/acme/widgets".to_string()),
@@ -3590,6 +3633,7 @@ mod tests {
             client,
             api_key: Some(api_key.to_string()),
             push_credentials: PushCredentialState::new(None),
+            forgejo: None,
             sandbox: OnceCell::new(),
             snapshot_name: OnceCell::new(),
             rg_available: OnceCell::const_new(),
@@ -3827,6 +3871,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some("dtn_test".to_string()),
         )
         .await
@@ -3861,6 +3906,7 @@ mod tests {
                     auto_stop_interval: Some(interval),
                     ..DaytonaConfig::default()
                 },
+                None,
                 None,
                 None,
                 None,
@@ -4190,6 +4236,7 @@ mod tests {
                 ])),
                 ..Default::default()
             },
+            None,
             None,
             Some(run_id),
             None,

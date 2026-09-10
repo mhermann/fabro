@@ -2091,6 +2091,8 @@ impl TestContext {
 use tokio::net::TcpListener as TokioTcpListener;
 use tokio::sync::OnceCell;
 use tokio::time;
+pub use twin_forgejo::AppState as ForgejoAppState;
+pub use twin_forgejo::state::PullRequest as ForgejoTwinPullRequest;
 pub use twin_github::AppState as GitHubAppState;
 pub use twin_github::state::AppOptions as GitHubAppOptions;
 use twin_openai::config::Config as TwinConfig;
@@ -2113,6 +2115,24 @@ pub fn test_http_client() -> fabro_http::HttpClient {
 impl TwinGitHub {
     pub async fn start(state: twin_github::AppState) -> Self {
         let server = twin_github::TestServer::start(state).await;
+        let base_url = server.url().to_string();
+        Self { base_url, server }
+    }
+
+    pub async fn shutdown(self) {
+        self.server.shutdown().await;
+    }
+}
+
+/// A shared twin-Forgejo server instance.
+pub struct TwinForgejo {
+    pub base_url: String,
+    server:       twin_forgejo::TestServer,
+}
+
+impl TwinForgejo {
+    pub async fn start(state: twin_forgejo::AppState) -> Self {
+        let server = twin_forgejo::TestServer::start(state).await;
         let base_url = server.url().to_string();
         Self { base_url, server }
     }
