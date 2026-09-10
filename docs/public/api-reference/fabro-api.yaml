@@ -12952,6 +12952,7 @@ components:
         - local
         - docker
         - daytona
+        - kubernetes
 
     RunSandboxKind:
       description: Lifecycle state for a run sandbox request.
@@ -14453,13 +14454,15 @@ components:
 
     ServerSandboxProvidersSettings:
       type: object
-      required: [local, docker, daytona]
+      required: [local, docker, daytona, kubernetes]
       properties:
         local:
           $ref: "#/components/schemas/ServerSandboxProviderSettings"
         docker:
           $ref: "#/components/schemas/ServerSandboxProviderSettings"
         daytona:
+          $ref: "#/components/schemas/ServerSandboxProviderSettings"
+        kubernetes:
           $ref: "#/components/schemas/ServerSandboxProviderSettings"
 
     ServerSandboxProviderSettings:
@@ -15039,7 +15042,7 @@ components:
     EnvironmentProvider:
       description: Desired environment provider.
       type: string
-      enum: [local, docker, daytona]
+      enum: [local, docker, daytona, kubernetes]
 
     EnvironmentImageSettings:
       type: object

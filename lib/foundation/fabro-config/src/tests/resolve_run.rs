@@ -713,6 +713,67 @@ dockerfile = "FROM ubuntu:24.04"
 }
 
 #[test]
+fn kubernetes_image_docker_resolves_and_accepts_all_network_modes() {
+    let settings = workflow_settings_from_toml_with_catalog(
+        r#"
+_version = 1
+
+[run.environment]
+id = "kube"
+"#,
+        r#"
+[environments.kube]
+provider = "kubernetes"
+
+[environments.kube.image]
+docker = "buildpack-deps:noble"
+
+[environments.kube.network]
+mode = "cidr_allow_list"
+allow = ["10.0.0.0/8"]
+"#,
+    )
+    .expect("kubernetes should accept an image reference with a CIDR allow list")
+    .run;
+
+    assert_eq!(
+        settings.environment.provider,
+        EnvironmentProvider::Kubernetes
+    );
+    assert_eq!(
+        settings.environment.image.docker.as_deref(),
+        Some("buildpack-deps:noble")
+    );
+}
+
+#[test]
+fn kubernetes_rejects_dockerfile_image_source() {
+    let err = workflow_settings_from_toml_with_catalog(
+        r#"
+_version = 1
+
+[run.environment]
+id = "kube"
+"#,
+        r#"
+[environments.kube]
+provider = "kubernetes"
+
+[environments.kube.image]
+docker = "ubuntu:24.04"
+dockerfile = "FROM ubuntu:24.04"
+"#,
+    )
+    .expect_err("kubernetes should reject dockerfile image sources");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("image.dockerfile") && message.contains("kubernetes"),
+        "expected kubernetes dockerfile diagnostic, got: {message}"
+    );
+}
+
+#[test]
 fn image_ref_is_rejected_as_unknown_field() {
     let err = super::workflow_settings_from_toml(
         r#"

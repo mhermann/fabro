@@ -31,11 +31,11 @@ pub const DEFAULT_EXEC_OUTPUT_TAIL_BYTES: usize = 8 * 1024;
 pub(crate) const BASH_PROBE_TIMEOUT_MS: u64 = 10_000;
 
 /// Bash path required by Linux-backed remote sandbox providers.
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 pub(crate) const REMOTE_BASH: &str = "/bin/bash";
 
 /// Timeout for provider-neutral remote file traversal.
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 pub(crate) const REMOTE_WALK_TIMEOUT_MS: u64 = 30_000;
 
 /// Environment variable Bash consults for non-interactive startup source.
@@ -1551,7 +1551,7 @@ pub trait Sandbox: Send + Sync {
 
 /// Resolve a path: relative paths are prepended with the working directory.
 /// Used by the Daytona sandbox implementation.
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 pub(crate) fn resolve_path(path: &str, working_dir: &str) -> String {
     if std::path::Path::new(path).is_absolute() {
         path.to_string()
@@ -1560,7 +1560,7 @@ pub(crate) fn resolve_path(path: &str, working_dir: &str) -> String {
     }
 }
 
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 pub(crate) fn join_sandbox_path(base: &str, relative_path: &str) -> String {
     if relative_path.is_empty() {
         return base.to_string();
@@ -1574,7 +1574,7 @@ pub(crate) fn join_sandbox_path(base: &str, relative_path: &str) -> String {
     format!("{}/{relative_path}", base.trim_end_matches('/'))
 }
 
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 pub(crate) fn build_remote_walk_command(
     base: &str,
     relative_start: &str,
@@ -1608,7 +1608,7 @@ pub(crate) fn build_remote_walk_command(
     command
 }
 
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 pub(crate) fn parse_remote_walk_output(
     base: &str,
     relative_start: &str,

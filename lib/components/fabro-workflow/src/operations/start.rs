@@ -12,8 +12,9 @@ use fabro_model::{Catalog, ProviderId};
 use fabro_sandbox::daytona::DaytonaConfig;
 use fabro_sandbox::from_environment::{
     daytona_config_from_environment, docker_config_from_environment_with_secrets,
-    local_working_directory_from_environment,
+    kubernetes_config_from_environment_with_secrets, local_working_directory_from_environment,
 };
+use fabro_sandbox::kubernetes::KubernetesSandboxOptions;
 use fabro_sandbox::{DockerSandboxOptions, SandboxSpec};
 use fabro_static::EnvVars;
 #[cfg(test)]
@@ -559,6 +560,19 @@ impl RunSession {
                     api_key,
                 }
             }
+            SandboxProviderKind::Kubernetes => {
+                let mut config = resolve_kubernetes_config(resolved, secret_lookup)?;
+                config.skip_clone |= clone_source.skip_clone;
+                SandboxSpec::Kubernetes {
+                    config,
+                    github_app: services.github_app.clone(),
+                    run_id: Some(record.run_id),
+                    clone_origin_url: clone_source.origin_url,
+                    clone_branch: clone_source.branch,
+                    clone_tag: clone_source.tag,
+                    clone_commit_sha: clone_source.commit_sha,
+                }
+            }
         };
 
         let toml_env = resolved
@@ -829,6 +843,20 @@ fn resolve_docker_config(
         secrets_lookup,
     )
     .map_err(|err| Error::engine_with_source("failed to resolve Docker environment config", err))
+}
+
+fn resolve_kubernetes_config(
+    settings: &ResolvedRunSettings,
+    secrets_lookup: impl FnMut(&str) -> Option<String>,
+) -> Result<KubernetesSandboxOptions, Error> {
+    kubernetes_config_from_environment_with_secrets(
+        &settings.environment,
+        &settings.clone,
+        secrets_lookup,
+    )
+    .map_err(|err| {
+        Error::engine_with_source("failed to resolve Kubernetes environment config", err)
+    })
 }
 
 fn resolve_start_llm(
@@ -2225,14 +2253,20 @@ reasoning = false
 
     #[tokio::test]
     async fn run_session_new_folder_target_rejects_clone_based_providers() {
-        for provider in [EnvironmentProvider::Docker, EnvironmentProvider::Daytona] {
+        for provider in [
+            EnvironmentProvider::Docker,
+            EnvironmentProvider::Daytona,
+            EnvironmentProvider::Kubernetes,
+        ] {
             let temp = tempfile::tempdir().unwrap();
             let (storage_root, _run_dir) = storage_root_and_run_dir(&temp);
             let (_, canonical_text) = canonical_folder(&temp);
             let mut settings = settings_from_run_layer(RunLayer::default());
             settings.run.environment.provider = provider;
             settings.run.environment.image.docker = match provider {
-                EnvironmentProvider::Docker => Some("buildpack-deps:noble".to_string()),
+                EnvironmentProvider::Docker | EnvironmentProvider::Kubernetes => {
+                    Some("buildpack-deps:noble".to_string())
+                }
                 EnvironmentProvider::Daytona | EnvironmentProvider::Local => None,
             };
             let (persisted, store) =

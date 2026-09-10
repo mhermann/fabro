@@ -20,8 +20,9 @@ use fabro_model::{Catalog, ProviderId};
 use fabro_sandbox::daytona::DaytonaConfig;
 use fabro_sandbox::from_environment::{
     daytona_config_from_environment, docker_config_from_environment,
-    local_working_directory_from_environment,
+    kubernetes_config_from_environment, local_working_directory_from_environment,
 };
+use fabro_sandbox::kubernetes::KubernetesSandboxOptions;
 use fabro_sandbox::redact::redact_auth_url;
 use fabro_sandbox::{DockerSandboxOptions, Sandbox, SandboxSpec};
 use fabro_static::EnvVars;
@@ -681,6 +682,10 @@ fn resolve_docker_config(settings: &RunNamespace) -> DockerSandboxOptions {
     docker_config_from_environment(&settings.environment, &settings.clone)
 }
 
+fn resolve_kubernetes_config(settings: &RunNamespace) -> KubernetesSandboxOptions {
+    kubernetes_config_from_environment(&settings.environment, &settings.clone)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct GitRemoteRefCheck {
     origin_url: String,
@@ -689,7 +694,9 @@ struct GitRemoteRefCheck {
 
 fn clone_disabled_for_provider(provider: SandboxProviderKind, resolved_run: &RunNamespace) -> bool {
     match provider {
-        SandboxProviderKind::Docker | SandboxProviderKind::Daytona => !resolved_run.clone.enabled,
+        SandboxProviderKind::Docker
+        | SandboxProviderKind::Daytona
+        | SandboxProviderKind::Kubernetes => !resolved_run.clone.enabled,
         SandboxProviderKind::Local => false,
     }
 }
@@ -749,6 +756,14 @@ fn environment_capability_warnings(resolved_run: &RunNamespace) -> Vec<String> {
         EnvironmentProvider::Daytona => {
             if environment.cwd.is_some() {
                 warnings.push("daytona provider ignores cwd".to_string());
+            }
+        }
+        EnvironmentProvider::Kubernetes => {
+            if environment.cwd.is_some() {
+                warnings.push("kubernetes provider ignores cwd".to_string());
+            }
+            if environment.lifecycle.auto_stop.is_some() {
+                warnings.push("kubernetes provider ignores lifecycle.auto_stop".to_string());
             }
         }
     }
@@ -955,6 +970,19 @@ fn preflight_sandbox_spec(
                 clone_tag: None,
                 clone_commit_sha: None,
                 api_key: daytona_api_key,
+            }
+        }
+        SandboxProviderKind::Kubernetes => {
+            let mut config = resolve_kubernetes_config(resolved_run);
+            config.skip_clone = true;
+            SandboxSpec::Kubernetes {
+                config,
+                github_app,
+                run_id: None,
+                clone_origin_url,
+                clone_branch,
+                clone_tag: None,
+                clone_commit_sha: None,
             }
         }
     })

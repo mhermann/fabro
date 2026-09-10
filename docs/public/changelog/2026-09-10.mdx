@@ -1,0 +1,28 @@
+---
+title: "Kubernetes sandbox provider"
+date: "2026-09-10"
+---
+
+## Kubernetes sandbox provider
+
+Fabro can now run workflow stages in pods on your own Kubernetes cluster. The new `kubernetes` provider joins `local`, `docker`, and `daytona` as a clone-based sandbox: one pod per run, GitHub clone into `/workspace`, and agent commands executed through the Kubernetes exec API. Connection uses kube-standard inference (in-cluster ServiceAccount, `KUBECONFIG`, then `~/.kube/config`) — no new secrets or settings beyond `server.sandbox.providers.kubernetes.enabled`.
+
+```toml title="workflow.toml"
+[environments.kube]
+provider = "kubernetes"
+
+[environments.kube.image]
+docker = "buildpack-deps:noble"
+
+[environments.kube.resources]
+cpu = 2
+memory = "4GB"
+disk = "20GB"
+
+[environments.kube.network]
+mode = "block"
+```
+
+Environments accept an image reference plus CPU/memory/disk limits (disk maps to `ephemeral-storage`), and all three network modes are enforced with a per-pod NetworkPolicy — including a CNI-enforcement caveat for clusters whose networking layer ignores policies. Stopping a sandbox deletes its pod, and embedded terminals are not offered in this first release. See [Sandboxing](/administration/sandboxing) and [Environments](/execution/environments#kubernetes) for the RBAC surface and full reference.
+
+One compatibility note: run records created with `provider: "kubernetes"` will not deserialize on older Fabro binaries, so rolling back a server that has run Kubernetes sandboxes requires cleaning those records first — the same property the Daytona provider addition had.

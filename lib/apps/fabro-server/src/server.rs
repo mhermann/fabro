@@ -72,8 +72,8 @@ use fabro_sandbox::daytona::{self, DaytonaSandbox};
 use fabro_sandbox::details::sandbox_details;
 use fabro_sandbox::reconnect::reconnect_for_run;
 use fabro_sandbox::{
-    DaytonaSandboxProvider, DockerSandboxProvider, LocalSandboxProvider, Sandbox, SandboxProvider,
-    SandboxProviderRegistry,
+    DaytonaSandboxProvider, DockerSandboxProvider, KubernetesSandboxProvider, LocalSandboxProvider,
+    Sandbox, SandboxProvider, SandboxProviderRegistry,
 };
 use fabro_slack::client::{PostedMessage as SlackPostedMessage, SlackClient};
 use fabro_slack::config::{
@@ -2355,6 +2355,14 @@ fn build_sandbox_provider_registry(
             organization_id,
             http_client,
         )));
+    }
+
+    // The Kubernetes provider owns no credential plumbing: connection is
+    // inferred (in-cluster ServiceAccount, KUBECONFIG, ~/.kube/config), and an
+    // unresolvable cluster surfaces as a fail-soft provider error in the
+    // inventory meta rather than a registry gap.
+    if provider_settings.kubernetes.enabled {
+        providers.push(Arc::new(KubernetesSandboxProvider::new()));
     }
 
     SandboxProviderRegistry::new(providers)
