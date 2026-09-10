@@ -1,0 +1,169 @@
+digraph Sdlc {
+    graph [
+        goal="No goal supplied. Pass --goal or --goal-file.",
+        model_stylesheet="
+            *      { model: glm-5.3; reasoning_effort: high; }
+            .deep  { model: glm-5.3; reasoning_effort: max; }
+            .fast  { model: glm-5.3-flash; }
+        ",
+        on_failure="exit",
+        max_node_visits=32,
+        stall_timeout="2h"
+    ]
+    rankdir=LR
+
+    start [shape=Mdiamond, label="Start"]
+    exit  [shape=Msquare, label="Exit"]
+
+    understand [label="Understand", thread_id="build", fidelity="full", prompt="@prompts/understand.md"]
+    sweep      [label="Sweep for Questions", class="deep", thread_id="build", fidelity="full", prompt="@prompts/question-sweep.md"]
+    ask        [label="Ask the human", thread_id="build", fidelity="full", prompt="@prompts/ask.md", max_visits=8]
+    triage     [label="Triage Answers", shape=tab, prompt="@prompts/triage-answers.md"]
+
+    plan   [label="Plan", thread_id="build", fidelity="full", prompt="@prompts/plan.md", max_visits=8]
+    devils [label="Devil's Advocate", thread_id="build", fidelity="full", prompt="@prompts/devils.md"]
+
+    refactor_check [label="Refactoring Needed?", class="deep", thread_id="build", fidelity="full", prompt="@prompts/refactor-check.md"]
+    refactor_flow  [label="Focused Refactoring", shape=house,
+                    stack.child_workflow="../refactor/workflow.fabro",
+                    manager.poll_interval="30s", manager.max_cycles=400]
+
+    implement [label="Implement", class="fast", fidelity="summary:high", prompt="@prompts/implement.md", max_visits=12]
+
+
+    fork [label="Fan Out Reviews", shape=component, max_parallel=4]
+
+    r_correct  [label="Correctness", class="fast", fidelity="summary:high", prompt="@prompts/review-correctness.md"]
+    r_security [label="Security", class="fast", fidelity="summary:high", prompt="@prompts/review-security.md"]
+    r_tests    [label="Tests", class="fast", fidelity="summary:high", prompt="@prompts/review-tests.md"]
+    r_simple   [label="Simplicity", class="fast", fidelity="summary:high", prompt="@prompts/review-simplicity.md"]
+
+    synth [label="Synthesize Reviews", shape=tripleoctagon, prompt="@prompts/synthesize.md"]
+
+    draft_pr [label="Draft PR Description", class="fast", prompt="@prompts/draft-pr.md"]
+
+    create_pr [label="Create or Update PR", shape=parallelogram,
+               script="set -eu
+BRANCH=$(git branch --show-current)
+if [ ! -s /tmp/pr-title.txt ]; then echo missing-or-empty-pr-title >&2; exit 1; fi
+if [ ! -s /tmp/pr-body.md ]; then echo missing-or-empty-pr-body >&2; exit 1; fi
+TITLE=$(head -n 1 /tmp/pr-title.txt | tr -d '\`\"' | sed -e 's/^[[:space:]]*#*[[:space:]]*//' -e 's/[[:space:]]*$//' | cut -c1-70)
+if [ -z \"$TITLE\" ]; then echo pr-title-empty-after-sanitising >&2; exit 1; fi
+git push -u origin $BRANCH
+OPEN=$(gh pr list --head $BRANCH --state open --limit 1 --json number --jq '.[0].number // empty')
+if [ -n \"$OPEN\" ]; then
+  gh pr edit $OPEN --title \"$TITLE\" --body-file /tmp/pr-body.md
+  echo updated-existing-pr-$OPEN
+  gh pr view $OPEN --json url --jq .url
+  exit 0
+fi
+MERGED=$(gh pr list --head $BRANCH --state merged --limit 1 --json number --jq '.[0].number // empty')
+if [ -n \"$MERGED\" ]; then
+  echo pr-already-merged-$MERGED
+  gh pr view $MERGED --json url --jq .url
+  exit 0
+fi
+gh pr create --base main --head $BRANCH --title \"$TITLE\" --body-file /tmp/pr-body.md
+gh pr view --json url --jq .url"]
+
+    deep_review [label="Deep Review", class="deep", thread_id="build", fidelity="full", prompt="@prompts/deep-review.md", max_visits=14]
+
+    human_report [shape=hexagon, label="Review flagged something needing your decision"]
+
+    pr_wait [label="Wait an Hour", shape=insulator, duration="1h", max_visits=80]
+
+    pr_status [label="Poll PR for Feedback", shape=parallelogram, output_schema="routing", max_visits=80,
+               script="set -eu
+BRANCH=$(git branch --show-current)
+NUM=$(gh pr list --head $BRANCH --state open --limit 1 --json number --jq '.[0].number // empty')
+if [ -z \"$NUM\" ]; then
+  MERGED=$(gh pr list --head $BRANCH --state merged --limit 1 --json number --jq '.[0].number // empty')
+  if [ -n \"$MERGED\" ]; then
+    echo \"PR #$MERGED is merged; ending the workflow.\"
+    echo '{\"preferred_next_label\": \"merged\", \"context_updates\": {\"pr_state\": \"merged\"}}'
+    exit 0
+  fi
+  echo \"no open or merged pull request for branch $BRANCH\" >&2
+  exit 1
+fi
+STATE=$(gh pr view $NUM --json state --jq .state)
+if [ \"$STATE\" = MERGED ]; then
+  echo \"PR #$NUM is merged; ending the workflow.\"
+  echo '{\"preferred_next_label\": \"merged\", \"context_updates\": {\"pr_state\": \"merged\"}}'
+  exit 0
+fi
+if [ \"$STATE\" = CLOSED ]; then
+  echo \"PR #$NUM was closed without merging; ending the workflow.\"
+  echo '{\"preferred_next_label\": \"closed\", \"context_updates\": {\"pr_state\": \"closed\"}}'
+  exit 0
+fi
+SINCE=$(cat /tmp/pr-feedback-since.txt 2>/dev/null || echo 1970-01-01T00:00:00Z)
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+NEW=/tmp/pr-new-comments.jsonl
+: > $NEW
+gh api \"repos/{owner}/{repo}/issues/$NUM/comments\" --paginate | jq -c --arg since \"$SINCE\" '.[] | select((.body // \"\") != \"\") | select(.created_at > $since) | {at: .created_at, author: .user.login, where: \"conversation\", body: .body}' >> $NEW
+gh api \"repos/{owner}/{repo}/pulls/$NUM/comments\" --paginate | jq -c --arg since \"$SINCE\" '.[] | select((.body // \"\") != \"\") | select(.created_at > $since) | {at: .created_at, author: .user.login, where: ((.path // \"file\") + \":\" + ((.line // .original_line // 0) | tostring)), body: .body}' >> $NEW
+gh api \"repos/{owner}/{repo}/pulls/$NUM/reviews\" --paginate | jq -c --arg since \"$SINCE\" '.[] | select(((.body // \"\") != \"\") or .state == \"CHANGES_REQUESTED\") | select((.submitted_at // \"\") > $since) | {at: .submitted_at, author: .user.login, where: (\"review \" + .state), body: (if (.body // \"\") == \"\" then \"(no body; changes requested)\" else .body end)}' >> $NEW
+echo $NOW > /tmp/pr-feedback-since.txt
+if [ ! -s $NEW ]; then
+  echo \"PR #$NUM is open with no new comments since $SINCE.\"
+  echo '{\"preferred_next_label\": \"quiet\", \"context_updates\": {\"pr_state\": \"quiet\"}}'
+  exit 0
+fi
+jq -rs 'sort_by(.at) | .[] | (\"### \" + .author + \" - \" + .where + \" - \" + .at), \"\", .body, \"\"' $NEW > /tmp/pr-comments.md
+COUNT=$(jq -s length $NEW)
+echo \"PR #$NUM has $COUNT new comment(s) since $SINCE; written to /tmp/pr-comments.md\"
+echo '{\"preferred_next_label\": \"comments\", \"context_updates\": {\"pr_state\": \"comments\"}}'"]
+
+    pr_feedback [label="Triage PR Feedback", fidelity="summary:high", prompt="@prompts/pr-feedback.md", max_visits=80]
+
+    start -> understand -> sweep -> ask -> triage
+
+    triage -> ask  [label="more"]
+    triage -> plan [label="enough", weight=10]
+
+    plan -> devils
+    devils -> ask [condition="internal.node_visit_count >= 4"]
+    devils -> plan [label="revise"]
+    devils -> refactor_check [label="approve"]
+
+    refactor_check -> implement     [label="already refactored", condition="internal.node_visit_count >= 2", weight=20]
+    refactor_check -> refactor_flow [label="refactor"]
+    refactor_check -> implement     [label="none", weight=10]
+
+    refactor_flow -> plan
+
+    implement -> fork
+    fork -> r_correct
+    fork -> r_security
+    fork -> r_tests
+    fork -> r_simple
+    r_correct  -> synth
+    r_security -> synth
+    r_tests    -> synth
+    r_simple   -> synth
+
+    synth -> deep_review
+
+    deep_review -> ask [condition="internal.node_visit_count >= 8", weight=20]
+    deep_review -> implement    [label="fix"]
+    deep_review -> human_report [label="escalate", weight=10]
+    deep_review -> draft_pr     [label="approve"]
+
+    human_report -> exit      [label="[S] Stop here"]
+    human_report -> implement [label="[F] Send back for fixes"]
+    human_report -> draft_pr  [label="[M] Approve and open the PR"]
+
+    draft_pr -> create_pr -> pr_status
+
+    pr_status -> exit        [label="stop watching", condition="context.pr_state=quiet && internal.node_visit_count >= 72", weight=50]
+    pr_status -> exit        [label="merged"]
+    pr_status -> exit        [label="closed"]
+    pr_status -> pr_feedback [label="comments"]
+    pr_status -> pr_wait     [label="quiet", weight=10]
+
+    pr_wait -> pr_status
+
+    pr_feedback -> implement [label="fix", weight=10]
+    pr_feedback -> pr_wait   [label="none"]
+}
