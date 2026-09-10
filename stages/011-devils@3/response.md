@@ -1,0 +1,14 @@
+This is my third look at this plan. Rounds one and two each found real blocking defects (the silently-ignored `[run.scm] provider` coupling; optional-only verification — then the PAT placed inside a serialized, persisted spec model; the missed `ensure_matching_repo_origin` guard). Rev 3 addresses both round-two defects concretely and correctly against the code as it is: I verified the credential seam it now mirrors really exists (`docker.rs:187/219` takes `github_app: Option<&GitHubCredentials>` as a runtime init parameter; `sandbox_spec.rs:112` scrubs credentials from recorded origins), so items 25–26 are now consistent with each other and with the repo's secrets handling, and the new serialization assertion in the verification section pins it.
+
+I attacked the remaining surface for genuinely new blocking defects and came up empty on every front:
+
+- **Token flow to workers**: the forgejo env-injection (items 22/33) mirrors the documented mechanism (`server-secrets-strategy.md` explicitly describes vault-derived `GITHUB_APP_PRIVATE_KEY` reaching workers via env; `FORGEJO_TOKEN` rides the same seam). Sound.
+- **Remaining GitHub-hardcoded derivations**: I swept for `https://github.com` derivation sites beyond the ones named — `git_checkout::github_clone_url`, `run_intent` validate, `fabro-manifest` (both `configured_repo_origin_url` and origin observation), sandbox layout, and the automation resolver are all named in the plan. No orphaned derivation site remains.
+- **Wire/persistence**: `GitRunTarget`/`PullRequestLink` changes are additive with serde defaults; the automation SQLite store and PR-recovery rows deserialize old data unchanged; the `with_replacement` parity-test obligation is named.
+- **Scope creep**: none — diagnostics, doctor, and the web picker all sit inside the tier the human selected; nothing new appeared in rev 3 beyond what the critique required.
+
+What remains is refinement, not blocking: the plan doesn't name a dedicated workflow-crate unit test for the PR-pipeline provider dispatch (the required manual Docker gate exercises that path end-to-end, including the WIP-prefix auto-PR); `docs/internal/server-secrets-strategy.md`'s secret list isn't explicitly updated with `FORGEJO_TOKEN` (a one-line follow-up); and item 1 contains a plan-text typo (`forgejeo_host`). None of these would force rework or an expensive reversal — the implementer and review stages will absorb them.
+
+Sending it back a third time without a new blocking defect would be the failure mode this process warns against. The plan is a sound basis for work.
+
+{"preferred_next_label": "approve"}
