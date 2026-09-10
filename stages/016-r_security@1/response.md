@@ -1,0 +1,29 @@
+# Security review: Kubernetes sandbox provider
+
+I read the full new provider (`kubernetes.rs`, 3,046 lines; `provider/kubernetes.rs`), every modified file in the diff with context, the shared helpers it leans on (`clone_source.rs`, `sandbox.rs`, `shell_quote`), the secret-handling paths (`as_source`/`resolve_env`/`with_secrets`), and the dependency additions in `Cargo.lock`.
+
+## Findings
+
+**1. `cidr_allow_list` egress control is bypassable via DNS (medium-low; the one real issue)**
+`lib/components/fabro-sandbox/src/kubernetes.rs`, `network_policy_manifest()` (~line 1736): for `CidrAllowList` mode the code appends an egress rule allowing UDP/TCP 53 to `0.0.0.0/0`.
+
+- Attack: untrusted repo code running in the sandbox (exactly the threat this control targets) resolves/queries any attacker-controlled nameserver on the internet, port 53, and exfiltrates arbitrary data over DNS tunneling (`*.attacker.example TXT` records), or talks to any service that happens to listen on 53. The "allow only these CIDRs" guarantee the user configured does not hold.
+- Impact: silent egress channel out of a network-restricted sandbox. The code comment discloses the intent ("cluster DNS must stay reachable… without knowing the DNS service CIDR"), but the user-facing docs (changelog: "all three network modes are enforced"; environments.mdx table) don't carry the caveat. A portable narrower expression exists: a `NetworkPolicyPeer` with `namespace_selector: kubernetes.io/metadata.name=kube-system` + `pod_selector: k8s-app=kube-dns`, falling back to the wide rule only if needed. `Block` mode is unaffected (no DNS exception, genuinely deny-all).
+
+**2. Default-enabled provider picks up ambient in-cluster credentials (observation, not a defect)**
+`lib/apps/fabro-server/src/server.rs`, `build_sandbox_provider_registry()`: `kubernetes.enabled` defaults to `true` (same convention as local/docker/daytona, tested in `resolve_server.rs`). For a server deployed inside a cluster, `Config::infer()` silently binds the provider to the pod's ServiceAccount, so on upgrade any workflow author can select `provider = "kubernetes"` and execute code in the cluster namespace — no operator opt-in and no new credential is required. That follows the repo's trusted-caller model and all providers default on, so I'm flagging it as a deployment consideration, not a vulnerability. The changelog's "no new secrets or settings" framing undersells this; worth a sentence in the docs for in-cluster deployments.
+
+**3. NetworkPolicy creation failure leaves an unrestricted pod running (minor)**
+`kubernetes.rs`, `create_pod()` (~line 556): pod is created first; if policy creation then fails (RBAC missing on `networkpolicies`), the error aborts the run (fail-closed for the workflow — good) but the pod is leaked and keeps cluster-default egress until manually deleted. Resource leak / stray workload, not a bypass, since the run never proceeds. A best-effort pod delete on the policy-error path would tidy it.
+
+## What I checked and found clean
+
+- **Injection**: every interpolation into shell strings goes through `shell_quote` (shlex-backed) — the exec wrapper (`user_command`, `cwd`, stop/pid files, env entries), `git clone/fetch/remote set-url` (with `--` separators), `tar`, `cat`, `rm`, `find` (`-maxdepth`/`-m` from typed integers), `grep`/`rg` (pattern and glob quoted). The exit-code sentinel marker is internally generated (`pid-counter` digits). User labels/env go into typed pod-spec fields, and managed labels (`sh.fabro.managed`, run-id, sandbox) are inserted *after* user labels so they can't be spoofed — the delete-guard integrity holds. Repo path components are validated to `[A-Za-z0-9._-]` excluding `.`/`..`.
+- **Credentials**: no secrets committed; live tests are `#[ignore]`-gated with placeholder instructions; docs show example config only. Clone tokens stay in-memory/`PushCredentialState`, errors are redacted via `redact_auth_url`, and the preflight path deliberately uses unresolved `as_source()` templates rather than resolved secrets. No `Debug`/tracing logging of `SandboxSpec`/options with resolved env values.
+- **Authorization**: reconnect/ssh-access/details all re-verify the pod's managed label plus run-id label against the run record (`validate_managed_pod`), inventory get/delete refuse unmanaged pods, and `delete_with_client` refuses before issuing the API delete.
+- **Path traversal / file transfer**: tar upload writes a single member named by `Path::file_name()` (no separators, `..` rejected), extraction is server-side in-memory only; all remote paths are within the pod's own trust domain as in Docker.
+- **Exec/stdio transport**: the hold-back sentinel parser anchors on the final line only, so crafted output cannot forge exit codes (unit-tested, including binary payloads and marker collisions); stdio sessions use no sentinel and detect termination by stream close (`exited(None)` is legal).
+- **Deserialization**: pod status mapped through typed structs; no unsafe code anywhere in the diff.
+- **Dependencies**: `kube 4.2.0` / `k8s-openapi 0.28.0` from crates.io with checksums, `default-features = false`, rustls+ring matching the workspace provider; the odd-looking transitive crates (`serde-saphyr`, `granit-parser`, `jsonpath-rust`, `jiff`, etc.) all resolve through kube-client or the pre-existing daytona/acp trees. No git or vendored sources added.
+
+No injection, no committed secrets, no missing authorization check, and no unsafe deserialization. The one thing I'd want fixed before ship is the DNS-egress hole in finding 1 (or at minimum, the docs disclosing it).

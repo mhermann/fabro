@@ -1,0 +1,6 @@
+{
+  "mode": "agent",
+  "provider": "zai",
+  "model": "glm-5.3-flash",
+  "reasoning_effort": "high"
+}
