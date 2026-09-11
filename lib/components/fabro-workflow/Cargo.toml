@@ -29,7 +29,7 @@ fabro-graphviz = { path = "../fabro-graphviz" }
 fabro-hooks = { path = "../fabro-hooks" }
 fabro-validate = { path = "../fabro-validate" }
 fabro-dump = { path = "../fabro-dump" }
-fabro-sandbox = { path = "../fabro-sandbox", features = ["daytona"] }
+fabro-sandbox = { path = "../fabro-sandbox", features = ["daytona", "kubernetes"] }
 fabro-mcp = { path = "../fabro-mcp" }
 fabro-github = { path = "../fabro-github" }
 fabro-interview = { path = "../fabro-interview" }

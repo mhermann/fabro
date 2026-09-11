@@ -1106,16 +1106,21 @@ async fn validate_intent_environment(
     let image = &settings.run.environment.image;
     let image_incompatible = match effective_provider {
         SandboxProviderKind::Docker => image.docker.is_none() && image.dockerfile.is_some(),
-        SandboxProviderKind::Local | SandboxProviderKind::Daytona => false,
+        // Config resolution rejects image.dockerfile for kubernetes outright,
+        // so any surviving settings are compatible by construction.
+        SandboxProviderKind::Local
+        | SandboxProviderKind::Daytona
+        | SandboxProviderKind::Kubernetes => false,
     };
     let (target_incompatible, detail) = match target {
         RunTarget::Git(_) => (
             configured_provider == SandboxProviderKind::Local || !settings.run.clone.enabled,
-            "Git targets require a compatible clone-enabled Docker or Daytona environment",
+            "Git targets require a compatible clone-enabled Docker, Daytona, or Kubernetes \
+             environment",
         ),
         RunTarget::None {} => (
             configured_provider == SandboxProviderKind::Local,
-            "none targets require a compatible Docker or Daytona environment",
+            "none targets require a compatible Docker, Daytona, or Kubernetes environment",
         ),
         RunTarget::Folder { .. } => (
             configured_provider != SandboxProviderKind::Local,

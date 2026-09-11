@@ -9,7 +9,7 @@ use fabro_llm::Client;
 use fabro_llm::lithos_catalog::{Catalog, CatalogProvider};
 use fabro_llm::probe::{self, ModelTestStatus};
 use fabro_redact::redact_string;
-use fabro_sandbox::{DockerSandboxProvider, daytona};
+use fabro_sandbox::{DockerSandboxProvider, KubernetesSandboxProvider, daytona};
 use fabro_static::EnvVars;
 use fabro_types::settings::ServerAuthMethod;
 use fabro_types::settings::server::GithubIntegrationStrategy;
@@ -94,11 +94,12 @@ fn validate_session_secret(value: &str) -> Result<(), String> {
 }
 
 pub async fn run_all(state: &AppState) -> DiagnosticsReport {
-    let (llm, github, docker_sandbox, cloud_sandbox, web_search, crypto) = tokio::join!(
+    let (llm, github, docker_sandbox, cloud_sandbox, kubernetes_sandbox, web_search, crypto) = tokio::join!(
         check_llm_providers(state),
         check_github_app(state),
         check_docker_sandbox(state),
         check_cloud_sandbox(state),
+        check_kubernetes_sandbox(state),
         check_web_search(state),
         check_crypto(state),
     );
@@ -108,7 +109,14 @@ pub async fn run_all(state: &AppState) -> DiagnosticsReport {
         sections: vec![
             CheckSection {
                 title:  "Credentials".to_string(),
-                checks: vec![llm, github, docker_sandbox, cloud_sandbox, web_search],
+                checks: vec![
+                    llm,
+                    github,
+                    docker_sandbox,
+                    cloud_sandbox,
+                    kubernetes_sandbox,
+                    web_search,
+                ],
             },
             CheckSection {
                 title:  "Configuration".to_string(),
@@ -641,6 +649,82 @@ fn docker_sandbox_probe_check(probe: Result<(), String>) -> CheckResult {
             details: vec![CheckDetail::new(err)],
             remediation: Some(
                 "Start Docker Desktop or the Docker daemon, fix Docker socket permissions, or disable Docker with `server.sandbox.providers.docker.enabled = false`."
+                    .to_string(),
+            ),
+        },
+    }
+}
+
+async fn check_kubernetes_sandbox(state: &AppState) -> CheckResult {
+    check_kubernetes_sandbox_with_probe(
+        state
+            .server_settings()
+            .server
+            .sandbox
+            .providers
+            .kubernetes
+            .enabled,
+        || async {
+            KubernetesSandboxProvider::check_cluster()
+                .await
+                .map_err(|err| err.display_with_causes())
+        },
+        DOCKER_PROBE_TIMEOUT,
+    )
+    .await
+}
+
+async fn check_kubernetes_sandbox_with_probe<F, Fut>(
+    enabled: bool,
+    probe: F,
+    probe_timeout: Duration,
+) -> CheckResult
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<String, String>>,
+{
+    if !enabled {
+        return CheckResult {
+            name:        "Kubernetes Sandbox".to_string(),
+            status:      CheckStatus::Pass,
+            summary:     "disabled".to_string(),
+            details:     vec![CheckDetail::new(
+                "server.sandbox.providers.kubernetes.enabled = false".to_string(),
+            )],
+            remediation: None,
+        };
+    }
+
+    let probe = timeout(probe_timeout, probe()).await;
+    match probe {
+        Ok(result) => kubernetes_sandbox_probe_check(result),
+        Err(_) => {
+            kubernetes_sandbox_probe_check(Err("Kubernetes API server probe timed out".to_string()))
+        }
+    }
+}
+
+fn kubernetes_sandbox_probe_check(probe: Result<String, String>) -> CheckResult {
+    match probe {
+        Ok(version) => CheckResult {
+            name:        "Kubernetes Sandbox".to_string(),
+            status:      CheckStatus::Pass,
+            summary:     "cluster reachable".to_string(),
+            details:     vec![CheckDetail::new(format!(
+                "Kubernetes API server {version} responded"
+            ))],
+            remediation: None,
+        },
+        Err(err) => CheckResult {
+            name:        "Kubernetes Sandbox".to_string(),
+            status:      CheckStatus::Error,
+            summary:     "cluster unavailable".to_string(),
+            details:     vec![CheckDetail::new(err)],
+            remediation: Some(
+                "Verify kubeconfig or in-cluster ServiceAccount access, then run \
+                 `kubectl auth can-i create pods; kubectl auth can-i create pods/exec` for the \
+                 target namespace, or disable the provider with \
+                 `server.sandbox.providers.kubernetes.enabled = false`."
                     .to_string(),
             ),
         },

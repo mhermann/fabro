@@ -21,4 +21,5 @@ export interface ServerSandboxProvidersSettings {
     'local': ServerSandboxProviderSettings;
     'docker': ServerSandboxProviderSettings;
     'daytona': ServerSandboxProviderSettings;
+    'kubernetes': ServerSandboxProviderSettings;
 }

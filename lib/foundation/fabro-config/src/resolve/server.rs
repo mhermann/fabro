@@ -70,14 +70,17 @@ fn resolve_sandbox(layer: Option<&ServerSandboxLayer>) -> ServerSandboxSettings 
     let providers = layer.and_then(|sandbox| sandbox.providers.as_ref());
     ServerSandboxSettings {
         providers: ServerSandboxProvidersSettings {
-            local:   resolve_sandbox_provider(
+            local:      resolve_sandbox_provider(
                 providers.and_then(|providers| providers.local.as_ref()),
             ),
-            docker:  resolve_sandbox_provider(
+            docker:     resolve_sandbox_provider(
                 providers.and_then(|providers| providers.docker.as_ref()),
             ),
-            daytona: resolve_sandbox_provider(
+            daytona:    resolve_sandbox_provider(
                 providers.and_then(|providers| providers.daytona.as_ref()),
+            ),
+            kubernetes: resolve_sandbox_provider(
+                providers.and_then(|providers| providers.kubernetes.as_ref()),
             ),
         },
     }

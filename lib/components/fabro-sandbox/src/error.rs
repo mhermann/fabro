@@ -48,6 +48,13 @@ pub enum Error {
         source: BollardError,
     },
 
+    #[cfg(feature = "kubernetes")]
+    #[error("Failed to connect to Kubernetes cluster")]
+    KubernetesConnect {
+        #[source]
+        source: kube::Error,
+    },
+
     #[error(
         "{label} failed (exit {exit}, termination={termination}, duration_ms={duration_ms}) - hint: {hint}",
         exit = format_exit_code(result.exit_code),
@@ -112,6 +119,11 @@ impl Error {
             image: image.into(),
             source,
         }
+    }
+
+    #[cfg(feature = "kubernetes")]
+    pub fn kubernetes_connect(source: kube::Error) -> Self {
+        Self::KubernetesConnect { source }
     }
 
     pub fn causes(&self) -> Vec<String> {

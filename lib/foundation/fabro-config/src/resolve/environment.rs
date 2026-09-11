@@ -238,5 +238,15 @@ fn validate_provider_capabilities(
                 });
             }
         }
+        EnvironmentProvider::Kubernetes => {
+            if environment.image.dockerfile.is_some() {
+                errors.push(ResolveError::Invalid {
+                    path:   format!("{path}.image.dockerfile"),
+                    reason: "kubernetes environments run a prebuilt image reference and cannot \
+                             build image.dockerfile; use image.docker"
+                        .to_string(),
+                });
+            }
+        }
     }
 }

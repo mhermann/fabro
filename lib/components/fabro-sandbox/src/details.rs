@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 use chrono::{DateTime, Utc};
 use fabro_types::{
     RunId, RunSandboxInstance, SandboxDetails, SandboxNetwork, SandboxProviderKind,
@@ -15,6 +15,7 @@ use fabro_types::{
 /// - `local` always returns a minimal record describing the host.
 /// - `docker` inspects the managed container through Bollard.
 /// - `daytona` reconnects to the SDK sandbox.
+/// - `kubernetes` reads the sandbox pod through the kube API.
 #[allow(
     unused_variables,
     reason = "Feature-gated providers consume some parameters only when enabled."
@@ -41,6 +42,13 @@ pub async fn sandbox_details(
             "Sandbox provider '{}' has no details implementation",
             record.provider
         )),
+        #[cfg(feature = "kubernetes")]
+        SandboxProviderKind::Kubernetes => kubernetes::kubernetes_details(record).await,
+        #[cfg(not(feature = "kubernetes"))]
+        SandboxProviderKind::Kubernetes => Err(anyhow::anyhow!(
+            "Sandbox provider '{}' has no details implementation",
+            record.provider
+        )),
     }
 }
 
@@ -58,7 +66,7 @@ fn local_details(record: &RunSandboxInstance) -> SandboxDetails {
     }
 }
 
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 fn parse_rfc3339_utc(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .ok()
@@ -822,6 +830,258 @@ pub(crate) mod daytona {
             let network = daytona_network(false, None);
             assert_eq!(network.egress, SandboxNetworkPolicy::open());
             assert_eq!(network.ingress, SandboxNetworkPolicy::blocked());
+        }
+    }
+}
+
+#[cfg(feature = "kubernetes")]
+pub(crate) mod kubernetes {
+    use std::collections::BTreeMap;
+
+    use anyhow::{Context as _, Result, anyhow};
+    use fabro_types::{
+        RunSandboxInstance, SandboxDetails, SandboxInfo, SandboxNetwork, SandboxProviderKind,
+        SandboxResources, SandboxState, SandboxTimestamps,
+    };
+    use k8s_openapi::api::core::v1::{Pod, ResourceRequirements};
+    use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+
+    use super::parse_rfc3339_utc;
+    use crate::kubernetes::{WORKING_DIRECTORY, connect};
+
+    pub(super) async fn kubernetes_details(record: &RunSandboxInstance) -> Result<SandboxDetails> {
+        let runtime = &record.runtime;
+        let (client, namespace) = connect()
+            .await
+            .map_err(anyhow::Error::new)
+            .context("Failed to connect to Kubernetes cluster")?;
+        let pods: Pod = get_pod(&client, &namespace, &runtime.id).await?;
+        Ok(map_kubernetes_pod(&pods, record))
+    }
+
+    async fn get_pod(client: &kube::Client, namespace: &str, name: &str) -> Result<Pod> {
+        let pods: kube::Api<Pod> = kube::Api::namespaced(client.clone(), namespace);
+        pods.get_opt(name)
+            .await
+            .map_err(|err| anyhow!("Failed to get Kubernetes pod '{name}': {err}"))?
+            .ok_or_else(|| anyhow!("Kubernetes pod '{name}' is gone"))
+    }
+
+    pub(crate) fn kubernetes_info_from_pod(pod: &Pod) -> SandboxInfo {
+        let fields = kubernetes_fields_from_pod(pod);
+        SandboxInfo {
+            provider:          SandboxProviderKind::Kubernetes,
+            id:                fields.id,
+            display_name:      fields.display_name,
+            state:             fields.state,
+            native_state:      fields.native_state,
+            image:             fields.image,
+            snapshot:          None,
+            region:            fields.region,
+            web_url:           None,
+            working_directory: Some(WORKING_DIRECTORY.to_string()),
+            resources:         fields.resources,
+            network:           SandboxNetwork::unknown(),
+            labels:            fields.labels,
+            timestamps:        fields.timestamps,
+        }
+    }
+
+    pub(super) fn map_kubernetes_pod(pod: &Pod, record: &RunSandboxInstance) -> SandboxDetails {
+        let fields = kubernetes_fields_from_pod(pod);
+        let image = fields.image.clone().or_else(|| record.image.clone());
+
+        SandboxDetails {
+            sandbox:      RunSandboxInstance {
+                image,
+                ..record.clone()
+            },
+            state:        fields.state,
+            native_state: fields.native_state,
+            region:       fields.region,
+            web_url:      None,
+            resources:    fields.resources,
+            network:      SandboxNetwork::unknown(),
+            labels:       fields.labels,
+            timestamps:   fields.timestamps,
+        }
+    }
+
+    struct KubernetesFields {
+        id:           String,
+        display_name: Option<String>,
+        state:        SandboxState,
+        native_state: Option<String>,
+        image:        Option<String>,
+        region:       Option<String>,
+        resources:    SandboxResources,
+        labels:       BTreeMap<String, String>,
+        timestamps:   SandboxTimestamps,
+    }
+
+    fn kubernetes_fields_from_pod(pod: &Pod) -> KubernetesFields {
+        let phase = pod.status.as_ref().and_then(|status| status.phase.clone());
+        let native_state = phase.clone().filter(|value| !value.is_empty());
+        let normalized_state = phase
+            .as_deref()
+            .map_or(SandboxState::Unknown, normalize_kubernetes_phase);
+
+        let spec = pod.spec.as_ref();
+        let container = spec
+            .and_then(|spec| spec.containers.first())
+            .cloned()
+            .unwrap_or_default();
+        let image = container.image.clone().filter(|value| !value.is_empty());
+        let resources = pod_resources(container.resources.as_ref());
+
+        let labels: BTreeMap<String, String> = pod
+            .metadata
+            .labels
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        let region = spec
+            .and_then(|spec| spec.node_name.clone())
+            .filter(|value| !value.is_empty());
+
+        let created_at = pod
+            .metadata
+            .creation_timestamp
+            .as_ref()
+            .map(|time| time.0.to_string())
+            .and_then(|value| parse_rfc3339_utc(&value));
+
+        let id = pod.metadata.name.clone().unwrap_or_default();
+
+        KubernetesFields {
+            display_name: Some(id.clone()).filter(|name| !name.is_empty()),
+            id,
+            state: normalized_state,
+            native_state,
+            image,
+            region,
+            resources,
+            labels,
+            timestamps: SandboxTimestamps {
+                created_at,
+                last_activity_at: None,
+            },
+        }
+    }
+
+    fn pod_resources(requirements: Option<&ResourceRequirements>) -> SandboxResources {
+        let Some(requirements) = requirements else {
+            return SandboxResources::default();
+        };
+        // Requests and limits are set to the same values at creation; read the
+        // limits back and fall back to requests.
+        let quantities = requirements
+            .limits
+            .as_ref()
+            .filter(|limits| !limits.is_empty())
+            .or(requirements.requests.as_ref());
+        let Some(quantities) = quantities else {
+            return SandboxResources::default();
+        };
+        SandboxResources {
+            cpu_cores:    quantity_get(quantities, "cpu").and_then(parse_cpu_cores),
+            memory_bytes: quantity_get(quantities, "memory").and_then(parse_byte_quantity),
+            disk_bytes:   quantity_get(quantities, "ephemeral-storage")
+                .and_then(parse_byte_quantity),
+        }
+    }
+
+    fn quantity_get<'a>(
+        quantities: &'a std::collections::BTreeMap<String, Quantity>,
+        key: &str,
+    ) -> Option<&'a str> {
+        quantities.get(key).map(|quantity| quantity.0.as_str())
+    }
+
+    /// Parse a CPU quantity: whole cores ("2") or millicores ("500m").
+    fn parse_cpu_cores(value: &str) -> Option<f64> {
+        if let Some(millis) = value.strip_suffix('m') {
+            return millis.parse::<f64>().ok().map(|millis| millis / 1000.0);
+        }
+        value.parse().ok()
+    }
+
+    /// Parse a byte quantity: plain bytes, or Kubernetes binary SI suffixes.
+    fn parse_byte_quantity(value: &str) -> Option<u64> {
+        let multipliers: &[(&str, u64)] = &[
+            ("Ki", 1024),
+            ("Mi", 1024 * 1024),
+            ("Gi", 1024 * 1024 * 1024),
+            ("Ti", 1024 * 1024 * 1024 * 1024),
+        ];
+        for (suffix, multiplier) in multipliers {
+            if let Some(number) = value.strip_suffix(suffix) {
+                return number.parse::<u64>().ok().map(|number| number * multiplier);
+            }
+        }
+        value.parse().ok()
+    }
+
+    pub(super) fn normalize_kubernetes_phase(phase: &str) -> SandboxState {
+        match phase {
+            "Pending" => SandboxState::Starting,
+            "Running" => SandboxState::Running,
+            "Succeeded" => SandboxState::Stopped,
+            "Failed" => SandboxState::Error,
+            _ => SandboxState::Unknown,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn pending_phase_normalizes_to_starting() {
+            assert_eq!(
+                normalize_kubernetes_phase("Pending"),
+                SandboxState::Starting
+            );
+        }
+
+        #[test]
+        fn running_phase_normalizes_to_running() {
+            assert_eq!(normalize_kubernetes_phase("Running"), SandboxState::Running);
+        }
+
+        #[test]
+        fn succeeded_phase_normalizes_to_stopped() {
+            assert_eq!(
+                normalize_kubernetes_phase("Succeeded"),
+                SandboxState::Stopped
+            );
+        }
+
+        #[test]
+        fn failed_phase_normalizes_to_error() {
+            assert_eq!(normalize_kubernetes_phase("Failed"), SandboxState::Error);
+        }
+
+        #[test]
+        fn unknown_phase_normalizes_to_unknown() {
+            assert_eq!(normalize_kubernetes_phase("Weird"), SandboxState::Unknown);
+        }
+
+        #[test]
+        fn cpu_quantity_supports_cores_and_millicores() {
+            assert_eq!(parse_cpu_cores("2"), Some(2.0));
+            assert_eq!(parse_cpu_cores("500m"), Some(0.5));
+            assert_eq!(parse_cpu_cores("fast"), None);
+        }
+
+        #[test]
+        fn byte_quantity_supports_plain_bytes_and_suffixes() {
+            assert_eq!(parse_byte_quantity("2147483648"), Some(2_147_483_648));
+            assert_eq!(parse_byte_quantity("1Gi"), Some(1024 * 1024 * 1024));
+            assert_eq!(parse_byte_quantity("512Mi"), Some(512 * 1024 * 1024));
+            assert_eq!(parse_byte_quantity("bogus"), None);
         }
     }
 }

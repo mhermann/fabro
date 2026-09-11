@@ -150,5 +150,13 @@ fn sandbox_provider_rejects_unknown_values() {
         serde_json::from_value::<SandboxProviderKind>(json!("daytona")).unwrap(),
         SandboxProviderKind::Daytona
     );
+    assert_eq!(
+        serde_json::from_value::<SandboxProviderKind>(json!("kubernetes")).unwrap(),
+        SandboxProviderKind::Kubernetes
+    );
+    assert_eq!(
+        serde_json::to_value(SandboxProviderKind::Kubernetes).unwrap(),
+        json!("kubernetes")
+    );
     assert!(serde_json::from_value::<SandboxProviderKind>(json!("other")).is_err());
 }
