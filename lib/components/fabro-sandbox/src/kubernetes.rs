@@ -1411,6 +1411,19 @@ struct KubernetesCloneFailure {
     retry_reason: Option<git_retry::GitRetryReason>,
 }
 
+static RUSTLS_PROVIDER: std::sync::Once = std::sync::Once::new();
+
+/// kube builds its TLS config through rustls, which cannot auto-select a
+/// crypto provider when both ring and aws-lc-rs are compiled in. Install ring,
+/// matching the provider fabro-cli installs at startup.
+fn ensure_rustls_provider() {
+    use rustls::crypto::ring;
+
+    RUSTLS_PROVIDER.call_once(|| {
+        let _ = ring::default_provider().install_default();
+    });
+}
+
 /// Connect with kube-standard inference: in-cluster ServiceAccount first, then
 /// `KUBECONFIG`, then `~/.kube/config`. Returns the client plus the namespace
 /// its context resolves to.
@@ -1419,6 +1432,7 @@ pub(crate) async fn connect() -> crate::Result<(Client, String)> {
         .await
         .map_err(|err| crate::Error::context("Failed to infer Kubernetes configuration", err))?;
     let namespace = config.default_namespace.clone();
+    ensure_rustls_provider();
     let client = Client::try_from(config)
         .map_err(|err| crate::Error::context("Failed to build Kubernetes client", err))?;
     Ok((client, namespace))
