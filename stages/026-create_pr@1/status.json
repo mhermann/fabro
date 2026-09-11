@@ -1,0 +1,6 @@
+{
+  "outcome": "succeeded",
+  "notes": "Script completed: set -eu\nBRANCH=$(git branch --show-current)\nif [ ! -s /tmp/pr-title.txt ]; then echo missing-or-empty-pr-title >&2; exit 1; fi\nif [ ! -s /tmp/pr-body.md ]; then echo missing-or-empty-pr-body >&2; exit 1; fi\nTITLE=$(head -n 1 /tmp/pr-title.txt | tr -d '\\`\"' | sed -e 's/^[[:space:]]*#*[[:space:]]*//' -e 's/[[:space:]]*$//' | cut -c1-70)\nif [ -z \"$TITLE\" ]; then echo pr-title-empty-after-sanitising >&2; exit 1; fi\ngit push -u origin $BRANCH\nOPEN=$(gh pr list --head $BRANCH --state open --limit 1 --json number --jq '.[0].number // empty')\nif [ -n \"$OPEN\" ]; then\n  gh pr edit $OPEN --title \"$TITLE\" --body-file /tmp/pr-body.md\n  echo updated-existing-pr-$OPEN\n  gh pr view $OPEN --json url --jq .url\n  exit 0\nfi\nMERGED=$(gh pr list --head $BRANCH --state merged --limit 1 --json number --jq '.[0].number // empty')\nif [ -n \"$MERGED\" ]; then\n  echo pr-already-merged-$MERGED\n  gh pr view $MERGED --json url --jq .url\n  exit 0\nfi\ngh pr create --base main --head $BRANCH --title \"$TITLE\" --body-file /tmp/pr-body.md\ngh pr view --json url --jq .url",
+  "failure_reason": null,
+  "timestamp": "2026-09-11T13:03:52.363552Z"
+}
