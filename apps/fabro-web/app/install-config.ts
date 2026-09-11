@@ -27,3 +27,8 @@ export const INSTALL_PROVIDERS = [
     },
   },
 ] as const;
+
+export const FORGEJO_TOKEN_HELP = {
+  url: "https://docs.forgejo.org/latest/user/authentication/access-token/",
+  text: "Create an access token under Settings → Applications → Access tokens with repository read and write scope.",
+} as const;

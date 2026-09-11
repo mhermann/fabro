@@ -373,6 +373,10 @@ pub struct PullRequestCreatedProps {
     pub head_sha:    Option<String>,
     pub title:       String,
     pub draft:       bool,
+    /// Instance base URL when the pull request lives on a configured Forgejo
+    /// instance; absent (GitHub) for historical events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forge:       Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -39,7 +39,6 @@ use httpmock::Method::{GET, POST};
 use httpmock::MockServer;
 use serde_json::json;
 use tokio::sync::Notify;
-use tokio_stream::StreamExt as _;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::Message as WebSocketMessage;
 use tower::ServiceExt;
@@ -51,6 +50,7 @@ use tracing_subscriber::{Layer, Registry};
 
 use super::*;
 use crate::automation_materializer::AutomationRunMaterializeInput;
+use crate::forgejo_webhooks;
 use crate::github_webhooks::compute_signature;
 use crate::jwt_auth::{AuthMode, ConfiguredAuth};
 use crate::test_support::*;
@@ -568,6 +568,64 @@ fn webhook_test_app(auth_mode: AuthMode) -> Router {
         web_enabled: false,
         ..RouterOptions::default()
     })
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn forgejo_webhook_accepts_all_signature_spellings_and_rejects_bad_ones() {
+    let body = br#"{"repository":{"full_name":"acme/widgets"},"action":"opened"}"#;
+    let raw_hex = forgejo_webhooks::compute_signature(TEST_WEBHOOK_SECRET.as_bytes(), body);
+    let prefixed = format!("sha256={raw_hex}");
+    for (header_name, signature) in [
+        ("x-forgejo-signature", raw_hex.as_str()),
+        ("x-gitea-signature", raw_hex.as_str()),
+        ("x-hub-signature-256", prefixed.as_str()),
+    ] {
+        let state = TestAppStateBuilder::new()
+            .env_lookup(|_| None)
+            .vault_entries([(
+                forgejo_webhooks::FORGEJO_WEBHOOK_SECRET_ENV,
+                TEST_WEBHOOK_SECRET,
+            )])
+            .build();
+        let app = build_router_with_options(state, &dev_token_auth_mode(), RouterOptions {
+            web_enabled: false,
+            ..RouterOptions::default()
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri(api("/webhooks/forgejo"))
+            .header("x-forgejo-delivery", "delivery-1")
+            .header("x-forgejo-event", "push")
+            .header(header_name, signature)
+            .body(Body::from(body.to_vec()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_status!(response, StatusCode::OK).await;
+    }
+
+    // A wrong secret is rejected on every accepted header spelling.
+    let wrong = forgejo_webhooks::compute_signature(b"wrong-secret", body);
+    let state = TestAppStateBuilder::new()
+        .env_lookup(|_| None)
+        .vault_entries([(
+            forgejo_webhooks::FORGEJO_WEBHOOK_SECRET_ENV,
+            TEST_WEBHOOK_SECRET,
+        )])
+        .build();
+    let app = build_router_with_options(state, &dev_token_auth_mode(), RouterOptions {
+        web_enabled: false,
+        ..RouterOptions::default()
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri(api("/webhooks/forgejo"))
+        .header("x-forgejo-delivery", "delivery-2")
+        .header("x-forgejo-event", "push")
+        .header("x-forgejo-signature", wrong)
+        .body(Body::from(body.to_vec()))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_status!(response, StatusCode::UNAUTHORIZED).await;
 }
 
 fn webhook_request(
@@ -6780,6 +6838,7 @@ channel = "#deploys"
             head_sha:    Some("final-sha".to_string()),
             title:       "Ship <prod> & notify".to_string(),
             draft:       false,
+            forge:       None,
         },
     )
     .await
@@ -8721,6 +8780,7 @@ async fn create_run_with_pull_request_record(
             head_sha: Some("final-sha".to_string()),
             title: title.to_string(),
             draft: false,
+            forge: None,
         },
     ])
     .await;
@@ -12141,6 +12201,7 @@ async fn merge_run_pull_request_uses_stored_link_coordinates() {
         owner:  "acme".to_string(),
         repo:   "widgets".to_string(),
         number: 42,
+        forge:  None,
     })
     .await;
 
@@ -12245,6 +12306,118 @@ async fn close_run_pull_request_returns_bad_gateway_when_github_pr_is_missing() 
 
     assert_eq!(body["errors"][0]["code"], "github_not_found");
     github_mock.assert();
+}
+
+/// A Forgejo-scoped link must dispatch through the configured Forgejo
+/// instance even when GitHub credentials are available; without a matching
+/// instance the merge reports the integration-unavailable shape.
+#[tokio::test]
+async fn merge_run_pull_request_returns_service_unavailable_for_unconfigured_forgejo_link() {
+    let (state, app, run_id) = pr_test_app(Some("ghu_test"), None);
+    assert!(
+        state.forgejo.is_none(),
+        "test state has no Forgejo instance"
+    );
+
+    create_run_with_linked_pull_request_record(&state, run_id, PullRequestLink {
+        owner:  "acme".to_string(),
+        repo:   "widgets".to_string(),
+        number: 42,
+        forge:  Some("https://git.example.com".to_string()),
+    })
+    .await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(api(&format!("/runs/{run_id}/pull_request/merge")))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "method": "squash" }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response_json!(response, StatusCode::SERVICE_UNAVAILABLE).await;
+
+    assert_eq!(body["errors"][0]["code"], "integration_unavailable");
+}
+
+#[tokio::test]
+async fn close_run_pull_request_returns_service_unavailable_for_unconfigured_forgejo_link() {
+    let (state, app, run_id) = pr_test_app(Some("ghu_test"), None);
+    assert!(
+        state.forgejo.is_none(),
+        "test state has no Forgejo instance"
+    );
+
+    create_run_with_linked_pull_request_record(&state, run_id, PullRequestLink {
+        owner:  "acme".to_string(),
+        repo:   "widgets".to_string(),
+        number: 42,
+        forge:  Some("https://git.example.com".to_string()),
+    })
+    .await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(api(&format!("/runs/{run_id}/pull_request/close")))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response_json!(response, StatusCode::SERVICE_UNAVAILABLE).await;
+
+    assert_eq!(body["errors"][0]["code"], "integration_unavailable");
+}
+
+/// GET keeps serving the stored record (with an unavailable-details marker)
+/// when the link targets a Forgejo instance the server no longer configures.
+#[tokio::test]
+async fn get_run_pull_request_returns_stored_record_when_forgejo_instance_is_unconfigured() {
+    let (state, app, run_id) = pr_test_app(Some("ghu_test"), None);
+    assert!(
+        state.forgejo.is_none(),
+        "test state has no Forgejo instance"
+    );
+
+    create_run_with_linked_pull_request_record(&state, run_id, PullRequestLink {
+        owner:  "acme".to_string(),
+        repo:   "widgets".to_string(),
+        number: 42,
+        forge:  Some("https://git.example.com".to_string()),
+    })
+    .await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(api(&format!("/runs/{run_id}/pull_request")))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response_json!(response, StatusCode::OK).await;
+
+    assert_eq!(body["data"]["link"]["owner"], "acme");
+    assert_eq!(body["data"]["link"]["repo"], "widgets");
+    assert_eq!(body["data"]["link"]["number"], 42);
+    assert_eq!(body["data"]["link"]["forge"], "https://git.example.com");
+    assert_eq!(
+        body["data"]["link"]["html_url"],
+        "https://git.example.com/acme/widgets/pulls/42"
+    );
+    assert!(body["data"]["details"].is_null());
+    assert_eq!(body["meta"]["details_status"], "unavailable");
+    assert_eq!(
+        body["meta"]["details_unavailable_reason"],
+        "integration_unavailable"
+    );
 }
 
 #[tokio::test]
@@ -19538,6 +19711,7 @@ async fn list_runs_includes_live_metadata_from_run_state() {
             head_sha:    Some("final-sha".to_string()),
             title:       "Fix board metadata".to_string(),
             draft:       false,
+            forge:       None,
         },
         workflow_event::Event::InterviewStarted {
             question_id:     "q-1".to_string(),

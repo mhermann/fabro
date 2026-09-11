@@ -137,6 +137,7 @@ fn run_summary_json_matches_openapi_shape() {
             owner:  "fabro-sh".to_string(),
             repo:   "fabro".to_string(),
             number: 123,
+            forge:  None,
         }),
         current_question: None,
         superseded_by:    None,

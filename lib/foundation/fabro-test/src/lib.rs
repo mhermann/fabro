@@ -2091,6 +2091,7 @@ impl TestContext {
 use tokio::net::TcpListener as TokioTcpListener;
 use tokio::sync::OnceCell;
 use tokio::time;
+pub use twin_forgejo::AppState as ForgejoAppState;
 pub use twin_github::AppState as GitHubAppState;
 pub use twin_github::state::AppOptions as GitHubAppOptions;
 use twin_openai::config::Config as TwinConfig;
@@ -2106,6 +2107,14 @@ pub struct TwinGitHub {
     server:       twin_github::TestServer,
 }
 
+/// A shared twin-forgejo server instance. The fixture PAT the twin accepts
+/// on every authenticated route is exposed as `token`.
+pub struct TwinForgejo {
+    pub base_url: String,
+    pub token:    String,
+    server:       twin_forgejo::TestServer,
+}
+
 pub fn test_http_client() -> fabro_http::HttpClient {
     fabro_http::test_http_client().expect("test HTTP client should build")
 }
@@ -2115,6 +2124,23 @@ impl TwinGitHub {
         let server = twin_github::TestServer::start(state).await;
         let base_url = server.url().to_string();
         Self { base_url, server }
+    }
+
+    pub async fn shutdown(self) {
+        self.server.shutdown().await;
+    }
+}
+
+impl TwinForgejo {
+    pub async fn start(state: twin_forgejo::AppState) -> Self {
+        let server = twin_forgejo::TestServer::start(state).await;
+        let base_url = server.url().to_string();
+        let token = server.token().to_string();
+        Self {
+            base_url,
+            token,
+            server,
+        }
     }
 
     pub async fn shutdown(self) {

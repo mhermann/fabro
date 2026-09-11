@@ -445,6 +445,80 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /install/forgejo/token/test:
+    post:
+      operationId: testInstallForgejoToken
+      tags: [Install]
+      summary: Validate install Forgejo token
+      description: Validates a Forgejo personal access token against the given instance without persisting it. Requires the one-time install token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstallForgejoTokenTestInput"
+      responses:
+        "200":
+          description: Forgejo token validated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstallForgejoTokenTestResponse"
+        "401":
+          description: Invalid or missing install token
+          headers:
+            x-request-id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Forgejo token validation failed
+          headers:
+            x-request-id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /install/forgejo/token:
+    put:
+      operationId: putInstallForgejoToken
+      tags: [Install]
+      summary: Save install Forgejo instance and token
+      description: Records the Forgejo instance URL and personal access token chosen during the browser install. Requires the one-time install token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstallForgejoTokenInput"
+      responses:
+        "204":
+          description: Forgejo instance and token recorded
+        "401":
+          description: Invalid or missing install token
+          headers:
+            x-request-id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Invalid install input
+          headers:
+            x-request-id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /install/github/app/manifest:
     post:
       operationId: createInstallGithubAppManifest
@@ -627,6 +701,26 @@ paths:
       tags: [Integrations]
       summary: Receive GitHub Webhook
       description: Receives GitHub App webhook deliveries. Requests are authenticated by `X-Hub-Signature-256`, not API bearer auth.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Webhook accepted
+        "401":
+          description: Missing or invalid webhook signature
+
+  /api/v1/webhooks/forgejo:
+    post:
+      operationId: receiveForgejoWebhook
+      tags: [Integrations]
+      summary: Receive Forgejo Webhook
+      description: Receives Forgejo webhook deliveries. Requests are authenticated by `X-Forgejo-Signature` (or the `X-Gitea-Signature` / `X-Hub-Signature-256` spellings), not API bearer auth. Deliveries are verified and logged; nothing is triggered.
       security: []
       requestBody:
         required: true
@@ -6616,6 +6710,43 @@ components:
         token:
           type: string
 
+    InstallForgejoTokenTestInput:
+      description: Input for install-time Forgejo token validation.
+      type: object
+      required:
+        - url
+        - token
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Forgejo instance base URL (HTTPS).
+        token:
+          type: string
+
+    InstallForgejoTokenTestResponse:
+      description: Successful response from install-time Forgejo token validation.
+      type: object
+      required:
+        - username
+      properties:
+        username:
+          type: string
+
+    InstallForgejoTokenInput:
+      description: Forgejo instance URL and personal access token chosen during browser install.
+      type: object
+      required:
+        - url
+        - token
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Forgejo instance base URL (HTTPS).
+        token:
+          type: string
+
     InstallGithubTokenTestResponse:
       description: Successful response from install-time GitHub token validation.
       type: object
@@ -12574,7 +12705,7 @@ components:
           example: "Stage 'apply-changes' exceeded maximum retries."
 
     PullRequestLink:
-      description: Minimal GitHub pull request link associated with a run.
+      description: Minimal pull request link associated with a run. GitHub links are the default; a `forge` base URL marks a pull request on a self-hosted Forgejo instance.
       type: object
       required:
         - owner
@@ -12594,8 +12725,13 @@ components:
         html_url:
           type: string
           format: uri
-          description: Computed GitHub web URL for the pull request.
+          description: Computed web URL for the pull request.
           example: https://github.com/fabro-sh/fabro/pull/123
+        forge:
+          type: string
+          format: uri
+          description: Instance base URL when the pull request lives on a configured Forgejo instance; omitted for GitHub.
+          example: https://git.example.com
 
     PullRequest:
       description: Stored pull request link plus optional live GitHub details.
@@ -14555,8 +14691,24 @@ components:
       properties:
         github:
           $ref: "#/components/schemas/GithubIntegrationSettings"
+        forgejo:
+          $ref: "#/components/schemas/ForgejoIntegrationSettings"
         slack:
           $ref: "#/components/schemas/SlackIntegrationSettings"
+
+    ForgejoIntegrationSettings:
+      description: A single self-hosted Forgejo instance. The access token lives in the secret vault (`FORGEJO_TOKEN`), never in settings.
+      type: object
+      required:
+        - enabled
+        - url
+      properties:
+        enabled:
+          type: boolean
+          default: false
+        url:
+          type: ["string", "null"]
+          description: Forgejo instance base URL (HTTPS, optional subpath).
 
     GithubIntegrationSettings:
       type: object
@@ -14753,6 +14905,23 @@ components:
       properties:
         github:
           $ref: "#/components/schemas/RunIntegrationsGithubSettings"
+        forgejo:
+          $ref: "#/components/schemas/RunIntegrationsForgejoSettings"
+
+    RunIntegrationsForgejoSettings:
+      description: |
+        Whether the run receives the configured Forgejo instance token as
+        `FORGEJO_TOKEN`. Forgejo PAT scopes are fixed at token creation, so
+        there is no permission map.
+      type: object
+      properties:
+        token:
+          type: boolean
+          description: >
+            Expose `FORGEJO_TOKEN` in the sandbox environment. Omitted when
+            false so settings serialized by this release stay byte-identical
+            to earlier releases for runs without the flag.
+          default: false
 
     RunIntegrationsGithubSettings:
       type: object
@@ -15480,7 +15649,7 @@ components:
     IntegrationProvider:
       description: Server integration provider.
       type: string
-      enum: [github, slack]
+      enum: [github, forgejo, slack]
 
     IntegrationStatus:
       description: Computed runtime integration status.

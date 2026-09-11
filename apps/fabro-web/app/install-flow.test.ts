@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import { shouldRedirectAfterHealthPoll } from "./install-flow";
+import {
+  forgejoInstanceUrlError,
+  shouldRedirectAfterHealthPoll,
+} from "./install-flow";
 
 describe("shouldRedirectAfterHealthPoll", () => {
   test("waits when the health request fails", () => {
@@ -34,5 +37,33 @@ describe("shouldRedirectAfterHealthPoll", () => {
         mode: "normal",
       }),
     ).toBe(true);
+  });
+});
+
+describe("forgejoInstanceUrlError", () => {
+  test("accepts an https instance URL", () => {
+    expect(forgejoInstanceUrlError("https://git.example.com")).toBeNull();
+  });
+
+  test("accepts an https URL with a path and trims whitespace", () => {
+    expect(forgejoInstanceUrlError("  https://git.example.com/  ")).toBeNull();
+  });
+
+  test("rejects an http URL", () => {
+    expect(forgejoInstanceUrlError("http://git.example.com")).toBe(
+      "The Forgejo instance URL must use https.",
+    );
+  });
+
+  test("rejects a missing URL", () => {
+    expect(forgejoInstanceUrlError("   ")).toBe(
+      "Enter the Forgejo instance URL before continuing.",
+    );
+  });
+
+  test("rejects a URL that does not parse", () => {
+    expect(forgejoInstanceUrlError("git.example.com")).toBe(
+      "Enter a valid Forgejo instance URL, e.g. https://git.example.com.",
+    );
   });
 });

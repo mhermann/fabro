@@ -68,7 +68,19 @@ pub struct RunLayer {
 #[serde(deny_unknown_fields)]
 pub struct RunIntegrationsLayer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub github: Option<RunIntegrationsGithubLayer>,
+    pub github:  Option<RunIntegrationsGithubLayer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forgejo: Option<RunIntegrationsForgejoLayer>,
+}
+
+/// `[run.integrations.forgejo]` — whether the run receives the configured
+/// instance token as `FORGEJO_TOKEN`. Forgejo PAT scopes are fixed at token
+/// creation, so there is no permission map to merge.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, fabro_macros::Combine)]
+#[serde(deny_unknown_fields)]
+pub struct RunIntegrationsForgejoLayer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<bool>,
 }
 
 /// `[run.integrations.github]` — runtime GitHub token shape.

@@ -747,6 +747,10 @@ pub enum Event {
         head_sha:    Option<String>,
         title:       String,
         draft:       bool,
+        /// Instance base URL when the pull request lives on a configured
+        /// Forgejo instance; absent for GitHub.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forge:       Option<String>,
     },
     PullRequestLinked {
         pull_request: PullRequestLink,
@@ -801,6 +805,7 @@ impl Event {
             head_sha: Some(head_sha.to_string()),
             title: title.to_string(),
             draft,
+            forge: record.forge.clone(),
         }
     }
 

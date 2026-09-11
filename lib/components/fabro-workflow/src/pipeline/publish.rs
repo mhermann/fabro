@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use fabro_types::ExecOutputTail;
 
-use super::pull_request::{AutoMergeOptions, OpenPullRequestRequest, open_pull_request};
+use super::pull_request::{
+    AutoMergeOptions, OpenPullRequestRequest, PullRequestHost, open_pull_request,
+};
 use super::types::{Concluded, PublishOptions, PublishOutcome, Published};
 use crate::error::{Error, FailureCategory, classify_failure_reason};
 use crate::event::Event;
@@ -160,13 +162,39 @@ impl Concluded {
         let base_branch = self.run_options.base_branch.as_deref().ok_or_else(|| {
             self.pull_request_error("pull request creation requires a base branch")
         })?;
-        let credentials = options.github_app.as_ref().ok_or_else(|| {
-            self.pull_request_error("pull request creation requires GitHub credentials")
-        })?;
+
+        // Host selection: a run origin on the configured Forgejo instance is
+        // served by the instance's PAT; every other origin takes the GitHub
+        // path. A Forgejo origin without configured instance credentials
+        // fails here, like a GitHub run without credentials.
         let github_base_url = fabro_github::github_api_base_url();
+        let host = if let Some(forgejo) = options.forgejo.as_ref() {
+            if fabro_forgejo::is_forgejo_origin(&forgejo.instance, origin_url) {
+                PullRequestHost::Forgejo(fabro_forgejo::ForgejoContext::new(
+                    &forgejo.token,
+                    &forgejo.instance,
+                ))
+            } else {
+                let credentials = options.github_app.as_ref().ok_or_else(|| {
+                    self.pull_request_error("pull request creation requires GitHub credentials")
+                })?;
+                PullRequestHost::GitHub(fabro_github::GitHubContext::new(
+                    credentials,
+                    &github_base_url,
+                ))
+            }
+        } else {
+            let credentials = options.github_app.as_ref().ok_or_else(|| {
+                self.pull_request_error("pull request creation requires GitHub credentials")
+            })?;
+            PullRequestHost::GitHub(fabro_github::GitHubContext::new(
+                credentials,
+                &github_base_url,
+            ))
+        };
 
         let created = open_pull_request(OpenPullRequestRequest {
-            github: fabro_github::GitHubContext::new(credentials, &github_base_url),
+            host,
             origin_url,
             base_branch,
             head_branch: run_branch,

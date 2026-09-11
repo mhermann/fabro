@@ -30,19 +30,22 @@ import {
   finishInstall,
   getInstallSession,
   persistInstallToken,
+  putInstallForgejoToken,
   putInstallGithubToken,
   putInstallLlm,
   putInstallObjectStore,
   putInstallSandbox,
   putInstallServer,
   readStoredInstallToken,
+  testInstallForgejoToken,
   testInstallGithubToken,
   testInstallLlm,
   testInstallObjectStore,
   testInstallSandbox,
 } from "./install-api";
-import { INSTALL_PROVIDERS } from "./install-config";
+import { FORGEJO_TOKEN_HELP, INSTALL_PROVIDERS } from "./install-config";
 import { useInstallSessionQuery } from "./install-query";
+import { forgejoInstanceUrlError } from "./install-flow";
 import {
   CopyButton,
   ErrorMessage,
@@ -65,6 +68,7 @@ const INSTALL_STEPS = [
   { id: "sandbox", label: "Sandbox", href: "/install/sandbox" },
   { id: "llm", label: "LLMs", href: "/install/llm" },
   { id: "github", label: "GitHub", href: "/install/github" },
+  { id: "forgejo", label: "Forgejo", href: "/install/forgejo" },
   { id: "review", label: "Review", href: "/install/review" },
 ] as const;
 
@@ -82,6 +86,8 @@ type SessionState =
   | { status: "ready"; token: string; data: InstallSessionResponse };
 
 type TokenForm = { token: string; username: string };
+
+type ForgejoForm = { url: string; token: string; username: string };
 
 type AppForm = {
   owner: InstallGithubAppOwner;
@@ -125,6 +131,7 @@ type InstallState = {
   canonicalUrl: string;
   githubStrategy: GithubStrategy;
   tokenForm: TokenForm;
+  forgejoForm: ForgejoForm;
   appForm: AppForm;
   saveError: string | null;
   submitting: boolean;
@@ -149,6 +156,7 @@ type InstallAction =
   | { type: "githubStrategyChanged"; strategy: GithubStrategy }
   | { type: "tokenFormPatched"; patch: Partial<TokenForm> }
   | { type: "tokenFormReplaced"; value: TokenForm }
+  | { type: "forgejoFormPatched"; patch: Partial<ForgejoForm> }
   | { type: "appFormPatched"; patch: Partial<AppForm> }
   | { type: "githubOwnerChanged"; kind: GithubOwnerKind }
   | { type: "githubOrgSlugChanged"; slug: string };
@@ -163,6 +171,7 @@ function initialInstallState(): InstallState {
     canonicalUrl:     "",
     githubStrategy:   "token",
     tokenForm:        { token: "", username: "" },
+    forgejoForm:      { url: "", token: "", username: "" },
     appForm:          {
       owner:           { kind: "personal" },
       appName:         "Fabro",
@@ -258,6 +267,8 @@ function installReducer(state: InstallState, action: InstallAction): InstallStat
       return { ...state, tokenForm: { ...state.tokenForm, ...action.patch } };
     case "tokenFormReplaced":
       return { ...state, tokenForm: action.value };
+    case "forgejoFormPatched":
+      return { ...state, forgejoForm: { ...state.forgejoForm, ...action.patch } };
     case "appFormPatched":
       return { ...state, appForm: { ...state.appForm, ...action.patch } };
     case "githubOwnerChanged":
@@ -410,6 +421,7 @@ export default function InstallApp() {
     canonicalUrl,
     githubStrategy,
     tokenForm,
+    forgejoForm,
     appForm,
     saveError,
     submitting,
@@ -566,6 +578,15 @@ export default function InstallApp() {
           githubStrategy={githubStrategy}
           tokenForm={tokenForm}
           appForm={appForm}
+          saveError={saveError}
+          submitting={submitting}
+          runStepSubmit={runStepSubmit}
+          dispatchInstall={dispatchInstall}
+        />
+      ) : pathname === "/install/forgejo" ? (
+        <ForgejoStep
+          installToken={installToken}
+          forgejoForm={forgejoForm}
           saveError={saveError}
           submitting={submitting}
           runStepSubmit={runStepSubmit}
@@ -1176,7 +1197,7 @@ function GithubStep({
               await putInstallGithubToken(installToken, trimmedToken, username);
             },
             fallback: "Failed to start GitHub setup.",
-            next:     "/install/review",
+            next:     "/install/forgejo",
           });
           return;
         }
@@ -1328,6 +1349,161 @@ function GithubStep({
           ) : null}
         </div>
       )}
+    </StepPanel>
+  );
+}
+
+function ForgejoStep({
+  installToken,
+  forgejoForm,
+  saveError,
+  submitting,
+  runStepSubmit,
+  dispatchInstall,
+}: {
+  installToken: string;
+  forgejoForm: ForgejoForm;
+  saveError: string | null;
+  submitting: boolean;
+  runStepSubmit: RunStepSubmit;
+  dispatchInstall: (action: InstallAction) => void;
+}) {
+  const navigate = useNavigate();
+  const [testing, setTesting] = useState(false);
+  const validate = () => {
+    const urlError = forgejoInstanceUrlError(forgejoForm.url);
+    if (urlError) {
+      dispatchInstall({ type: "saveErrorChanged", message: urlError });
+      return null;
+    }
+    const trimmedToken = forgejoForm.token.trim();
+    if (!trimmedToken) {
+      dispatchInstall({
+        type:    "saveErrorChanged",
+        message: "Enter the Forgejo access token before continuing.",
+      });
+      return null;
+    }
+    return { url: forgejoForm.url.trim(), token: trimmedToken };
+  };
+
+  const runTokenTest = () => {
+    if (submitting || testing) return;
+    const input = validate();
+    if (!input) return;
+    setTesting(true);
+    dispatchInstall({ type: "saveErrorChanged", message: null });
+    testInstallForgejoToken(installToken, input.url, input.token)
+      .then((username) =>
+        dispatchInstall({ type: "forgejoFormPatched", patch: { username } }),
+      )
+      .catch((error) =>
+        dispatchInstall({
+          type:    "saveErrorChanged",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Failed to validate the Forgejo token.",
+        }),
+      )
+      .finally(() => setTesting(false));
+  };
+
+  return (
+    <StepPanel
+      title="Connect Forgejo"
+      description="Optional. Connect a self-hosted Forgejo instance so Fabro can open pull requests there. Skip this step if you only use GitHub."
+      error={saveError}
+      submitting={submitting}
+      backHref="/install/github"
+      secondaryAction={
+        <button
+          type="button"
+          disabled={submitting}
+          className={SECONDARY_BUTTON_CLASS}
+          onClick={() => {
+            dispatchInstall({ type: "saveErrorChanged", message: null });
+            navigate("/install/review");
+          }}
+        >
+          Skip Forgejo setup
+        </button>
+      }
+      onSubmit={async () => {
+        const input = validate();
+        if (!input) return;
+        await runStepSubmit({
+          action:   () => putInstallForgejoToken(installToken, input.url, input.token),
+          fallback: "Failed to save Forgejo settings.",
+          next:     "/install/review",
+        });
+      }}
+    >
+      <div className="space-y-5">
+        <Field label="Instance URL">
+          <input
+            name="forgejo_url"
+            aria-label="Forgejo instance URL"
+            value={forgejoForm.url}
+            onChange={(event) =>
+              dispatchInstall({
+                type:  "forgejoFormPatched",
+                patch: { url: event.target.value },
+              })
+            }
+            className={`${INPUT_CLASS} font-mono`}
+            placeholder="https://git.example.com"
+            spellCheck={false}
+            autoComplete="off"
+            autoCapitalize="off"
+          />
+        </Field>
+        <div>
+          <div className="flex items-baseline justify-between gap-4">
+            <label
+              htmlFor="forgejo_token"
+              className="text-sm font-medium text-fg"
+            >
+              Access token
+            </label>
+            <button
+              type="button"
+              disabled={submitting || testing}
+              onClick={runTokenTest}
+              className="text-xs font-medium text-teal-500 outline-teal-500 hover:text-teal-400 focus-visible:outline-2 focus-visible:-outline-offset-2 disabled:opacity-50"
+            >
+              {testing ? "Testing…" : "Test"}
+            </button>
+          </div>
+          <div className="mt-2">
+            <PasswordInput
+              id="forgejo_token"
+              name="forgejo_token"
+              value={forgejoForm.token}
+              onChange={(value) =>
+                dispatchInstall({
+                  type:  "forgejoFormPatched",
+                  patch: { token: value },
+                })
+              }
+              placeholder="Forgejo access token"
+            />
+          </div>
+          {forgejoForm.username ? (
+            <p className="mt-2 inline-flex items-center gap-1.5 text-xs text-mint">
+              <CheckCircleIcon className="size-4 shrink-0" />
+              Validated as{" "}
+              <span className="font-medium">@{forgejoForm.username}</span>
+            </p>
+          ) : null}
+          <HelpDisclosure summary="Where do I get this?">
+            <p>{FORGEJO_TOKEN_HELP.text}</p>
+            <ExternalLink href={FORGEJO_TOKEN_HELP.url}>
+              docs.forgejo.org — access tokens
+            </ExternalLink>
+          </HelpDisclosure>
+        </div>
+      </div>
     </StepPanel>
   );
 }
@@ -1561,6 +1737,7 @@ function WelcomeScreen() {
           ["Sandbox", "Choose Docker or Daytona for workflow execution."],
           ["LLMs", "Validate API keys for Anthropic, OpenAI, or Gemini."],
           ["GitHub", "Choose a personal access token or a GitHub App."],
+          ["Forgejo", "Optionally connect a self-hosted Forgejo instance."],
           ["Review", "Double-check the plan, then write the files."],
         ].map(([title, body], index) => (
           <li key={title} className="flex items-start gap-4 py-4">
@@ -1707,7 +1884,7 @@ function ReviewScreen({
       </dl>
       {error ? <ErrorMessage message={error} /> : null}
       <div className="flex items-center justify-between gap-3 pt-2">
-        <Link to="/install/github" className={SECONDARY_BUTTON_CLASS}>
+        <Link to="/install/forgejo" className={SECONDARY_BUTTON_CLASS}>
           <ArrowLeftIcon className="size-4 shrink-0" />
           Back
         </Link>
@@ -1996,8 +2173,8 @@ function GithubAppDoneScreen({
         />
       </dl>
       <div className="flex justify-end">
-        <Link to="/install/review" className={PRIMARY_BUTTON_CLASS}>
-          Continue to review
+        <Link to="/install/forgejo" className={PRIMARY_BUTTON_CLASS}>
+          Continue
           <ArrowRightIcon className="size-4 shrink-0" />
         </Link>
       </div>

@@ -722,6 +722,7 @@ mod tests {
             labels:           HashMap::new(),
             workflow_slug:    None,
             github_app:       None,
+            forgejo:          None,
             pre_run_git:      None,
             fork_source_ref:  None,
             base_branch:      None,
@@ -768,6 +769,7 @@ mod tests {
         let published = crate::pipeline::publish(concluded, &crate::pipeline::PublishOptions {
             pr_config:  None,
             github_app: None,
+            forgejo:    None,
             origin_url: None,
             model:      "test-model".to_string(),
         })
@@ -1392,6 +1394,7 @@ mod tests {
         let published = crate::pipeline::publish(concluded, &crate::pipeline::PublishOptions {
             pr_config:  None,
             github_app: None,
+            forgejo:    None,
             origin_url: None,
             model:      "test-model".to_string(),
         })
@@ -1446,6 +1449,7 @@ mod tests {
         let published = crate::pipeline::publish(concluded, &crate::pipeline::PublishOptions {
             pr_config:  None,
             github_app: None,
+            forgejo:    None,
             origin_url: Some("https://github.com/owner/repo.git".to_string()),
             model:      "test-model".to_string(),
         })
@@ -1546,6 +1550,7 @@ mod tests {
                 merge_strategy: fabro_types::settings::run::MergeStrategy::Squash,
             }),
             github_app: None,
+            forgejo:    None,
             origin_url: Some("https://github.com/owner/repo.git".to_string()),
             model:      "test-model".to_string(),
         })
@@ -1611,6 +1616,7 @@ mod tests {
         let published = crate::pipeline::publish(concluded, &crate::pipeline::PublishOptions {
             pr_config:  None,
             github_app: None,
+            forgejo:    None,
             origin_url: Some("https://github.com/owner/repo.git".to_string()),
             model:      "test-model".to_string(),
         })
@@ -1670,6 +1676,7 @@ mod tests {
                 merge_strategy: fabro_types::settings::run::MergeStrategy::Squash,
             }),
             github_app: None,
+            forgejo:    None,
             origin_url: Some("https://github.com/owner/repo.git".to_string()),
             model:      "test-model".to_string(),
         })

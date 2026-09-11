@@ -52,6 +52,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::RunWorkerMode;
 use crate::server_client;
+use crate::shared::forgejo as shared_forgejo;
 use crate::shared::github::build_github_credentials;
 
 const RUN_STORE_RETRY_DELAYS: [Duration; 3] = [
@@ -141,6 +142,12 @@ pub(crate) async fn execute(
         let vault_guard = vault.read().await;
         maybe_build_github_credentials(&run_spec.settings, &vault_guard)?
     };
+    let forgejo = {
+        let vault_guard = vault.read().await;
+        // Workflow settings carry no server section; local runs resolve the
+        // instance from FORGEJO_URL / local env.
+        shared_forgejo::build_forgejo_config(None, &vault_guard)?
+    };
     let services = StartServices {
         run_id,
         cancel_token: cancel_token.clone(),
@@ -161,6 +168,7 @@ pub(crate) async fn execute(
         artifact_sink,
         run_control: Some(run_control),
         github_app,
+        forgejo,
         github_integration: run_spec
             .settings
             .run
@@ -1745,8 +1753,8 @@ mod tests {
 
         use fabro_types::settings::InterpString;
         use fabro_types::settings::run::{
-            EnvironmentProvider, RunIntegrationsGithubSettings, RunIntegrationsSettings, RunMode,
-            RunNamespace,
+            EnvironmentProvider, RunIntegrationsForgejoSettings, RunIntegrationsGithubSettings,
+            RunIntegrationsSettings, RunMode, RunNamespace,
         };
 
         use super::super::requires_github_credentials;
@@ -1762,10 +1770,11 @@ mod tests {
                 .parse::<EnvironmentProvider>()
                 .expect("test provider should parse");
             run.integrations = RunIntegrationsSettings {
-                github: RunIntegrationsGithubSettings {
+                github:  RunIntegrationsGithubSettings {
                     permissions,
                     ..RunIntegrationsGithubSettings::default()
                 },
+                forgejo: RunIntegrationsForgejoSettings::default(),
             };
             run
         }

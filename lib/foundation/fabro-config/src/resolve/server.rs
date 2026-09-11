@@ -1,13 +1,13 @@
 use std::path::Path;
 
 use fabro_types::settings::server::{
-    GithubIntegrationSettings, GithubIntegrationStrategy, IntegrationWebhooksSettings,
-    ObjectStoreProvider, ObjectStoreSettings, ServerApiSettings, ServerArtifactsSettings,
-    ServerAuthGithubSettings, ServerAuthMethod, ServerAuthSettings, ServerIntegrationsSettings,
-    ServerListenSettings, ServerLoggingSettings, ServerNamespace, ServerSandboxProviderSettings,
-    ServerSandboxProvidersSettings, ServerSandboxSettings, ServerSchedulerSettings,
-    ServerSlateDbSettings, ServerStorageSettings, ServerWebSettings, SlackIntegrationSettings,
-    WebhookStrategy,
+    ForgejoIntegrationSettings, GithubIntegrationSettings, GithubIntegrationStrategy,
+    IntegrationWebhooksSettings, ObjectStoreProvider, ObjectStoreSettings, ServerApiSettings,
+    ServerArtifactsSettings, ServerAuthGithubSettings, ServerAuthMethod, ServerAuthSettings,
+    ServerIntegrationsSettings, ServerListenSettings, ServerLoggingSettings, ServerNamespace,
+    ServerSandboxProviderSettings, ServerSandboxProvidersSettings, ServerSandboxSettings,
+    ServerSchedulerSettings, ServerSlateDbSettings, ServerStorageSettings, ServerWebSettings,
+    SlackIntegrationSettings, WebhookStrategy,
 };
 use fabro_util::Home;
 
@@ -335,7 +335,7 @@ fn object_store_default_root(storage_root: &str, domain: &str) -> String {
 
 fn resolve_integrations(layer: Option<&ServerIntegrationsLayer>) -> ServerIntegrationsSettings {
     ServerIntegrationsSettings {
-        github: layer
+        github:  layer
             .and_then(|integrations| integrations.github.as_ref())
             .map(|github| {
                 warn_if_demoted_template(
@@ -357,7 +357,17 @@ fn resolve_integrations(layer: Option<&ServerIntegrationsLayer>) -> ServerIntegr
                 }
             })
             .unwrap_or_default(),
-        slack:  layer
+        forgejo: layer
+            .and_then(|integrations| integrations.forgejo.as_ref())
+            .map(|forgejo| {
+                warn_if_demoted_template("server.integrations.forgejo.url", forgejo.url.as_deref());
+                ForgejoIntegrationSettings {
+                    enabled: forgejo.enabled.unwrap_or(false),
+                    url:     forgejo.url.clone(),
+                }
+            })
+            .unwrap_or_default(),
+        slack:   layer
             .and_then(|integrations| integrations.slack.as_ref())
             .map_or(
                 SlackIntegrationSettings {

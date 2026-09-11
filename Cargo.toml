@@ -5,6 +5,7 @@ members = [
     "lib/foundation/*",
     "test/twin/openai",
     "test/twin/github",
+    "test/twin/forgejo",
 ]
 default-members = ["lib/apps/fabro-cli"]
 resolver = "2"
@@ -95,6 +96,7 @@ insta = "1"
 fabro-test = { path = "lib/foundation/fabro-test" }
 twin-openai = { path = "test/twin/openai" }
 twin-github = { path = "test/twin/github" }
+twin-forgejo = { path = "test/twin/forgejo" }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 daytona-sdk = { git = "https://github.com/brynary/daytona-sdk-rust", rev = "be2c7b7272740d47c023cac8abc9f63c1a51a511", package = "daytona-sdk" }

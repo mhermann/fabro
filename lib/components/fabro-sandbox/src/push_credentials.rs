@@ -23,7 +23,9 @@ use crate::sandbox::{RefreshOutcome, RemoteCredentialAction};
 ///
 /// Returns `None` when there are no managed credentials or no GitHub origin
 /// to scope them to. Minted tokens carry the same `contents: write`
-/// permission the clone token uses.
+/// permission the clone token uses. Forgejo origins also return `None`: the
+/// static PAT never expires, so providers embed it at clone time and no
+/// refresh source exists.
 pub(crate) fn build_token_source(
     github_app: Option<&GitHubCredentials>,
     clone_origin_url: Option<&str>,
@@ -36,8 +38,8 @@ pub(crate) fn build_token_source(
     };
     let normalized = fabro_github::normalize_repo_origin_url(origin_url);
     let Ok((owner, repo)) = fabro_github::parse_github_owner_repo(&normalized) else {
-        // Non-GitHub origins never clone in these providers, so there is no
-        // remote to keep credentials fresh for.
+        // Non-GitHub origins (including configured Forgejo instances, whose
+        // static PAT is embedded at clone time) have no refreshable remote.
         return Ok(None);
     };
     InstallationTokenSource::for_repository(

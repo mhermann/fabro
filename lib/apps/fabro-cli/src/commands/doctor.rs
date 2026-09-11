@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Result;
 use fabro_api::types as api_types;
@@ -11,10 +12,11 @@ use fabro_util::path::contract_tilde;
 use fabro_util::printer::Printer;
 use fabro_util::terminal::Styles;
 use fabro_util::version::FABRO_VERSION;
+use tokio::time::timeout;
 
 use crate::args::DoctorArgs;
 use crate::command_context::CommandContext;
-use crate::shared::{cyan_spinner, print_json_pretty};
+use crate::shared::{cyan_spinner, forgejo as shared_forgejo, print_json_pretty};
 
 pub(crate) fn check_config(settings_path: Option<PathBuf>) -> CheckResult {
     match settings_path {
@@ -62,6 +64,78 @@ struct WildcardPublicUrl {
     field:      &'static str,
     value:      String,
     suggestion: String,
+}
+
+/// How long to wait for the Forgejo instance to answer the connectivity probe.
+const FORGEJO_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Forgejo connectivity check: when a Forgejo instance and PAT resolve for the
+/// CLI (`FORGEJO_URL` env plus `FORGEJO_TOKEN` env/vault), validate the PAT
+/// against the instance's authenticated-user endpoint. Reported as not
+/// configured when no instance is set.
+async fn check_forgejo(storage_dir: &Path) -> CheckResult {
+    let config = match shared_forgejo::resolve_forgejo_config(storage_dir).await {
+        Ok(config) => config,
+        Err(err) => {
+            return CheckResult {
+                name:        "Forgejo".to_string(),
+                status:      CheckStatus::Error,
+                summary:     "failed to load credentials".to_string(),
+                details:     vec![CheckDetail::new(format!("{err:#}"))],
+                remediation: Some(format!(
+                    "Check the vault {} secret",
+                    fabro_static::EnvVars::FORGEJO_TOKEN
+                )),
+            };
+        }
+    };
+    let Some(config) = config else {
+        return CheckResult {
+            name:        "Forgejo".to_string(),
+            status:      CheckStatus::Warning,
+            summary:     "not configured".to_string(),
+            details:     Vec::new(),
+            remediation: Some(
+                "Set FORGEJO_URL and the vault FORGEJO_TOKEN secret, or rerun `fabro install`"
+                    .to_string(),
+            ),
+        };
+    };
+
+    let probe = async {
+        let client = fabro_http::test_http_client()?;
+        let ctx = fabro_forgejo::ForgejoContext::new(&config.token, &config.instance);
+        fabro_forgejo::get_authenticated_user(&client, &ctx).await
+    };
+    match timeout(FORGEJO_PROBE_TIMEOUT, probe).await {
+        Ok(Ok(user)) => CheckResult {
+            name:        "Forgejo".to_string(),
+            status:      CheckStatus::Pass,
+            summary:     format!("connected as {}", user.login),
+            details:     vec![CheckDetail::new(format!("Instance: {}", config.instance))],
+            remediation: None,
+        },
+        Ok(Err(err)) => CheckResult {
+            name:        "Forgejo".to_string(),
+            status:      CheckStatus::Error,
+            summary:     "token validation failed".to_string(),
+            details:     vec![CheckDetail::new(format!("{err:#}"))],
+            remediation: Some(format!(
+                "Check the instance URL and the vault {} secret",
+                fabro_static::EnvVars::FORGEJO_TOKEN
+            )),
+        },
+        Err(_) => CheckResult {
+            name:        "Forgejo".to_string(),
+            status:      CheckStatus::Error,
+            summary:     "connectivity error".to_string(),
+            details:     vec![CheckDetail::new(format!(
+                "Forgejo instance did not respond within {}s",
+                FORGEJO_PROBE_TIMEOUT.as_secs()
+            ))],
+            remediation: Some("Check Forgejo connectivity".to_string()),
+        },
+    }
 }
 
 #[expect(
@@ -254,11 +328,12 @@ pub(crate) async fn run_doctor(
 
     let settings_config_path = active_settings_path(None);
 
-    let local_checks = vec![check_config(
+    let mut local_checks = vec![check_config(
         settings_config_path
             .exists()
             .then_some(settings_config_path),
     )];
+    local_checks.push(check_forgejo(base_ctx.storage_dir()).await);
 
     let mut report = CheckReport {
         title:    "Fabro Doctor".to_string(),

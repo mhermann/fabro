@@ -1,0 +1,27 @@
+---
+title: "Forgejo integration"
+date: "2026-09-11"
+---
+
+## Forgejo integration
+
+Fabro now integrates with self-hosted [Forgejo](/core-concepts/forgejo) instances (Gitea-lineage) for the pull-request lifecycle and repository cloning.
+
+A new additive `fabro-forgejo` crate speaks Forgejo's REST v1 API with `Authorization: token <PAT>` auth. Configure a single instance under `[server.integrations.forgejo]` (`enabled` and `url`), store the PAT as the vault `FORGEJO_TOKEN` secret, and point run origins at that instance.
+
+From there, pull requests work end to end from the web UI and the CLI: Fabro creates a PR from the run's working branch after a successful run, reconciles an existing PR by head branch and commit after a stopped run, closes PRs, and merges them with the merge, squash, or rebase strategy. Auto-merge uses Gitea-lineage's `merge_when_checks_succeed` merge parameter, so created PRs merge as soon as required checks pass.
+
+Docker and Daytona sandboxes clone run repositories from the configured instance the same way they clone GitHub repositories, authenticating over HTTPS with the PAT. Runs can opt in to sandbox git credentials with the run-level flag:
+
+```toml
+[run.integrations.forgejo]
+token = true
+```
+
+This injects `FORGEJO_TOKEN` into the sandbox environment. Forgejo token scopes are fixed at creation, so the flag only controls exposure — no per-run permission minting.
+
+Server deployments also get an inert webhook route at `/api/v1/webhooks/forgejo`, verified with HMAC-SHA256 signatures from `X-Forgejo-Signature`, `X-Gitea-Signature`, or `X-Hub-Signature-256` and the vault `FORGEJO_WEBHOOK_SECRET` secret. Deliveries are verified and logged; nothing is triggered yet.
+
+`fabro install` gained a Forgejo step that validates the token against the instance and writes the URL to settings and the token to the vault, and `fabro doctor` now includes a Forgejo connectivity check that reports configuration problems with remediation hints.
+
+See the [Forgejo core concept](/core-concepts/forgejo) for setup, required token scopes, and current limitations.

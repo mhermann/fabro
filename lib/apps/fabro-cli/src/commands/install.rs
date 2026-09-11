@@ -32,7 +32,7 @@ use fabro_install::{
     PendingDevTokenWrite, PendingSettingsWrite, SecretStoreWrite,
     merge_server_settings as merge_server_settings_impl, prepare_dev_token_write_for_install,
     restore_optional_file, rollback_dev_token_write, seed_environments_in_storage,
-    write_github_app_settings, write_token_settings,
+    write_forgejo_settings, write_github_app_settings, write_token_settings,
 };
 use fabro_model::catalog::CatalogProvider;
 use fabro_model::{Catalog, CredentialRef, ProviderId};
@@ -74,6 +74,7 @@ const GITHUB_TOKEN_SECRET_KEY: &str = fabro_static::EnvVars::GITHUB_TOKEN;
 const GITHUB_APP_PRIVATE_KEY_KEY: &str = fabro_static::EnvVars::GITHUB_APP_PRIVATE_KEY;
 const GITHUB_APP_CLIENT_SECRET_KEY: &str = fabro_static::EnvVars::GITHUB_APP_CLIENT_SECRET;
 const GITHUB_APP_WEBHOOK_SECRET_KEY: &str = fabro_static::EnvVars::GITHUB_APP_WEBHOOK_SECRET;
+const FORGEJO_TOKEN_SECRET_KEY: &str = fabro_static::EnvVars::FORGEJO_TOKEN;
 
 static INSTALL_CATALOG: LazyLock<Catalog> = LazyLock::new(|| {
     Catalog::from_builtin().expect("embedded install model catalog should be valid")
@@ -332,6 +333,12 @@ enum GitHubInstallSelection {
 }
 
 #[derive(Debug)]
+enum ForgejoInstallSelection {
+    Skip,
+    Instance { url: String, token: String },
+}
+
+#[derive(Debug)]
 enum ServerConfigSelection {
     KeepExisting,
     Write,
@@ -396,6 +403,12 @@ trait InstallInputSource {
         s: &Styles,
         printer: Printer,
     ) -> Result<GitHubInstallSelection>;
+
+    async fn choose_forgejo_install(
+        &self,
+        s: &Styles,
+        printer: Printer,
+    ) -> Result<ForgejoInstallSelection>;
 
     async fn choose_server_config(&self, config_exists: bool) -> Result<ServerConfigSelection>;
 
@@ -545,6 +558,33 @@ impl InstallInputSource for InteractiveInstallInputSource {
             }
             _ => unreachable!("prompt_select returned an out-of-range index"),
         }
+    }
+
+    async fn choose_forgejo_install(
+        &self,
+        _s: &Styles,
+        _printer: Printer,
+    ) -> Result<ForgejoInstallSelection> {
+        let configure =
+            spawn_blocking(|| prompt_confirm("Configure a Forgejo instance?", false)).await??;
+        if !configure {
+            return Ok(ForgejoInstallSelection::Skip);
+        }
+
+        let instance_url =
+            spawn_blocking(|| prompt_input("Forgejo instance URL (e.g. https://git.example.com)"))
+                .await??;
+        let instance = fabro_forgejo::ForgejoInstance::new(instance_url.trim())
+            .with_context(|| format!("Invalid Forgejo instance URL `{}`", instance_url.trim()))?;
+
+        let token = spawn_blocking(|| prompt_password("Forgejo Personal Access Token")).await??;
+        let creds = fabro_forgejo::ForgejoCredentials::new(token.clone());
+        let ctx = fabro_forgejo::ForgejoContext::new(&creds, &instance);
+        let client = fabro_http::test_http_client().context("building HTTP client")?;
+        fabro_forgejo::get_authenticated_user(&client, &ctx).await?;
+
+        let url = instance.as_str().to_string();
+        Ok(ForgejoInstallSelection::Instance { url, token })
     }
 
     async fn choose_server_config(&self, config_exists: bool) -> Result<ServerConfigSelection> {
@@ -724,6 +764,16 @@ impl InstallInputSource for NonInteractiveInstallInputSource {
             }),
             None => bail!("non-interactive install requires --github-strategy"),
         }
+    }
+
+    async fn choose_forgejo_install(
+        &self,
+        _s: &Styles,
+        _printer: Printer,
+    ) -> Result<ForgejoInstallSelection> {
+        // Forgejo setup is interactive-only; scripted installs configure the
+        // FORGEJO_URL/FORGEJO_TOKEN pair directly instead.
+        Ok(ForgejoInstallSelection::Skip)
     }
 
     async fn choose_server_config(&self, config_exists: bool) -> Result<ServerConfigSelection> {
@@ -1902,6 +1952,47 @@ async fn run_install_inner(args: &InstallArgs, ctx: &CommandContext) -> Result<(
     };
     fabro_util::printerr!(printer, "");
 
+    // Step 3: Forgejo (optional)
+    fabro_util::printerr!(
+        printer,
+        "  {}",
+        s.bold.apply_to("Step 3 · Forgejo (optional)")
+    );
+    fabro_util::printerr!(
+        printer,
+        "  {}",
+        s.dim.apply_to("──────────────────────────")
+    );
+    fabro_util::printerr!(printer, "");
+
+    let mut pending_forgejo_url = None;
+    match input_source.choose_forgejo_install(&s, printer).await? {
+        ForgejoInstallSelection::Skip => {
+            fabro_util::printerr!(
+                printer,
+                "  {} Skipping Forgejo — set {} and rerun `fabro install` later",
+                s.green.apply_to("✔"),
+                fabro_static::EnvVars::FORGEJO_URL
+            );
+        }
+        ForgejoInstallSelection::Instance { url, token } => {
+            fabro_util::printerr!(
+                printer,
+                "  {} Forgejo connected ({})",
+                s.green.apply_to("✔"),
+                url
+            );
+            vault_secrets.push(CreateSecretRequest {
+                name:        FORGEJO_TOKEN_SECRET_KEY.to_string(),
+                value:       token,
+                type_:       ApiSecretType::Token,
+                description: None,
+            });
+            pending_forgejo_url = Some(url);
+        }
+    }
+    fabro_util::printerr!(printer, "");
+
     // Server configuration
     let settings_toml = {
         fabro_util::printerr!(printer, "  {}", s.bold.apply_to("Server · Configuration"));
@@ -1950,6 +2041,10 @@ async fn run_install_inner(args: &InstallArgs, ctx: &CommandContext) -> Result<(
                 )?;
             }
             None => {}
+        }
+
+        if let Some(url) = pending_forgejo_url.as_deref() {
+            write_forgejo_settings(&mut doc, url)?;
         }
 
         toml::to_string_pretty(&doc)?

@@ -239,6 +239,8 @@ pub struct EngineServices {
     pub base_env:        HashMap<String, String>,
     /// GitHub token source used to inject `GITHUB_TOKEN` at the point of use.
     pub github_token:    Option<Arc<InstallationTokenSource>>,
+    /// Forgejo PAT used to inject `FORGEJO_TOKEN` at the point of use.
+    pub forgejo_token:   Option<fabro_forgejo::ForgejoCredentials>,
     /// Typed values from `[run.inputs]`, available to prompt templates.
     pub inputs:          HashMap<String, toml::Value>,
     /// When true, handlers should skip real execution and return simulated
@@ -252,7 +254,12 @@ pub struct EngineServices {
 
 impl EngineServices {
     pub async fn env_for_stage(&self) -> anyhow::Result<HashMap<String, String>> {
-        resolve_workflow_env(&self.base_env, self.github_token.as_ref()).await
+        resolve_workflow_env(
+            &self.base_env,
+            self.github_token.as_ref(),
+            self.forgejo_token.as_ref(),
+        )
+        .await
     }
 
     /// Test-only default: empty registry and cross-phase services.
@@ -331,6 +338,7 @@ impl EngineServices {
             interviewer:     Arc::new(fabro_interview::AutoApproveInterviewer::engine()),
             base_env:        HashMap::new(),
             github_token:    None,
+            forgejo_token:   None,
             inputs:          HashMap::new(),
             dry_run:         false,
             workflow_path:   None,
@@ -340,20 +348,27 @@ impl EngineServices {
 }
 
 pub struct WorkflowToolEnvProvider {
-    pub base_env:     HashMap<String, String>,
-    pub github_token: Option<Arc<InstallationTokenSource>>,
+    pub base_env:      HashMap<String, String>,
+    pub github_token:  Option<Arc<InstallationTokenSource>>,
+    pub forgejo_token: Option<fabro_forgejo::ForgejoCredentials>,
 }
 
 #[async_trait::async_trait]
 impl ToolEnvProvider for WorkflowToolEnvProvider {
     async fn resolve(&self) -> anyhow::Result<HashMap<String, String>> {
-        resolve_workflow_env(&self.base_env, self.github_token.as_ref()).await
+        resolve_workflow_env(
+            &self.base_env,
+            self.github_token.as_ref(),
+            self.forgejo_token.as_ref(),
+        )
+        .await
     }
 }
 
 async fn resolve_workflow_env(
     base_env: &HashMap<String, String>,
     github_token: Option<&Arc<InstallationTokenSource>>,
+    forgejo_token: Option<&fabro_forgejo::ForgejoCredentials>,
 ) -> anyhow::Result<HashMap<String, String>> {
     let mut env = base_env.clone();
     if let Some(source) = github_token {
@@ -362,6 +377,9 @@ async fn resolve_workflow_env(
             "GITHUB_TOKEN".to_string(),
             resolved.token.expose().to_owned(),
         );
+    }
+    if let Some(token) = forgejo_token {
+        env.insert("FORGEJO_TOKEN".to_string(), token.expose().to_owned());
     }
     Ok(env)
 }
@@ -396,8 +414,9 @@ mod tests {
     #[tokio::test]
     async fn workflow_tool_env_provider_returns_base_env_without_github_token() {
         let provider = WorkflowToolEnvProvider {
-            base_env:     HashMap::from([("FOO".to_string(), "bar".to_string())]),
-            github_token: None,
+            base_env:      HashMap::from([("FOO".to_string(), "bar".to_string())]),
+            github_token:  None,
+            forgejo_token: None,
         };
 
         let env = provider.resolve().await.unwrap();
@@ -409,8 +428,9 @@ mod tests {
     #[tokio::test]
     async fn workflow_tool_env_provider_merges_current_github_token() {
         let provider = WorkflowToolEnvProvider {
-            base_env:     HashMap::from([("FOO".to_string(), "bar".to_string())]),
-            github_token: Some(InstallationTokenSource::pat("ghp_pat".to_string())),
+            base_env:      HashMap::from([("FOO".to_string(), "bar".to_string())]),
+            github_token:  Some(InstallationTokenSource::pat("ghp_pat".to_string())),
+            forgejo_token: None,
         };
 
         let env = provider.resolve().await.unwrap();
@@ -431,11 +451,12 @@ mod tests {
     #[tokio::test]
     async fn workflow_tool_env_provider_propagates_token_refresh_errors() {
         let provider = WorkflowToolEnvProvider {
-            base_env:     HashMap::new(),
-            github_token: Some(installation_token_source(
+            base_env:      HashMap::new(),
+            github_token:  Some(installation_token_source(
                 "owner/repo",
                 Arc::new(FailingMinter),
             )),
+            forgejo_token: None,
         };
 
         let err = format!("{:#}", provider.resolve().await.unwrap_err());

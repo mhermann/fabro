@@ -8,9 +8,10 @@ use fabro_types::settings::run::{
     McpServerSettings, McpTransport, MergeStrategy, NotificationProviderSettings,
     NotificationRouteSettings, PreparedStep, PreparedStepRun, PullRequestSettings,
     ResolvedMcpEntry, RunAgentSettings, RunBranchSettings, RunCheckpointSettings, RunCloneSettings,
-    RunExecutionSettings, RunGitSettings, RunGoal, RunIntegrationsGithubSettings,
-    RunIntegrationsSettings, RunInterviewsSettings, RunMetaBranchSettings, RunModelControls,
-    RunModelSettings, RunNamespace, RunPrepareSettings, RunScmSettings, ScmGitHubSettings, TlsMode,
+    RunExecutionSettings, RunGitSettings, RunGoal, RunIntegrationsForgejoSettings,
+    RunIntegrationsGithubSettings, RunIntegrationsSettings, RunInterviewsSettings,
+    RunMetaBranchSettings, RunModelControls, RunModelSettings, RunNamespace, RunPrepareSettings,
+    RunScmSettings, ScmGitHubSettings, TlsMode,
 };
 use fabro_util::workspace_glob::WorkspaceGlob;
 
@@ -99,7 +100,13 @@ fn resolve_integrations(
         .and_then(|integrations| integrations.github.as_ref())
         .map(|github| resolve_integrations_github(github, errors))
         .unwrap_or_default();
-    RunIntegrationsSettings { github }
+    let forgejo = layer
+        .and_then(|integrations| integrations.forgejo.as_ref())
+        .map(|forgejo| RunIntegrationsForgejoSettings {
+            token: forgejo.token.unwrap_or(false),
+        })
+        .unwrap_or_default();
+    RunIntegrationsSettings { github, forgejo }
 }
 
 /// GitHub caps one installation token at 500 repositories; the implicit run

@@ -26,6 +26,12 @@ import type { ErrorResponse } from '../models';
 // @ts-ignore
 import type { InstallFinishResponse } from '../models';
 // @ts-ignore
+import type { InstallForgejoTokenInput } from '../models';
+// @ts-ignore
+import type { InstallForgejoTokenTestInput } from '../models';
+// @ts-ignore
+import type { InstallForgejoTokenTestResponse } from '../models';
+// @ts-ignore
 import type { InstallGithubAppManifestInput } from '../models';
 // @ts-ignore
 import type { InstallGithubAppManifestResponse } from '../models';
@@ -191,6 +197,41 @@ export const InstallApiAxiosParamCreator = function (configuration?: Configurati
             setSearchParams(localVarUrlObj, localVarQueryParameter);
             let headersFromBaseOptions = baseOptions && baseOptions.headers ? baseOptions.headers : {};
             localVarRequestOptions.headers = {...localVarHeaderParameter, ...headersFromBaseOptions, ...options.headers};
+
+            return {
+                url: toPathString(localVarUrlObj),
+                options: localVarRequestOptions,
+            };
+        },
+        /**
+         * Records the Forgejo instance URL and personal access token chosen during the browser install. Requires the one-time install token.
+         * @summary Save install Forgejo instance and token
+         * @param {InstallForgejoTokenInput} installForgejoTokenInput
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        putInstallForgejoToken: async (installForgejoTokenInput: InstallForgejoTokenInput, options: RawAxiosRequestConfig = {}): Promise<RequestArgs> => {
+            // verify required parameter 'installForgejoTokenInput' is not null or undefined
+            assertParamExists('putInstallForgejoToken', 'installForgejoTokenInput', installForgejoTokenInput)
+            const localVarPath = `/install/forgejo/token`;
+            // use dummy base URL string because the URL constructor only accepts absolute URLs.
+            const localVarUrlObj = new URL(localVarPath, DUMMY_BASE_URL);
+            let baseOptions;
+            if (configuration) {
+                baseOptions = configuration.baseOptions;
+            }
+
+            const localVarRequestOptions = { method: 'PUT', ...baseOptions, ...options};
+            const localVarHeaderParameter = {} as any;
+            const localVarQueryParameter = {} as any;
+
+            localVarHeaderParameter['Content-Type'] = 'application/json';
+            localVarHeaderParameter['Accept'] = 'application/json';
+
+            setSearchParams(localVarUrlObj, localVarQueryParameter);
+            let headersFromBaseOptions = baseOptions && baseOptions.headers ? baseOptions.headers : {};
+            localVarRequestOptions.headers = {...localVarHeaderParameter, ...headersFromBaseOptions, ...options.headers};
+            localVarRequestOptions.data = serializeDataIfNeeded(installForgejoTokenInput, localVarRequestOptions, configuration)
 
             return {
                 url: toPathString(localVarUrlObj),
@@ -366,6 +407,41 @@ export const InstallApiAxiosParamCreator = function (configuration?: Configurati
             let headersFromBaseOptions = baseOptions && baseOptions.headers ? baseOptions.headers : {};
             localVarRequestOptions.headers = {...localVarHeaderParameter, ...headersFromBaseOptions, ...options.headers};
             localVarRequestOptions.data = serializeDataIfNeeded(installServerConfigInput, localVarRequestOptions, configuration)
+
+            return {
+                url: toPathString(localVarUrlObj),
+                options: localVarRequestOptions,
+            };
+        },
+        /**
+         * Validates a Forgejo personal access token against the given instance without persisting it. Requires the one-time install token.
+         * @summary Validate install Forgejo token
+         * @param {InstallForgejoTokenTestInput} installForgejoTokenTestInput
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        testInstallForgejoToken: async (installForgejoTokenTestInput: InstallForgejoTokenTestInput, options: RawAxiosRequestConfig = {}): Promise<RequestArgs> => {
+            // verify required parameter 'installForgejoTokenTestInput' is not null or undefined
+            assertParamExists('testInstallForgejoToken', 'installForgejoTokenTestInput', installForgejoTokenTestInput)
+            const localVarPath = `/install/forgejo/token/test`;
+            // use dummy base URL string because the URL constructor only accepts absolute URLs.
+            const localVarUrlObj = new URL(localVarPath, DUMMY_BASE_URL);
+            let baseOptions;
+            if (configuration) {
+                baseOptions = configuration.baseOptions;
+            }
+
+            const localVarRequestOptions = { method: 'POST', ...baseOptions, ...options};
+            const localVarHeaderParameter = {} as any;
+            const localVarQueryParameter = {} as any;
+
+            localVarHeaderParameter['Content-Type'] = 'application/json';
+            localVarHeaderParameter['Accept'] = 'application/json';
+
+            setSearchParams(localVarUrlObj, localVarQueryParameter);
+            let headersFromBaseOptions = baseOptions && baseOptions.headers ? baseOptions.headers : {};
+            localVarRequestOptions.headers = {...localVarHeaderParameter, ...headersFromBaseOptions, ...options.headers};
+            localVarRequestOptions.data = serializeDataIfNeeded(installForgejoTokenTestInput, localVarRequestOptions, configuration)
 
             return {
                 url: toPathString(localVarUrlObj),
@@ -573,6 +649,19 @@ export const InstallApiFp = function(configuration?: Configuration) {
             return (axios, basePath) => createRequestFunction(localVarAxiosArgs, globalAxios, BASE_PATH, configuration)(axios, localVarOperationServerBasePath || basePath);
         },
         /**
+         * Records the Forgejo instance URL and personal access token chosen during the browser install. Requires the one-time install token.
+         * @summary Save install Forgejo instance and token
+         * @param {InstallForgejoTokenInput} installForgejoTokenInput
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        async putInstallForgejoToken(installForgejoTokenInput: InstallForgejoTokenInput, options?: RawAxiosRequestConfig): Promise<(axios?: AxiosInstance, basePath?: string) => AxiosPromise<void>> {
+            const localVarAxiosArgs = await localVarAxiosParamCreator.putInstallForgejoToken(installForgejoTokenInput, options);
+            const localVarOperationServerIndex = configuration?.serverIndex ?? 0;
+            const localVarOperationServerBasePath = operationServerMap['InstallApi.putInstallForgejoToken']?.[localVarOperationServerIndex]?.url;
+            return (axios, basePath) => createRequestFunction(localVarAxiosArgs, globalAxios, BASE_PATH, configuration)(axios, localVarOperationServerBasePath || basePath);
+        },
+        /**
          * Records the GitHub personal access token chosen during the browser install. Requires the one-time install token.
          * @summary Save install GitHub token
          * @param {InstallGithubTokenInput} installGithubTokenInput
@@ -635,6 +724,19 @@ export const InstallApiFp = function(configuration?: Configuration) {
             const localVarAxiosArgs = await localVarAxiosParamCreator.putInstallServer(installServerConfigInput, options);
             const localVarOperationServerIndex = configuration?.serverIndex ?? 0;
             const localVarOperationServerBasePath = operationServerMap['InstallApi.putInstallServer']?.[localVarOperationServerIndex]?.url;
+            return (axios, basePath) => createRequestFunction(localVarAxiosArgs, globalAxios, BASE_PATH, configuration)(axios, localVarOperationServerBasePath || basePath);
+        },
+        /**
+         * Validates a Forgejo personal access token against the given instance without persisting it. Requires the one-time install token.
+         * @summary Validate install Forgejo token
+         * @param {InstallForgejoTokenTestInput} installForgejoTokenTestInput
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        async testInstallForgejoToken(installForgejoTokenTestInput: InstallForgejoTokenTestInput, options?: RawAxiosRequestConfig): Promise<(axios?: AxiosInstance, basePath?: string) => AxiosPromise<InstallForgejoTokenTestResponse>> {
+            const localVarAxiosArgs = await localVarAxiosParamCreator.testInstallForgejoToken(installForgejoTokenTestInput, options);
+            const localVarOperationServerIndex = configuration?.serverIndex ?? 0;
+            const localVarOperationServerBasePath = operationServerMap['InstallApi.testInstallForgejoToken']?.[localVarOperationServerIndex]?.url;
             return (axios, basePath) => createRequestFunction(localVarAxiosArgs, globalAxios, BASE_PATH, configuration)(axios, localVarOperationServerBasePath || basePath);
         },
         /**
@@ -738,6 +840,16 @@ export const InstallApiFactory = function (configuration?: Configuration, basePa
             return localVarFp.getInstallSession(options).then((request) => request(axios, basePath));
         },
         /**
+         * Records the Forgejo instance URL and personal access token chosen during the browser install. Requires the one-time install token.
+         * @summary Save install Forgejo instance and token
+         * @param {InstallForgejoTokenInput} installForgejoTokenInput
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        putInstallForgejoToken(installForgejoTokenInput: InstallForgejoTokenInput, options?: RawAxiosRequestConfig): AxiosPromise<void> {
+            return localVarFp.putInstallForgejoToken(installForgejoTokenInput, options).then((request) => request(axios, basePath));
+        },
+        /**
          * Records the GitHub personal access token chosen during the browser install. Requires the one-time install token.
          * @summary Save install GitHub token
          * @param {InstallGithubTokenInput} installGithubTokenInput
@@ -786,6 +898,16 @@ export const InstallApiFactory = function (configuration?: Configuration, basePa
          */
         putInstallServer(installServerConfigInput: InstallServerConfigInput, options?: RawAxiosRequestConfig): AxiosPromise<void> {
             return localVarFp.putInstallServer(installServerConfigInput, options).then((request) => request(axios, basePath));
+        },
+        /**
+         * Validates a Forgejo personal access token against the given instance without persisting it. Requires the one-time install token.
+         * @summary Validate install Forgejo token
+         * @param {InstallForgejoTokenTestInput} installForgejoTokenTestInput
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        testInstallForgejoToken(installForgejoTokenTestInput: InstallForgejoTokenTestInput, options?: RawAxiosRequestConfig): AxiosPromise<InstallForgejoTokenTestResponse> {
+            return localVarFp.testInstallForgejoToken(installForgejoTokenTestInput, options).then((request) => request(axios, basePath));
         },
         /**
          * Validates a GitHub personal access token without persisting it. Requires the one-time install token.
@@ -878,6 +1000,17 @@ export class InstallApi extends BaseAPI {
     }
 
     /**
+     * Records the Forgejo instance URL and personal access token chosen during the browser install. Requires the one-time install token.
+     * @summary Save install Forgejo instance and token
+     * @param {InstallForgejoTokenInput} installForgejoTokenInput
+     * @param {*} [options] Override http request option.
+     * @throws {RequiredError}
+     */
+    public putInstallForgejoToken(installForgejoTokenInput: InstallForgejoTokenInput, options?: RawAxiosRequestConfig) {
+        return InstallApiFp(this.configuration).putInstallForgejoToken(installForgejoTokenInput, options).then((request) => request(this.axios, this.basePath));
+    }
+
+    /**
      * Records the GitHub personal access token chosen during the browser install. Requires the one-time install token.
      * @summary Save install GitHub token
      * @param {InstallGithubTokenInput} installGithubTokenInput
@@ -930,6 +1063,17 @@ export class InstallApi extends BaseAPI {
      */
     public putInstallServer(installServerConfigInput: InstallServerConfigInput, options?: RawAxiosRequestConfig) {
         return InstallApiFp(this.configuration).putInstallServer(installServerConfigInput, options).then((request) => request(this.axios, this.basePath));
+    }
+
+    /**
+     * Validates a Forgejo personal access token against the given instance without persisting it. Requires the one-time install token.
+     * @summary Validate install Forgejo token
+     * @param {InstallForgejoTokenTestInput} installForgejoTokenTestInput
+     * @param {*} [options] Override http request option.
+     * @throws {RequiredError}
+     */
+    public testInstallForgejoToken(installForgejoTokenTestInput: InstallForgejoTokenTestInput, options?: RawAxiosRequestConfig) {
+        return InstallApiFp(this.configuration).testInstallForgejoToken(installForgejoTokenTestInput, options).then((request) => request(this.axios, this.basePath));
     }
 
     /**

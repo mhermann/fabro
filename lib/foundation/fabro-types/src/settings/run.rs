@@ -595,7 +595,38 @@ mod run_namespace_variable_substitution_tests {
 /// `[run.integrations]` — run-level integration knobs.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RunIntegrationsSettings {
-    pub github: RunIntegrationsGithubSettings,
+    pub github:  RunIntegrationsGithubSettings,
+    /// Defaults on deserialize and is omitted from serialization when no
+    /// token is requested, so settings persisted before the Forgejo
+    /// integration existed stay byte-identical both ways.
+    #[serde(default, skip_serializing_if = "forgejo_integration_is_default")]
+    pub forgejo: RunIntegrationsForgejoSettings,
+}
+
+fn forgejo_integration_is_default(settings: &RunIntegrationsForgejoSettings) -> bool {
+    settings == &RunIntegrationsForgejoSettings::default()
+}
+
+/// `[run.integrations.forgejo]` — whether the run receives the configured
+/// instance token as `FORGEJO_TOKEN`.
+///
+/// Unlike GitHub's permission map, Forgejo PAT scopes are fixed at token
+/// creation, so the run config only decides whether the token is exposed to
+/// the sandbox at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunIntegrationsForgejoSettings {
+    /// Omitted when false so settings serialized by this release stay
+    /// byte-identical to earlier releases for runs without the flag.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub token: bool,
+}
+
+impl RunIntegrationsForgejoSettings {
+    /// Whether the run config asks Fabro to expose `FORGEJO_TOKEN` in the
+    /// sandbox.
+    pub fn is_token_requested(&self) -> bool {
+        self.token
+    }
 }
 
 /// `[run.integrations.github]` — runtime GitHub token shape.

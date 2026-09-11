@@ -88,6 +88,8 @@ mod tests {
             EnvVars::GITHUB_APP_PRIVATE_KEY,
             EnvVars::GITHUB_APP_WEBHOOK_SECRET,
             EnvVars::GITHUB_TOKEN,
+            EnvVars::FORGEJO_TOKEN,
+            EnvVars::FORGEJO_WEBHOOK_SECRET,
             EnvVars::FABRO_SLACK_APP_TOKEN,
             EnvVars::FABRO_SLACK_BOT_TOKEN,
             EnvVars::DAYTONA_API_KEY,
@@ -123,6 +125,7 @@ mod tests {
         for name in [
             EnvVars::GH_TOKEN,
             EnvVars::GITHUB_BASE_URL,
+            EnvVars::FORGEJO_URL,
             EnvVars::SLACK_BASE_URL,
             EnvVars::DAYTONA_API_URL,
             EnvVars::DAYTONA_ORGANIZATION_ID,

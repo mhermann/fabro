@@ -9,7 +9,7 @@ use fabro_slack::config::{
     resolve_credentials_status_with_lookup as resolve_slack_credentials_status_with_lookup,
 };
 use fabro_static::EnvVars;
-use fabro_types::settings::server::GithubIntegrationSettings;
+use fabro_types::settings::server::{ForgejoIntegrationSettings, GithubIntegrationSettings};
 use fabro_vault::Vault;
 use tokio::time::timeout;
 
@@ -112,11 +112,55 @@ async fn get_system_integrations(
         Err(err) => return secret_store_failure(&err),
     };
     let github = github_integration_status(&settings.server.integrations.github, &vault);
+    let forgejo = forgejo_integration_status(&settings.server.integrations.forgejo, &vault);
     let slack = slack_integration_status(state.as_ref(), &vault);
     let response = SystemIntegrationsResponse {
-        data: vec![github, slack],
+        data: vec![github, forgejo, slack],
     };
     (StatusCode::OK, Json(response)).into_response()
+}
+
+fn forgejo_integration_status(
+    settings: &ForgejoIntegrationSettings,
+    vault: &Vault,
+) -> SystemIntegrationStatus {
+    let mut metadata = BTreeMap::new();
+    if let Some(url) = settings.url.as_deref().filter(|url| !url.trim().is_empty()) {
+        metadata.insert("url".to_string(), url.to_string());
+    }
+
+    if !settings.enabled {
+        return integration_status(
+            IntegrationProvider::Forgejo,
+            false,
+            false,
+            IntegrationStatus::Disabled,
+            Vec::new(),
+            metadata,
+        );
+    }
+
+    let mut missing = Vec::new();
+    if settings.url.is_none() {
+        missing.push("server.integrations.forgejo.url".to_string());
+    }
+    if missing_vault_secret(vault, EnvVars::FORGEJO_TOKEN) {
+        missing.push(EnvVars::FORGEJO_TOKEN.to_string());
+    }
+
+    let configured = missing.is_empty();
+    integration_status(
+        IntegrationProvider::Forgejo,
+        true,
+        configured,
+        if configured {
+            IntegrationStatus::Configured
+        } else {
+            IntegrationStatus::MissingCredentials
+        },
+        missing,
+        metadata,
+    )
 }
 
 fn github_integration_status(

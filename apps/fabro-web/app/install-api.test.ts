@@ -2,9 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { AxiosAdapter, AxiosRequestConfig } from "axios";
 
 import {
+  putInstallForgejoToken,
   putInstallObjectStore,
   putInstallSandbox,
   readInstallError,
+  testInstallForgejoToken,
   testInstallObjectStore,
   testInstallSandbox,
 } from "./install-api";
@@ -166,5 +168,72 @@ describe("install sandbox requests", () => {
     await expect(
       putInstallSandbox("test-install-token", { provider: "daytona" }),
     ).rejects.toThrow("api_key is required for daytona");
+  });
+});
+
+describe("install forgejo requests", () => {
+  test("testInstallForgejoToken posts the instance URL and token, returning the username", async () => {
+    const calls = stubGeneratedAxios({
+      status: 200,
+      data: { username: "acme-user" },
+    });
+
+    const username = await testInstallForgejoToken(
+      "test-install-token",
+      "https://git.example.com",
+      "forgejo-pat",
+    );
+
+    expect(username).toBe("acme-user");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("/install/forgejo/token/test");
+    expect(calls[0]!.method).toBe("post");
+    expect(headerValue(calls[0]!, "Authorization")).toBe("Bearer test-install-token");
+    expect(headerValue(calls[0]!, "Content-Type")).toContain("application/json");
+    expect(calls[0]!.data).toBe(
+      JSON.stringify({ url: "https://git.example.com", token: "forgejo-pat" }),
+    );
+  });
+
+  test("putInstallForgejoToken puts the instance URL and token", async () => {
+    const calls = stubGeneratedAxios({ status: 204 });
+
+    await putInstallForgejoToken(
+      "test-install-token",
+      "https://git.example.com",
+      "forgejo-pat",
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("/install/forgejo/token");
+    expect(calls[0]!.method).toBe("put");
+    expect(headerValue(calls[0]!, "Authorization")).toBe("Bearer test-install-token");
+    expect(calls[0]!.data).toBe(
+      JSON.stringify({ url: "https://git.example.com", token: "forgejo-pat" }),
+    );
+  });
+
+  test("putInstallForgejoToken surfaces structured API errors", async () => {
+    stubGeneratedAxios({
+      status: 422,
+      statusText: "Unprocessable Entity",
+      data: {
+        errors: [
+          {
+            status: "422",
+            title: "Unprocessable Entity",
+            detail: "Forgejo returned 401",
+          },
+        ],
+      },
+    });
+
+    await expect(
+      putInstallForgejoToken(
+        "test-install-token",
+        "https://git.example.com",
+        "forgejo-pat",
+      ),
+    ).rejects.toThrow("Forgejo returned 401");
   });
 });

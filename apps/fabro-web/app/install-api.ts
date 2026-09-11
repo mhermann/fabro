@@ -209,6 +209,34 @@ export async function putInstallGithubToken(
   );
 }
 
+export async function testInstallForgejoToken(
+  token: string,
+  url: string,
+  forgejoToken: string,
+): Promise<string> {
+  const body = await installCall("install forgejo token validation failed", () =>
+    apiData(() => installApi.testInstallForgejoToken({ url, token: forgejoToken }, installOptions(token)), {
+      redirectOnUnauthorized: false,
+    }),
+  );
+  return body.username;
+}
+
+export async function putInstallForgejoToken(
+  token: string,
+  url: string,
+  forgejoToken: string,
+): Promise<void> {
+  await installCall("install forgejo token request failed", () =>
+    apiData(() => installApi.putInstallForgejoToken(
+      { url, token: forgejoToken },
+      installOptions(token),
+    ), {
+      redirectOnUnauthorized: false,
+    }),
+  );
+}
+
 export async function createInstallGithubAppManifest(
   token: string,
   input: InstallGithubAppManifestInput,

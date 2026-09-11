@@ -840,6 +840,11 @@ where
             "Reconciled stale in-flight runs on startup"
         );
     }
+    if let Some(forgejo) = &state.forgejo {
+        info!(instance = %forgejo.instance, "Forgejo integration enabled");
+    } else {
+        info!("Forgejo integration disabled");
+    }
     spawn_scheduler(Arc::clone(&state));
     spawn_automation_scheduler(Arc::clone(&state));
     let pull_request_creation_supervisor =

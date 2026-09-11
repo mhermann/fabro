@@ -20,6 +20,7 @@
 
 export const IntegrationProvider = {
     GITHUB: 'github',
+    FORGEJO: 'forgejo',
     SLACK: 'slack'
 } as const;
 

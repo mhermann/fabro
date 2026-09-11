@@ -122,3 +122,50 @@ fn pr_link_skips_resolve_endpoint_for_full_run_id() {
 
     link_mock.assert();
 }
+
+#[test]
+fn pr_link_labels_forgejo_pull_request_from_configured_instance() {
+    let context = test_context!();
+    let server = MockServer::start();
+    let run_id = unique_run_id();
+
+    let resolve_mock = mock_resolved_run(&server, "nightly-build", &run_id);
+    let link_mock = server.mock(|when, then| {
+        when.method("PUT")
+            .path(format!("/api/v1/runs/{run_id}/pull_request"))
+            .json_body(serde_json::json!({
+                "html_url": "https://git.example.com/acme/widgets/pulls/9"
+            }));
+        then.status(200)
+            .header("Content-Type", "application/json")
+            .json_body(serde_json::json!({
+                "owner": "acme",
+                "repo": "widgets",
+                "number": 9,
+                "forge": "https://git.example.com"
+            }));
+    });
+
+    let mut cmd = context.command();
+    cmd.args([
+        "pr",
+        "link",
+        "--server",
+        &server.base_url(),
+        "nightly-build",
+        "https://git.example.com/acme/widgets/pulls/9",
+    ])
+    .env("FORGEJO_URL", "https://git.example.com")
+    .env("FORGEJO_TOKEN", "forgejo-pat");
+
+    fabro_snapshot!(context.filters(), cmd, @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    Linked pull request: https://git.example.com/acme/widgets/pulls/9 (forgejo #9)
+    ----- stderr -----
+    ");
+
+    resolve_mock.assert();
+    link_mock.assert();
+}

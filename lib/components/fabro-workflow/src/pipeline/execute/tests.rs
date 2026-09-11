@@ -115,6 +115,7 @@ fn test_run_options(run_dir: &Path, run_id: &str) -> RunOptions {
         fork_source_ref:  None,
         labels:           HashMap::new(),
         github_app:       None,
+        forgejo:          None,
         base_branch:      None,
         display_base_sha: None,
         workflow_slug:    None,
@@ -290,6 +291,7 @@ async fn execute_test_run_with_options(
             sandbox_env: SandboxEnvSpec {
                 toml_env:           HashMap::new(),
                 github_integration: None,
+                forgejo_requested:  false,
                 origin_url:         None,
             },
             vault: auth_test_support::empty_vault(),
@@ -352,6 +354,7 @@ async fn execute_runs_start_to_exit_and_returns_final_context() {
             sandbox_env: SandboxEnvSpec {
                 toml_env:           HashMap::new(),
                 github_integration: None,
+                forgejo_requested:  false,
                 origin_url:         None,
             },
             vault: auth_test_support::empty_vault(),
@@ -491,6 +494,7 @@ async fn resumed_in_flight_node_starts_a_new_stage_execution() {
             sandbox_env: SandboxEnvSpec {
                 toml_env:           HashMap::new(),
                 github_integration: None,
+                forgejo_requested:  false,
                 origin_url:         None,
             },
             vault: auth_test_support::empty_vault(),
@@ -602,6 +606,7 @@ async fn run_with_lifecycle(
             sandbox_env: SandboxEnvSpec {
                 toml_env:           HashMap::new(),
                 github_integration: None,
+                forgejo_requested:  false,
                 origin_url:         None,
             },
             vault: auth_test_support::empty_vault(),

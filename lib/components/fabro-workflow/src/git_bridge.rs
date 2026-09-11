@@ -96,6 +96,52 @@ fn bridge_entries(targets: &[&GitHubRepositorySlug], https_base: &str) -> Vec<(S
     entries
 }
 
+/// Merge the Forgejo bridging entries for the configured instance into `env`.
+///
+/// The primary-origin counterpart of the GitHub additional-repository bridge,
+/// scoped to the instance: an instance-scoped credential helper that reads
+/// `$FORGEJO_TOKEN` at invocation time, plus `url.<https>.insteadOf` rewrites
+/// for both SSH spellings of repositories on the instance. None of the values
+/// contain a secret; the token lives only in `FORGEJO_TOKEN`.
+pub(crate) fn merge_forgejo_bridge_env(
+    env: &mut HashMap<String, String>,
+    instance: &fabro_forgejo::ForgejoInstance,
+    origin_url: &str,
+) -> Result<(), Error> {
+    let start = user_git_config_count(env)?;
+    let normalized = fabro_forgejo::normalize_forgejo_origin_url(origin_url);
+    let remote_path = normalized
+        .strip_prefix(&format!("{}/", instance.as_str()))
+        .unwrap_or_default();
+    let host = instance.host();
+
+    let mut entries = vec![(
+        fabro_forgejo::forgejo_credential_helper_key(instance),
+        fabro_forgejo::FORGEJO_CREDENTIAL_HELPER.to_string(),
+    )];
+    // One prefix rule per SSH spelling covers both the bare and `.git`
+    // suffixed forms.
+    entries.push((
+        format!("url.{normalized}.insteadOf"),
+        format!("git@{host}:{remote_path}"),
+    ));
+    entries.push((
+        format!("url.{normalized}.insteadOf"),
+        format!("ssh://git@{host}/{remote_path}"),
+    ));
+
+    let total = start + entries.len();
+    for (offset, (key, value)) in entries.into_iter().enumerate() {
+        let index = start + offset;
+        env.insert(format!("GIT_CONFIG_KEY_{index}"), key);
+        env.insert(format!("GIT_CONFIG_VALUE_{index}"), value);
+    }
+    env.insert("GIT_CONFIG_COUNT".to_string(), total.to_string());
+    env.entry("GIT_TERMINAL_PROMPT".to_string())
+        .or_insert_with(|| "0".to_string());
+    Ok(())
+}
+
 /// Validate and measure a user-provided `GIT_CONFIG_COUNT` overlay so the
 /// bridge appends after it. Orphaned `GIT_CONFIG_KEY_n` entries without a
 /// count are inert to Git and are treated as absent.
@@ -433,6 +479,41 @@ mod tests {
                 "{url} must land on the rewritten route, got: {stderr}"
             );
             assert!(!stderr.contains("test-token-value"), "{stderr}");
+        }
+    }
+
+    /// The Forgejo bridge entries: instance-scoped helper reading
+    /// `$FORGEJO_TOKEN`, plus SSH rewrites for repositories on the instance.
+    #[test]
+    fn forgejo_bridge_entries_are_instance_scoped_and_secret_free() {
+        let instance = fabro_forgejo::ForgejoInstance::new("https://git.example.com").unwrap();
+        let mut env: HashMap<String, String> = HashMap::new();
+        merge_forgejo_bridge_env(&mut env, &instance, "git@git.example.com:acme/widgets.git")
+            .expect("forgejo bridge entries should merge");
+
+        assert_eq!(env.get("GIT_CONFIG_COUNT").map(String::as_str), Some("3"));
+        assert_eq!(
+            env.get("GIT_CONFIG_KEY_0").map(String::as_str),
+            Some("credential.https://git.example.com.helper")
+        );
+        assert_eq!(
+            env.get("GIT_CONFIG_VALUE_0").map(String::as_str),
+            Some(fabro_forgejo::FORGEJO_CREDENTIAL_HELPER)
+        );
+        assert_eq!(
+            env.get("GIT_CONFIG_KEY_1").map(String::as_str),
+            Some("url.https://git.example.com/acme/widgets.insteadOf")
+        );
+        assert_eq!(
+            env.get("GIT_CONFIG_VALUE_1").map(String::as_str),
+            Some("git@git.example.com:acme/widgets")
+        );
+        assert_eq!(
+            env.get("GIT_CONFIG_VALUE_2").map(String::as_str),
+            Some("ssh://git@git.example.com/acme/widgets")
+        );
+        for (key, value) in &env {
+            assert!(!value.contains("forgejo_pat"), "{key}={value}");
         }
     }
 }

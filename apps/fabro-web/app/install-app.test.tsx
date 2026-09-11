@@ -1285,4 +1285,316 @@ describe("InstallApp", () => {
       console.error = originalConsoleError;
     }
   });
+
+  test("saves Forgejo settings and advances to the review step", async () => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    const originalConsoleError = console.error;
+    console.error = ((...args: unknown[]) => {
+      if (
+        typeof args[0] === "string" &&
+        args[0].startsWith("react-test-renderer is deprecated")
+      ) {
+        return;
+      }
+      originalConsoleError(...args);
+    }) as typeof console.error;
+    try {
+      const fetchCalls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+      const fetchMock = mock((input: RequestInfo | URL, init?: RequestInit) => {
+        fetchCalls.push({ input, init });
+        if (String(input) === "/install/session") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                completed_steps: [
+                  "server",
+                  "object_store",
+                  "sandbox",
+                  "llm",
+                  "github",
+                  "forgejo",
+                ],
+                llm: null,
+                server: { canonical_url: "https://fabro.example.com" },
+                object_store: { provider: "local" },
+                github: { strategy: "token", username: "octocat" },
+                prefill: INSTALL_PREFILL,
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (String(input) === "/install/forgejo/token/test") {
+          return Promise.resolve(
+            new Response(JSON.stringify({ username: "acme-user" }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        if (String(input) === "/install/forgejo/token") {
+          return Promise.resolve(new Response(null, { status: 204 }));
+        }
+        throw new Error(`unexpected fetch: ${String(input)}`);
+      });
+      useInstallFetchMock(fetchMock as typeof fetch);
+
+      const testWindow = createTestWindow("https://fabro.example.com/install/forgejo");
+      testWindow.sessionStorage.setItem("fabro-install-token", "test-install-token");
+      (globalThis as { window?: unknown }).window = testWindow;
+
+      let renderer: TestRenderer.ReactTestRenderer | null = null;
+      await act(async () => {
+        renderer = TestRenderer.create(
+          <MemoryRouter initialEntries={["/install/forgejo"]}>
+            <Routes>
+              <Route path="/install/*" element={<InstallApp />} />
+            </Routes>
+          </MemoryRouter>,
+        );
+      });
+
+      await waitFor(() => {
+        expect(renderTreeText(renderer!.toJSON())).toContain("Connect Forgejo");
+      });
+
+      const urlInput = renderer!.root.findByProps({ name: "forgejo_url" });
+      await act(async () => {
+        urlInput.props.onChange({ target: { value: "https://git.example.com" } });
+      });
+      // findByProps would match the PasswordInput wrapper too; target the
+      // raw <input> so onChange receives an event-like object.
+      const tokenInput = renderer!.root.findAll(
+        (node) => node.type === "input" && node.props.name === "forgejo_token",
+      )[0];
+      await act(async () => {
+        tokenInput.props.onChange({ target: { value: "forgejo-pat" } });
+      });
+
+      const testButton = renderer!.root.findAll(
+        (node) => node.type === "button" && node.children.includes("Test"),
+      )[0];
+      expect(testButton).toBeDefined();
+      await act(async () => {
+        testButton!.props.onClick();
+      });
+      await waitFor(() => {
+        expect(renderTreeText(renderer!.toJSON())).toContain(
+          "Validated as @acme-user",
+        );
+      });
+
+      const form = renderer!.root.findByType("form");
+      await act(async () => {
+        form.props.onSubmit({ preventDefault() {} });
+      });
+
+      await waitFor(() => {
+        expect(renderTreeText(renderer!.toJSON())).toContain("Review and install");
+      });
+
+      const calls = fetchCalls.map((call) => String(call.input));
+      const testIdx = calls.indexOf("/install/forgejo/token/test");
+      const putIdx = calls.indexOf("/install/forgejo/token");
+      expect(testIdx).toBeGreaterThanOrEqual(0);
+      expect(putIdx).toBeGreaterThan(testIdx);
+      expect(fetchCalls[testIdx]?.init?.body).toBe(
+        JSON.stringify({ url: "https://git.example.com", token: "forgejo-pat" }),
+      );
+      expect(fetchCalls[putIdx]?.init?.body).toBe(
+        JSON.stringify({ url: "https://git.example.com", token: "forgejo-pat" }),
+      );
+
+      await act(async () => {
+        renderer?.unmount();
+      });
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+
+  test("blocks Forgejo save when the URL is not https or the token is missing", async () => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    const originalConsoleError = console.error;
+    console.error = ((...args: unknown[]) => {
+      if (
+        typeof args[0] === "string" &&
+        args[0].startsWith("react-test-renderer is deprecated")
+      ) {
+        return;
+      }
+      originalConsoleError(...args);
+    }) as typeof console.error;
+    try {
+      const fetchCalls: Array<{ input: RequestInfo | URL }> = [];
+      const fetchMock = mock((input: RequestInfo | URL) => {
+        fetchCalls.push({ input });
+        if (String(input) === "/install/session") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                completed_steps: ["server", "object_store", "sandbox", "llm", "github"],
+                llm: null,
+                server: { canonical_url: "https://fabro.example.com" },
+                object_store: { provider: "local" },
+                github: { strategy: "token", username: "octocat" },
+                prefill: INSTALL_PREFILL,
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        throw new Error(`unexpected fetch: ${String(input)}`);
+      });
+      useInstallFetchMock(fetchMock as typeof fetch);
+
+      const testWindow = createTestWindow("https://fabro.example.com/install/forgejo");
+      testWindow.sessionStorage.setItem("fabro-install-token", "test-install-token");
+      (globalThis as { window?: unknown }).window = testWindow;
+
+      let renderer: TestRenderer.ReactTestRenderer | null = null;
+      await act(async () => {
+        renderer = TestRenderer.create(
+          <MemoryRouter initialEntries={["/install/forgejo"]}>
+            <Routes>
+              <Route path="/install/*" element={<InstallApp />} />
+            </Routes>
+          </MemoryRouter>,
+        );
+      });
+
+      await waitFor(() => {
+        expect(renderTreeText(renderer!.toJSON())).toContain("Connect Forgejo");
+      });
+
+      const urlInput = renderer!.root.findByProps({ name: "forgejo_url" });
+      await act(async () => {
+        urlInput.props.onChange({ target: { value: "http://git.example.com" } });
+      });
+      const tokenInput = renderer!.root.findAll(
+        (node) => node.type === "input" && node.props.name === "forgejo_token",
+      )[0];
+      await act(async () => {
+        tokenInput.props.onChange({ target: { value: "forgejo-pat" } });
+      });
+
+      const form = renderer!.root.findByType("form");
+      await act(async () => {
+        form.props.onSubmit({ preventDefault() {} });
+      });
+
+      await waitFor(() => {
+        expect(renderTreeText(renderer!.toJSON())).toContain(
+          "The Forgejo instance URL must use https.",
+        );
+      });
+      expect(fetchCalls.map((call) => String(call.input))).toEqual([
+        "/install/session",
+      ]);
+
+      // Fixing the URL but leaving the token blank must also be blocked.
+      await act(async () => {
+        urlInput.props.onChange({ target: { value: "https://git.example.com" } });
+      });
+      await act(async () => {
+        tokenInput.props.onChange({ target: { value: "" } });
+      });
+      await act(async () => {
+        form.props.onSubmit({ preventDefault() {} });
+      });
+      await waitFor(() => {
+        expect(renderTreeText(renderer!.toJSON())).toContain(
+          "Enter the Forgejo access token before continuing.",
+        );
+      });
+      expect(fetchCalls.map((call) => String(call.input))).toEqual([
+        "/install/session",
+      ]);
+
+      await act(async () => {
+        renderer?.unmount();
+      });
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+
+  test("skips Forgejo setup and advances to the review step", async () => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    const originalConsoleError = console.error;
+    console.error = ((...args: unknown[]) => {
+      if (
+        typeof args[0] === "string" &&
+        args[0].startsWith("react-test-renderer is deprecated")
+      ) {
+        return;
+      }
+      originalConsoleError(...args);
+    }) as typeof console.error;
+    try {
+      const fetchCalls: Array<{ input: RequestInfo | URL }> = [];
+      const fetchMock = mock((input: RequestInfo | URL) => {
+        fetchCalls.push({ input });
+        if (String(input) === "/install/session") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                completed_steps: ["server", "object_store", "sandbox", "llm", "github"],
+                llm: null,
+                server: { canonical_url: "https://fabro.example.com" },
+                object_store: { provider: "local" },
+                github: { strategy: "token", username: "octocat" },
+                prefill: INSTALL_PREFILL,
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        throw new Error(`unexpected fetch: ${String(input)}`);
+      });
+      useInstallFetchMock(fetchMock as typeof fetch);
+
+      const testWindow = createTestWindow("https://fabro.example.com/install/forgejo");
+      testWindow.sessionStorage.setItem("fabro-install-token", "test-install-token");
+      (globalThis as { window?: unknown }).window = testWindow;
+
+      let renderer: TestRenderer.ReactTestRenderer | null = null;
+      await act(async () => {
+        renderer = TestRenderer.create(
+          <MemoryRouter initialEntries={["/install/forgejo"]}>
+            <Routes>
+              <Route path="/install/*" element={<InstallApp />} />
+            </Routes>
+          </MemoryRouter>,
+        );
+      });
+
+      await waitFor(() => {
+        expect(renderTreeText(renderer!.toJSON())).toContain("Connect Forgejo");
+      });
+
+      const skipButton = renderer!.root.findAll(
+        (node) =>
+          node.type === "button" && node.children.includes("Skip Forgejo setup"),
+      )[0];
+      expect(skipButton).toBeDefined();
+      await act(async () => {
+        skipButton!.props.onClick();
+      });
+
+      await waitFor(() => {
+        expect(renderTreeText(renderer!.toJSON())).toContain("Review and install");
+      });
+      // Skipping must not hit the Forgejo API.
+      expect(fetchCalls.map((call) => String(call.input))).toEqual([
+        "/install/session",
+      ]);
+
+      await act(async () => {
+        renderer?.unmount();
+      });
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
 });
