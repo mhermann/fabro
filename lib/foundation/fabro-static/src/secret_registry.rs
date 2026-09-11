@@ -89,6 +89,7 @@ mod tests {
             EnvVars::GITHUB_APP_PRIVATE_KEY,
             EnvVars::GITHUB_APP_WEBHOOK_SECRET,
             EnvVars::GITHUB_TOKEN,
+            EnvVars::FORGEJO_TOKEN,
             EnvVars::FABRO_SLACK_APP_TOKEN,
             EnvVars::FABRO_SLACK_BOT_TOKEN,
             EnvVars::DAYTONA_API_KEY,

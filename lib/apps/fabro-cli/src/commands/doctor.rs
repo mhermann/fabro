@@ -66,7 +66,8 @@ fn check_forgejo() -> Option<CheckResult> {
     })
 }
 
-pub(crate) fn check_config(settings_path: Option<PathBuf>) -> CheckResult {    match settings_path {
+pub(crate) fn check_config(settings_path: Option<PathBuf>) -> CheckResult {
+    match settings_path {
         Some(path) => {
             let display = contract_tilde(&path);
             let wildcard_urls = wildcard_public_url_details(&path);

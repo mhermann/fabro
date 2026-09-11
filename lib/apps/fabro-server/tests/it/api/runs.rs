@@ -498,3 +498,200 @@ async fn parent_link_validation_rejects_missing_self_and_cycles() {
     )
     .await;
 }
+
+fn forgejo_run_intent_json() -> serde_json::Value {
+    serde_json::json!({
+        "workflow_version_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "target": {
+            "kind": "git",
+            "repo": "acme/widgets",
+            "branch": "main",
+            "provider": "forgejo"
+        },
+        "args": {}
+    })
+}
+
+fn forgejo_preflight_manifest(instance_url: &str) -> serde_json::Value {
+    let mut manifest = daytona_manifest();
+    manifest["git"] = serde_json::json!({
+        "origin_url": format!("{instance_url}/acme/widgets"),
+        "branch": "main",
+        "sha": null,
+        "dirty": "clean"
+    });
+    manifest
+}
+
+fn forgejo_integration_settings(instance_url: &str) -> crate::helpers::TestAppSettings {
+    settings_from_toml(&format!(
+        r#"
+_version = 1
+
+[server.integrations.forgejo]
+enabled = true
+url = "{instance_url}"
+"#,
+    ))
+}
+
+#[tokio::test]
+async fn forgejo_run_intent_without_the_integration_is_rejected_as_target_invalid() {
+    let settings = settings_from_toml(
+        r"
+_version = 1
+",
+    );
+    let state = fabro_server::test_support::TestAppStateBuilder::new()
+        .runtime_settings(settings.server_settings, settings.manifest_run_defaults)
+        .build();
+    let app = fabro_server::test_support::build_test_router(state);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(api("/runs"))
+        .header("content-type", "application/json")
+        .body(Body::from(forgejo_run_intent_json().to_string()))
+        .expect("forgejo intent request should build");
+    let body = response_json(
+        app.clone().oneshot(request).await.unwrap(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "POST /api/v1/runs",
+    )
+    .await;
+
+    assert_eq!(body["errors"][0]["code"], "target_invalid");
+    assert_eq!(
+        body["errors"][0]["detail"],
+        "target forgejo runs require a configured Forgejo instance URL"
+    );
+}
+
+#[tokio::test]
+async fn forgejo_run_intent_without_a_vault_token_is_rejected_with_remediation() {
+    let settings = forgejo_integration_settings("https://git.example.com");
+    let state = fabro_server::test_support::TestAppStateBuilder::new()
+        .runtime_settings(settings.server_settings, settings.manifest_run_defaults)
+        .build();
+    let app = fabro_server::test_support::build_test_router(state);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(api("/runs"))
+        .header("content-type", "application/json")
+        .body(Body::from(forgejo_run_intent_json().to_string()))
+        .expect("forgejo intent request should build");
+    let body = response_json(
+        app.clone().oneshot(request).await.unwrap(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "POST /api/v1/runs",
+    )
+    .await;
+
+    assert_eq!(body["errors"][0]["code"], "forgejo_integration_unconfigured");
+    assert!(
+        body["errors"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("server.integrations.forgejo.url"),
+        "{}",
+        body["errors"][0]["detail"]
+    );
+}
+
+#[tokio::test]
+async fn preflight_reports_missing_forgejo_token_with_remediation() {
+    let settings = forgejo_integration_settings("https://git.example.com");
+    let state = fabro_server::test_support::TestAppStateBuilder::new()
+        .runtime_settings(settings.server_settings, settings.manifest_run_defaults)
+        .default_environment_provider(Some(EnvironmentProvider::Daytona))
+        .build();
+    let app = fabro_server::test_support::build_test_router(state);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(api("/preflight"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            forgejo_preflight_manifest("https://git.example.com").to_string(),
+        ))
+        .expect("preflight request should build");
+    let body = response_json(
+        app.clone().oneshot(request).await.unwrap(),
+        StatusCode::OK,
+        "POST /api/v1/preflight",
+    )
+    .await;
+
+    let checks = body["checks"]["sections"][0]["checks"]
+        .as_array()
+        .expect("preflight checks should be an array");
+    let access_check = checks
+        .iter()
+        .find(|check| check["name"] == "Repository Access")
+        .expect("forgejo origin should produce a repository access check");
+    assert_eq!(access_check["status"], "error");
+    assert!(
+        access_check["remediation"]
+            .as_str()
+            .unwrap()
+            .contains("FORGEJO_TOKEN"),
+        "{}",
+        access_check["remediation"]
+    );
+}
+
+#[tokio::test]
+async fn preflight_verifies_forgejo_repository_access_against_the_instance() {
+    let instance = httpmock::MockServer::start();
+    let repo_mock = instance.mock(|when, then| {
+        when.method(httpmock::Method::GET).path("/api/v1/repos/acme/widgets");
+        then.status(200).json_body(serde_json::json!({
+            "full_name": "acme/widgets",
+            "private": true,
+            "default_branch": "main"
+        }));
+    });
+    let branch_mock = instance.mock(|when, then| {
+        when.method(httpmock::Method::GET).path("/api/v1/repos/acme/widgets/branches/main");
+        then.status(200).json_body(serde_json::json!({
+            "name": "main",
+            "commit": { "id": "0123456789abcdef0123456789abcdef01234567" }
+        }));
+    });
+
+    let settings = forgejo_integration_settings(&instance.url(""));
+    let state = fabro_server::test_support::TestAppStateBuilder::new()
+        .runtime_settings(settings.server_settings, settings.manifest_run_defaults)
+        .default_environment_provider(Some(EnvironmentProvider::Daytona))
+        .vault_entries([("FORGEJO_TOKEN", "forgejo-test-pat")])
+        .build();
+    let app = fabro_server::test_support::build_test_router(state);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(api("/preflight"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            forgejo_preflight_manifest(&instance.url("")).to_string(),
+        ))
+        .expect("preflight request should build");
+    let body = response_json(
+        app.clone().oneshot(request).await.unwrap(),
+        StatusCode::OK,
+        "POST /api/v1/preflight",
+    )
+    .await;
+
+    let checks = body["checks"]["sections"][0]["checks"]
+        .as_array()
+        .expect("preflight checks should be an array");
+    let access_check = checks
+        .iter()
+        .find(|check| check["name"] == "Repository Access")
+        .expect("forgejo origin should produce a repository access check");
+    assert_eq!(access_check["status"], "pass", "{access_check}");
+    assert_eq!(access_check["summary"], "reachable");
+    repo_mock.assert();
+    branch_mock.assert();
+}

@@ -1897,8 +1897,11 @@ exit 1
         ]);
         run_git(&workspace, &["push", "origin", "feature"]);
 
-        let observation =
-            observe_git_run_target(&workspace, Some(&github_origin("https://github.com/acme/widgets"))).unwrap();
+        let observation = observe_git_run_target(
+            &workspace,
+            Some(&github_origin("https://github.com/acme/widgets")),
+        )
+        .unwrap();
         let target = observation.run_target.as_ref().unwrap();
         let legacy = &observation.legacy_git_context;
 
@@ -1924,8 +1927,11 @@ exit 1
             "https://github.com/acme/widgets",
         ]);
 
-        let observation =
-            observe_git_run_target(&workspace, Some(&github_origin("https://github.com/acme/widgets"))).unwrap();
+        let observation = observe_git_run_target(
+            &workspace,
+            Some(&github_origin("https://github.com/acme/widgets")),
+        )
+        .unwrap();
         let target = observation.run_target.as_ref().unwrap();
 
         assert_eq!(target.sha, observation.legacy_git_context.sha);
@@ -1959,8 +1965,11 @@ exit 1
         ]);
         mark_origin_branch_synced(&workspace, "feature");
 
-        let observation =
-            observe_git_run_target(&workspace, Some(&github_origin("https://github.com/acme/widgets"))).unwrap();
+        let observation = observe_git_run_target(
+            &workspace,
+            Some(&github_origin("https://github.com/acme/widgets")),
+        )
+        .unwrap();
         let target = observation.run_target.as_ref().unwrap();
 
         assert_eq!(target.sha, None);
@@ -2009,9 +2018,11 @@ exit 1
             "https://github.com/acme/widgets",
         ]);
 
-        let failed =
-            observe_git_run_target(&failed_workspace, Some(&github_origin("https://github.com/acme/widgets")))
-                .unwrap();
+        let failed = observe_git_run_target(
+            &failed_workspace,
+            Some(&github_origin("https://github.com/acme/widgets")),
+        )
+        .unwrap();
         assert_eq!(failed.run_target.as_ref().unwrap().sha, None);
         assert!(failed.legacy_git_context.sha.is_some());
         assert_eq!(failed.legacy_git_context.dirty, DirtyStatus::Clean);
@@ -2120,5 +2131,56 @@ exit 1
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
+    }
+
+    fn scm_settings(provider: Option<&str>, owner: &str, repository: &str) -> WorkflowSettings {
+        let mut settings = WorkflowSettings::default();
+        settings.run.scm = fabro_types::settings::run::RunScmSettings {
+            provider: provider.map(str::to_string),
+            owner: Some(owner.to_string()),
+            repository: Some(repository.to_string()),
+            github: None,
+        };
+        settings
+    }
+
+    #[test]
+    fn forgejo_scm_provider_resolves_the_configured_instance_origin() {
+        for provider in ["forgejo", "Forgejo"] {
+            let settings = scm_settings(Some(provider), "acme", "widgets");
+            let configured = configured_repo_origin_url(&settings, Some("https://git.example.com/"))
+                .expect("a configured instance must satisfy provider = forgejo");
+            let configured = configured.expect("forgejo scm settings resolve an origin");
+            assert_eq!(configured.provider, ScmProvider::Forgejo);
+            assert_eq!(configured.url, "https://git.example.com/acme/widgets");
+        }
+    }
+
+    #[test]
+    fn forgejo_scm_provider_without_an_instance_is_an_error() {
+        let settings = scm_settings(Some("forgejo"), "acme", "widgets");
+        let error = configured_repo_origin_url(&settings, None)
+            .expect_err("provider = forgejo without an instance must not resolve silently");
+        assert!(error.contains("requires a configured Forgejo instance"), "{error}");
+
+        // An empty instance URL is as good as none.
+        let error = configured_repo_origin_url(&settings, Some("   "))
+            .expect_err("a blank instance URL must not satisfy provider = forgejo");
+        assert!(error.contains("requires a configured Forgejo instance"), "{error}");
+    }
+
+    #[test]
+    fn forgejo_scm_provider_without_owner_and_repository_resolves_nothing() {
+        let settings = WorkflowSettings::default();
+        assert_eq!(configured_repo_origin_url(&settings, Some("https://git.example.com")).unwrap(), None);
+    }
+
+    #[test]
+    fn github_scm_provider_still_resolves_without_a_forgejo_instance() {
+        let settings = scm_settings(Some("github"), "acme", "widgets");
+        let configured = configured_repo_origin_url(&settings, None).unwrap();
+        let configured = configured.expect("github scm settings resolve an origin");
+        assert_eq!(configured.provider, ScmProvider::Github);
+        assert_eq!(configured.url, "https://github.com/acme/widgets");
     }
 }

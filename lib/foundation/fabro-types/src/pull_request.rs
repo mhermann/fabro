@@ -229,7 +229,8 @@ impl<'de> Deserialize<'de> for PullRequestLink {
     reason = "Pull request links are public URLs stored for display and coordinate inference."
 )]
 fn pull_request_link_from_url(raw_url: &str) -> Result<PullRequestLink, String> {
-    let parsed = url::Url::parse(raw_url).map_err(|err| format!("Invalid pull request URL: {err}"))?;
+    let parsed =
+        url::Url::parse(raw_url).map_err(|err| format!("Invalid pull request URL: {err}"))?;
     if parsed.host_str() == Some("github.com") {
         github_pull_request_link_from_url(raw_url)
     } else {

@@ -480,7 +480,11 @@ impl RunMetadataWriter {
         })
     }
 
-    fn discover_parent(&mut self, token: Option<&str>, username: &str) -> Result<(), RunMetadataError> {
+    fn discover_parent(
+        &mut self,
+        token: Option<&str>,
+        username: &str,
+    ) -> Result<(), RunMetadataError> {
         if self.discovered {
             return Ok(());
         }

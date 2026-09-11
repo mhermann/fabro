@@ -928,8 +928,11 @@ async fn run_forgejo_repository_access_check(
     let Some(forgejo) = forgejo else {
         return push_check(
             checks,
-            Err("FORGEJO_TOKEN is not configured for a forgejo run -- run fabro install or run                  fabro secret set FORGEJO_TOKEN"
-                .to_string()),
+            Err(
+                "FORGEJO_TOKEN is not configured for a forgejo run -- run fabro install or run \
+                 `fabro secret set FORGEJO_TOKEN`"
+                    .to_string(),
+            ),
         );
     };
     if !fabro_types::origin_matches_instance(&git.origin_url, forgejo.base_url()) {

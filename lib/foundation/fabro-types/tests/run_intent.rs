@@ -410,7 +410,10 @@ fn forgejo_targets_validate_against_the_configured_instance() {
     let validated = RunTarget::Git(target.clone())
         .validate_with_scm(Some("http://localhost:3001"))
         .expect("forgejo target should validate with an instance URL");
-    assert_eq!(validated.git.expect("git projection").origin_url, "http://localhost:3001/fabro-sh/fabro");
+    assert_eq!(
+        validated.git.expect("git projection").origin_url,
+        "http://localhost:3001/fabro-sh/fabro"
+    );
 
     let error = target
         .clone()

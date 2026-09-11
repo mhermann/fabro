@@ -206,10 +206,9 @@ async fn load_pull_request_forgejo_context(
         .integrations
         .forgejo
         .clone();
-    let origin_matches = record
-        .origin
-        .as_deref()
-        .is_some_and(|origin| fabro_types::origin_matches_instance(origin, settings.instance_url().unwrap_or_default()));
+    let origin_matches = record.origin.as_deref().is_some_and(|origin| {
+        fabro_types::origin_matches_instance(origin, settings.instance_url().unwrap_or_default())
+    });
     if !origin_matches {
         return Err(ApiError::with_code(
             StatusCode::BAD_REQUEST,
@@ -709,7 +708,9 @@ async fn merge_forgejo_run_pull_request(
     };
     let client = match state.http_client() {
         Ok(client) => client,
-        Err(err) => return ApiError::new(StatusCode::SERVICE_UNAVAILABLE, err.to_string()).into_response(),
+        Err(err) => {
+            return ApiError::new(StatusCode::SERVICE_UNAVAILABLE, err.to_string()).into_response();
+        }
     };
     let number = forgejo_ctx.record.number;
     match fabro_forgejo::merge_pull_request(
@@ -742,7 +743,9 @@ async fn close_forgejo_run_pull_request(state: &Arc<AppState>, id: &RunId) -> Re
     };
     let client = match state.http_client() {
         Ok(client) => client,
-        Err(err) => return ApiError::new(StatusCode::SERVICE_UNAVAILABLE, err.to_string()).into_response(),
+        Err(err) => {
+            return ApiError::new(StatusCode::SERVICE_UNAVAILABLE, err.to_string()).into_response();
+        }
     };
     let number = forgejo_ctx.record.number;
     match fabro_forgejo::close_pull_request(

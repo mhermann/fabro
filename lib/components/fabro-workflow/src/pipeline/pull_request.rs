@@ -1671,8 +1671,9 @@ mod tests {
         let payload = pr_content_json("Fix bug", "Narrative.");
         let harness = setup_fallback_test_harness_with_branch_sha(&payload, "stale-sha").await;
         let github_base_url = harness.github_server.url("");
+        let github = github_app::GitHubContext::new(&harness.creds, &github_base_url);
         let error = open_pull_request(OpenPullRequestRequest {
-            github:            Some(fabro_github::GitHubContext::new(&harness.creds, &github_base_url)),
+            github:            Some(github),
             forgejo:           None,
             origin_url:        "https://github.com/owner/repo.git",
             base_branch:       "main",
@@ -2102,6 +2103,7 @@ mod tests {
 
         let result = open_pull_request(OpenPullRequestRequest {
             github,
+            forgejo:           None,
             origin_url: "https://github.com/owner/repo.git",
             base_branch: "main",
             head_branch: "fabro/run/123",
@@ -2150,6 +2152,7 @@ mod tests {
 
         let result = open_pull_request(OpenPullRequestRequest {
             github,
+            forgejo:           None,
             origin_url: "https://github.com/owner/repo.git",
             base_branch: "main",
             head_branch: "fabro/run/123",
@@ -2187,6 +2190,7 @@ mod tests {
 
         let result = open_pull_request(OpenPullRequestRequest {
             github,
+            forgejo:           None,
             origin_url: "https://github.com/owner/repo.git",
             base_branch: "main",
             head_branch: "fabro/run/123",
@@ -2209,5 +2213,106 @@ mod tests {
         assert_eq!(title.chars().count(), 72);
         assert!(title.ends_with('\u{2026}'));
         harness.assert_mocks_called_once().await;
+    }
+
+    /// A forgejo origin must ride the forgejo client end to end: branch
+    /// verification, reconciliation, and creation all hit the instance API
+    /// with the PAT, the draft request becomes the `WIP: ` title prefix, and
+    /// the GitHub API is never contacted.
+    #[tokio::test]
+    async fn forgejo_origin_creates_a_wip_pull_request_without_touching_github() {
+        let payload = pr_content_json("Fix bug", "Narrative.");
+        let harness = setup_fallback_test_harness_with_branch_sha(&payload, "final-sha").await;
+
+        let forgejo_server = MockServer::start_async().await;
+        let branch_mock = forgejo_server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/api/v1/repos/acme/widgets/branches/fabro/run/123")
+                    .header("authorization", "token forgejo-pat");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(serde_json::json!({
+                        "commit": { "id": "final-sha" }
+                    }));
+            })
+            .await;
+        let reconcile_mock = forgejo_server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/api/v1/repos/acme/widgets/pulls")
+                    .query_param("state", "open")
+                    .header("authorization", "token forgejo-pat");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(serde_json::json!([]));
+            })
+            .await;
+        let create_mock_id = forgejo_server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/api/v1/repos/acme/widgets/pulls")
+                    .header("authorization", "token forgejo-pat");
+                then.status(201)
+                    .header("content-type", "application/json")
+                    .json_body(serde_json::json!({
+                        "number": 3,
+                        "html_url": "https://git.example.com/acme/widgets/pulls/3",
+                    }));
+            })
+            .await
+            .id;
+
+        let forgejo_server_url = forgejo_server.url("");
+        let forgejo = fabro_forgejo::ForgejoContext::new("forgejo-pat", &forgejo_server_url);
+        let origin_url = format!("{forgejo_server_url}/acme/widgets");
+        let result = open_pull_request(OpenPullRequestRequest {
+            github:            None,
+            forgejo:           Some(&forgejo),
+            origin_url:        &origin_url,
+            base_branch:       "main",
+            head_branch:       "fabro/run/123",
+            expected_head_sha: "final-sha",
+            goal:              "Fix bug",
+            diff:              "diff --git a/src/lib.rs b/src/lib.rs\n+fn x() {}\n",
+            model:             "gpt-5.4",
+            draft:             true,
+            auto_merge:        None,
+            run_store:         &harness.run_store,
+            llm_source:        harness.llm_source.as_ref(),
+            catalog:           harness.catalog.clone(),
+            conclusion:        None,
+            run_state:         None,
+        })
+        .await
+        .expect("forgejo PR creation should succeed");
+
+        assert_eq!(result.link.provider, ScmProvider::Forgejo);
+        assert_eq!(result.link.origin.as_deref(), Some(forgejo_server_url.as_str()));
+        assert_eq!(
+            result.title, "WIP: Fix bug",
+            "a draft request must become the WIP title prefix on forgejo"
+        );
+        assert_eq!(result.base_branch, "main");
+        assert_eq!(result.head_branch, "fabro/run/123");
+        httpmock::Mock::new(branch_mock.id, &forgejo_server)
+            .assert_calls_async(1)
+            .await;
+        httpmock::Mock::new(reconcile_mock.id, &forgejo_server)
+            .assert_calls_async(1)
+            .await;
+        httpmock::Mock::new(create_mock_id, &forgejo_server)
+            .assert_calls_async(1)
+            .await;
+        // The dispatch never routes a forgejo origin through the GitHub API.
+        httpmock::Mock::new(harness.branch_mock_id, &harness.github_server)
+            .assert_calls_async(0)
+            .await;
+        httpmock::Mock::new(harness.github_mock_id, &harness.github_server)
+            .assert_calls_async(0)
+            .await;
+        httpmock::Mock::new(harness.reconcile_mock_id, &harness.github_server)
+            .assert_calls_async(0)
+            .await;
     }
 }

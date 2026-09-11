@@ -4164,7 +4164,8 @@ async fn execute_run_in_process(state: Arc<AppState>, run_id: RunId) {
         .integrations
         .github
         .resolve_integration()
-    {Ok(integration) => integration,
+    {
+        Ok(integration) => integration,
         Err(err) => {
             tracing::error!(
                 run_id = %run_id,

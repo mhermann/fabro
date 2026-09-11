@@ -385,9 +385,11 @@ impl RunProjectionReducer for RunProjection {
             }
             EventBody::PullRequestCreated(props) => {
                 let pull_request = match props.provider.unwrap_or_default() {
-                    ScmProvider::Github => {
-                        PullRequestLink::github(props.owner.clone(), props.repo.clone(), props.pr_number)
-                    }
+                    ScmProvider::Github => PullRequestLink::github(
+                        props.owner.clone(),
+                        props.repo.clone(),
+                        props.pr_number,
+                    ),
                     ScmProvider::Forgejo => PullRequestLink::forgejo(
                         props.origin.clone().unwrap_or_default(),
                         props.owner.clone(),

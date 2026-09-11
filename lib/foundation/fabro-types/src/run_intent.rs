@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{DirtyStatus, GitContext, GitHubRepositorySlug, RunId, ScmProvider, WorkflowVersionId, repository};
+use crate::{
+    DirtyStatus, GitContext, GitHubRepositorySlug, RunId, ScmProvider, WorkflowVersionId,
+    repository,
+};
 
 /// A request to create a run from an immutable workflow version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

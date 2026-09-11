@@ -93,7 +93,9 @@ pub(crate) fn build_token_source(
                 serde_json::json!({ "contents": "write" }),
             )
             .map(|source| Some(Arc::new(PushTokenSource::Github(source))))
-            .map_err(|err| crate::Error::context_anyhow("Failed to build GitHub token source", err));
+            .map_err(|err| {
+                crate::Error::context_anyhow("Failed to build GitHub token source", err)
+            });
         }
     }
     if let Some(forgejo) = forgejo {

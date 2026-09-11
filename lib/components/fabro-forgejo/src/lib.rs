@@ -6,6 +6,11 @@
 //! (`server.integrations.forgejo.url`); the PAT lives in the vault as
 //! `FORGEJO_TOKEN` and is threaded through this crate as part of
 //! [`ForgejoContext`], which redacts it from `Debug` output.
+//!
+//! Authentication is applied at two seams only: sandbox/server clones embed
+//! the PAT in the HTTPS URL via [`url::embed_token_in_url`], and local
+//! run-branch pushes use the caller's own host git credentials (the same
+//! contract as GitHub; see `fabro-sandbox` push credentials).
 
 use anyhow::{Context as _, anyhow, bail};
 use fabro_redact::DisplaySafeUrl;
@@ -17,19 +22,10 @@ pub mod url;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub use url::{
-    credential_helper, credential_helper_key, embed_token_in_url, normalize_origin_url,
-    parse_owner_repo, repo_https_url,
-};
+pub use url::{embed_token_in_url, normalize_origin_url, parse_owner_repo, repo_https_url};
 
 /// Header scheme for Forgejo personal access tokens.
 pub const TOKEN_HEADER_PREFIX: &str = "token";
-
-/// Secret-free git credential helper for the configured Forgejo instance:
-/// reads `$FORGEJO_TOKEN` from the invoking git process's environment at
-/// invocation time, so the token never lands in git configuration, argv, or
-/// rendered errors. Non-`get` operations (`store`, `erase`) are ignored.
-pub const FORGEJO_CREDENTIAL_HELPER: &str = r#"!f() { if [ "$1" = get ]; then echo username=fabro; echo "password=$FORGEJO_TOKEN"; fi; }; f"#;
 
 /// Bundle of the instance base URL and the PAT used against it, threaded
 /// through every authenticated Forgejo call.
@@ -190,12 +186,6 @@ pub struct ForgejoRepository {
     pub private:        bool,
     pub default_branch: Option<String>,
     pub permissions:    Option<RepositoryPermissions>,
-    pub owner:          Option<RepositoryOwner>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct RepositoryOwner {
-    pub login: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -571,7 +561,11 @@ pub async fn get_pull_request(
             "Forgejo authentication failed reading pull request; check that FORGEJO_TOKEN is valid"
         )
         .into()),
-        status => Err(anyhow!("Unexpected status {status} reading pull request: {}", resp.text()).into()),
+        status => Err(anyhow!(
+            "Unexpected status {status} reading pull request: {}",
+            resp.text()
+        )
+        .into()),
     }
 }
 
@@ -685,9 +679,3 @@ pub async fn close_pull_request(
         .into()),
     }
 }
-
-#[expect(
-    dead_code,
-    reason = "kept for parity with fabro-github's lazy client helper; call sites arrive with the run-pipeline wiring"
-)]
-fn unused_http_client_helper() {}

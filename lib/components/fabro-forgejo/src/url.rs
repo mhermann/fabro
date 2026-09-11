@@ -139,45 +139,6 @@ pub fn embed_token_in_url(url: &str, token: &str) -> anyhow::Result<DisplaySafeU
     Ok(url)
 }
 
-/// The git config key routing the instance's HTTPS credentials through
-/// [`credential_helper`], e.g. `credential.https://git.example.com.helper`.
-#[must_use]
-pub fn credential_helper_key(instance_url: &str) -> String {
-    instance_origin(instance_url).map_or_else(
-        |_| "credential.forgejo.helper".to_string(),
-        |origin| format!("credential.{origin}.helper"),
-    )
-}
-
-fn instance_origin(instance_url: &str) -> anyhow::Result<String> {
-    let parsed = DisplaySafeUrl::parse(instance_url.trim())
-        .context("Failed to parse the Forgejo instance URL")?;
-    if parsed.scheme() != "https" && parsed.scheme() != "http" {
-        bail!(
-            "Forgejo instance URL must use https or http: {}",
-            parsed.redacted_string()
-        );
-    }
-    let host = parsed
-        .host_str()
-        .context("Forgejo instance URL is missing a host")?;
-    let mut origin = format!("{}://{}", parsed.scheme(), host);
-    if let Some(port) = parsed.port() {
-        origin.push(':');
-        origin.push_str(&port.to_string());
-    }
-    Ok(origin)
-}
-
-/// Secret-free git credential helper for Forgejo instances: reads
-/// `$FORGEJO_TOKEN` from the invoking git process's environment at invocation
-/// time. Defined once so the runtime git bridge, server preflight probes, and
-/// live contract tests always exercise exactly the same script.
-#[must_use]
-pub fn credential_helper() -> &'static str {
-    crate::FORGEJO_CREDENTIAL_HELPER
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,20 +250,6 @@ mod tests {
         assert!(!url.to_string().contains("s3cret"), "{}", url);
 
         assert!(embed_token_in_url("git@git.example.com:acme/widgets", "s3cret").is_err());
-    }
-
-    #[test]
-    fn credential_helper_key_uses_the_instance_origin() {
-        assert_eq!(
-            credential_helper_key("https://git.example.com"),
-            "credential.https://git.example.com.helper"
-        );
-        assert_eq!(
-            credential_helper_key("http://localhost:3001/"),
-            "credential.http://localhost:3001.helper"
-        );
-        assert_eq!(credential_helper(), crate::FORGEJO_CREDENTIAL_HELPER);
-        assert!(credential_helper().contains("FORGEJO_TOKEN"));
     }
 
     #[test]

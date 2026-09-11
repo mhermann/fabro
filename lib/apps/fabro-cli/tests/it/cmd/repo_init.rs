@@ -137,3 +137,69 @@ fn repo_init_errors_outside_git_repo() {
       × not a git repository — run `git init` first
     ");
 }
+
+#[test]
+fn repo_init_writes_a_forgejo_scm_block_for_instance_hosted_origins() {
+    let context = test_context!();
+    context.git_init();
+    let remote = std::process::Command::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "git@git.example.com:acme/widgets.git",
+        ])
+        .current_dir(&context.temp_dir)
+        .output()
+        .expect("git remote add should run");
+    assert!(remote.status.success(), "git remote add should succeed");
+
+    let config_dir = tempfile::tempdir().unwrap();
+    let config_path = config_dir.path().join("settings.toml");
+    std::fs::write(
+        &config_path,
+        "_version = 1\n\n[server.integrations.forgejo]\nenabled = true\nurl = \"https://git.example.com\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = context.command();
+    cmd.args(["repo", "init"]);
+    cmd.env("FABRO_CONFIG", &config_path);
+    cmd.assert().success();
+
+    let project = std::fs::read_to_string(context.temp_dir.join(".fabro/project.toml")).unwrap();
+    assert!(
+        project.contains("[run.scm]"),
+        "a forgejo origin needs an explicit scm block: {project}"
+    );
+    assert!(project.contains("provider = \"forgejo\""), "{project}");
+    assert!(project.contains("owner = \"acme\""), "{project}");
+    assert!(project.contains("repository = \"widgets\""), "{project}");
+}
+
+#[test]
+fn repo_init_skips_the_scm_block_for_github_origins() {
+    let context = test_context!();
+    context.git_init();
+    let remote = std::process::Command::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/widgets.git",
+        ])
+        .current_dir(&context.temp_dir)
+        .output()
+        .expect("git remote add should run");
+    assert!(remote.status.success(), "git remote add should succeed");
+
+    let mut cmd = context.command();
+    cmd.args(["repo", "init"]);
+    cmd.assert().success();
+
+    let project = std::fs::read_to_string(context.temp_dir.join(".fabro/project.toml")).unwrap();
+    assert!(
+        !project.contains("[run.scm]"),
+        "GitHub origins need no explicit scm block: {project}"
+    );
+}

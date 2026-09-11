@@ -352,8 +352,12 @@ impl AutomationRunMaterializer for ProductionAutomationRunMaterializer {
                 let remote = if repo == &target_repo {
                     target_remote
                 } else {
-                    self.resolve_remote(CheckoutRole::WorkflowSource, repo, forgejo_origin.as_deref())
-                        .await?
+                    self.resolve_remote(
+                        CheckoutRole::WorkflowSource,
+                        repo,
+                        forgejo_origin.as_deref(),
+                    )
+                    .await?
                 };
                 let source_checkout_dir = temp_dir.path().join("workflow-source");
                 let source_namespace = cache_namespace_for(source_provider);
@@ -609,6 +613,7 @@ mod tests {
     use super::*;
 
     const FAKE_TOKEN: &str = "ghu_automation_materializer_secret";
+    const FAKE_FORGEJO_TOKEN: &str = "forgejo_pat_materializer_secret";
 
     struct RecordingCredentialResolver {
         repositories: Mutex<Vec<GitHubRepositorySlug>>,
@@ -1365,5 +1370,128 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(error, RunMaterializeError::Package { .. }));
+    }
+
+    /// Records the forgejo instance URL the materializer threads to the
+    /// resolver, and serves local bare fixtures as the instance's clone URLs
+    /// with the PAT-auth shape the production forgejo lane produces.
+    struct ForgejoFixtureRemoteResolver {
+        clone_urls: HashMap<GitHubRepositorySlug, String>,
+        resolved:   Mutex<Vec<(GitHubRepositorySlug, Option<String>)>>,
+    }
+
+    impl ForgejoFixtureRemoteResolver {
+        fn resolved(&self) -> Vec<(GitHubRepositorySlug, Option<String>)> {
+            self.resolved
+                .lock()
+                .expect("forgejo recorder lock poisoned")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl AutomationGitRemoteResolver for ForgejoFixtureRemoteResolver {
+        async fn resolve(
+            &self,
+            repo: &GitHubRepositorySlug,
+            forgejo_origin: Option<&str>,
+        ) -> anyhow::Result<GitRemote> {
+            self.resolved
+                .lock()
+                .expect("forgejo recorder lock poisoned")
+                .push((repo.clone(), forgejo_origin.map(str::to_string)));
+            let clone_url = self
+                .clone_urls
+                .get(repo)
+                .unwrap_or_else(|| panic!("no fixture clone URL for {repo}"))
+                .clone();
+            Ok(GitRemote {
+                clone_url,
+                auth: Some(git_checkout::forgejo_git_auth(FAKE_FORGEJO_TOKEN)),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn forgejo_target_threads_the_instance_and_clones_with_pat_auth() {
+        const INSTANCE: &str = "https://git.example.com";
+        let temp = TempDir::new().unwrap();
+        let target_fixture = seed_repository(temp.path(), "target", "forgejo target workflow");
+        let target_repo = repository("acme/widgets");
+        let resolver = Arc::new(ForgejoFixtureRemoteResolver {
+            clone_urls: HashMap::from([(
+                target_repo.clone(),
+                target_fixture.bare.to_string_lossy().into_owned(),
+            )]),
+            resolved:   Mutex::new(Vec::new()),
+        });
+        let materializer = ProductionAutomationRunMaterializer::new(
+            None,
+            Some(fabro_forgejo::ForgejoContext::new(
+                FAKE_FORGEJO_TOKEN,
+                INSTANCE,
+            )),
+            "https://api.github.com".to_string(),
+            None,
+            Arc::new(GitRepoCache::new(temp.path().join("cache"))),
+            test_version_store(),
+        )
+        .with_remote_resolver(Arc::clone(&resolver));
+
+        let mut request = input("acme/widgets", None, &temp.path().join("runs"));
+        request.target.provider = ScmProvider::Forgejo;
+        let materialized = materializer.materialize(request).await.unwrap();
+
+        assert_eq!(
+            materialized.target.provider,
+            ScmProvider::Forgejo,
+            "the forgejo provider tag must survive materialization"
+        );
+        assert_eq!(
+            materialized.target.sha.as_deref(),
+            Some(target_fixture.initial_sha.as_str())
+        );
+        assert_eq!(
+            resolver.resolved(),
+            vec![(target_repo, Some(INSTANCE.to_string()))],
+            "the instance URL must reach the resolver for a forgejo target"
+        );
+    }
+
+    #[tokio::test]
+    async fn forgejo_remote_resolver_serves_instance_urls_and_pat_auth() {
+        let resolver = ServerGitHubRemoteResolver {
+            credentials:  None,
+            forgejo:      Some(fabro_forgejo::ForgejoContext::new(
+                FAKE_FORGEJO_TOKEN,
+                "https://git.example.com",
+            )),
+            api_base_url: "https://api.github.com".to_string(),
+            http_client:  None,
+        };
+        let repo = repository("acme/widgets");
+
+        let remote = resolver
+            .resolve(&repo, Some("https://git.example.com"))
+            .await
+            .expect("the configured instance must resolve");
+        assert_eq!(
+            remote.clone_url,
+            git_checkout::forgejo_clone_url("https://git.example.com", "acme", "widgets")
+        );
+        assert_eq!(
+            remote.auth,
+            Some(git_checkout::forgejo_git_auth(FAKE_FORGEJO_TOKEN))
+        );
+
+        let error = resolver
+            .resolve(&repo, Some("https://other.example.com"))
+            .await
+            .expect_err("an origin outside the configured instance must be refused");
+        assert!(error.to_string().contains("FORGEJO_TOKEN"), "{error}");
+
+        let github = resolver.resolve(&repo, None).await.expect("github lane");
+        assert_eq!(github.clone_url, git_checkout::github_clone_url(&repo));
+        assert_eq!(github.auth, None, "no credentials configured");
     }
 }
