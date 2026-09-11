@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use fabro_model::{AgentProfileKind, Catalog, ProviderId};
+use fabro_llm::lithos_catalog::Catalog;
+use fabro_types::AgentProfileKind;
+use lithos_llm::catalog::ProviderId;
 
 use super::EnvContext;
 use crate::agent_profile::AgentProfile;
@@ -152,7 +154,8 @@ impl AgentProfile for KimiProfile {
 
 #[cfg(test)]
 mod tests {
-    use fabro_model::catalog::LlmCatalogSettings;
+    use fabro_llm::catalog;
+    use fabro_llm::test_support::{test_catalog as fabro_test_catalog, test_catalog_with_overlay};
     use fabro_types::AgentToolCategory;
 
     use super::*;
@@ -160,17 +163,20 @@ mod tests {
     use crate::subagent::{SessionFactory, SubAgentSupervisor};
     use crate::test_support::MockSandbox;
     use crate::tool_permissions::{known_tool_category, tool_category};
+    use crate::tool_registry::ToolDefinitionExt;
 
     fn catalog() -> Arc<Catalog> {
-        Arc::new(Catalog::from_builtin().unwrap())
+        Arc::new(fabro_test_catalog())
     }
 
     /// OpenRouter ships disabled, so an operator opts in before its models are
     /// selectable. Enable it the way they would, to observe gateway routing.
     fn catalog_with_openrouter() -> Arc<Catalog> {
-        let overrides: LlmCatalogSettings =
-            toml::from_str("[providers.openrouter]\nenabled = true\n").unwrap();
-        Arc::new(Catalog::from_builtin_with_overrides(&overrides).unwrap())
+        Arc::new(test_catalog_with_overlay(
+            "[providers.openrouter]
+enabled = true
+",
+        ))
     }
 
     /// Kimi models must resolve to the Kimi profile whether they are reached
@@ -184,7 +190,7 @@ mod tests {
             (catalog_with_openrouter(), "openrouter", "kimi-k2.6"),
         ] {
             assert_eq!(
-                catalog.effective_agent_profile(&ProviderId::new(provider), Some(model)),
+                catalog::agent_profile(&catalog, provider, Some(model)),
                 Some(AgentProfileKind::Kimi),
                 "{provider}/{model} should use the Kimi profile"
             );
@@ -199,8 +205,7 @@ mod tests {
         // Deliberately not a GPT-5.6 model: those carry their own per-model
         // profile override, so they would not show that the provider default
         // is what applies here.
-        let profile =
-            catalog.effective_agent_profile(&ProviderId::new("openrouter"), Some("gpt-5.4"));
+        let profile = catalog::agent_profile(&catalog, "openrouter", Some("gpt-5.4"));
         assert_eq!(profile, Some(AgentProfileKind::OpenAi));
     }
 
@@ -273,7 +278,7 @@ mod tests {
             .get("Skill")
             .unwrap()
             .definition
-            .parameters;
+            .parameters();
         assert!(skill_parameters["properties"].get("skill").is_some());
         assert!(skill_parameters["properties"].get("args").is_some());
         assert!(skill_parameters["properties"].get("skill_name").is_none());
@@ -352,7 +357,7 @@ mod tests {
             .get("Edit")
             .unwrap()
             .definition
-            .parameters;
+            .parameters();
 
         assert!(parameters["properties"].get("path").is_some());
         assert!(parameters["properties"].get("file_path").is_none());

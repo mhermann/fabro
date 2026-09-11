@@ -49,18 +49,10 @@ fn sample_checkpoint() -> Checkpoint {
 
 fn sample_usage() -> BilledModelUsage {
     serde_json::from_value(json!({
-        "input": {
-            "usage": {
-                "model": {
-                    "provider": "openai",
-                    "model_id": "gpt-5.2"
-                },
-                "tokens": {
-                    "input_tokens": 123,
-                    "output_tokens": 45
-                }
-            },
-            "facts": { "algorithm": "openai" }
+        "model": { "provider": "openai", "model_id": "gpt-5.2" },
+        "tokens": {
+            "input": 123,
+            "output": 45
         },
         "total_usd_micros": 168
     }))

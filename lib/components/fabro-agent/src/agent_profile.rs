@@ -1,5 +1,10 @@
-use fabro_llm::types::ToolDefinition;
-use fabro_model::{AgentProfileKind, Catalog, Model, ProviderId};
+use std::sync::Arc;
+
+use fabro_llm::catalog;
+use fabro_llm::lithos_catalog::{Catalog, Offering};
+use fabro_types::AgentProfileKind;
+use lithos_llm::catalog::ProviderId;
+use lithos_llm::types::ToolDefinition;
 
 use crate::profiles::EnvContext;
 use crate::sandbox::Sandbox;
@@ -10,11 +15,14 @@ use crate::subagent::{
 };
 use crate::tool_registry::ToolRegistry;
 
+/// Context window assumed for a model the catalog does not describe.
+pub const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 200_000;
+
 pub trait AgentProfile: Send + Sync {
     fn profile_kind(&self) -> AgentProfileKind;
     fn provider_id(&self) -> ProviderId;
     fn model(&self) -> &str;
-    fn catalog(&self) -> Option<&Catalog> {
+    fn catalog(&self) -> Option<&Arc<Catalog>> {
         None
     }
     fn tool_registry(&self) -> &ToolRegistry;
@@ -34,31 +42,33 @@ pub trait AgentProfile: Send + Sync {
 
     fn knowledge_cutoff(&self) -> Option<String> {
         self.catalog_model()
-            .and_then(|m| m.knowledge_cutoff().map(str::to_string))
+            .and_then(|entry| entry.model.knowledge_cutoff().map(str::to_string))
     }
 
-    fn catalog_model(&self) -> Option<&Model> {
-        let catalog = self.catalog()?;
-        catalog.get_on_provider(&self.provider_id(), self.model())
+    /// The catalog row for this profile's route, when the catalog knows it.
+    fn catalog_model(&self) -> Option<Offering<'_>> {
+        self.catalog()?
+            .enabled_provider(self.provider_id().as_str())?
+            .offering(self.model())
     }
 
     fn context_window_size(&self) -> usize {
-        self.catalog_model().map_or(200_000, |m| {
-            usize::try_from(m.context_window()).unwrap_or(usize::MAX)
-        })
+        self.catalog_model()
+            .and_then(|entry| entry.model.limits())
+            .map_or(DEFAULT_CONTEXT_WINDOW_TOKENS, |limits| {
+                usize::try_from(limits.context_tokens).unwrap_or(usize::MAX)
+            })
     }
 
-    fn max_output_tokens(&self) -> Option<i64> {
-        self.catalog_model().and_then(Model::max_output)
+    fn max_output_tokens(&self) -> Option<u32> {
+        self.catalog_model()
+            .and_then(|entry| entry.model.limits())
+            .map(|limits| u32::try_from(limits.max_output_tokens).unwrap_or(u32::MAX))
     }
 
     fn reasons_by_default(&self) -> bool {
-        let Some(catalog) = self.catalog() else {
-            return false;
-        };
-        catalog
-            .model_settings_on_provider(&self.provider_id(), self.model())
-            .is_some_and(|settings| settings.reasoning_by_default)
+        self.catalog_model()
+            .is_some_and(|entry| catalog::reasons_by_default(&entry))
     }
 
     fn register_subagent_tools(
@@ -83,7 +93,8 @@ pub trait AgentProfile: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use fabro_model::{AgentProfileKind, ProviderId};
+    use fabro_types::AgentProfileKind;
+    use lithos_llm::catalog::builtin;
 
     use super::*;
     use crate::test_support::{MockSandbox, TestProfile};
@@ -92,7 +103,7 @@ mod tests {
     fn profile_provider_and_model() {
         let profile = TestProfile::new();
         assert_eq!(profile.profile_kind(), AgentProfileKind::Anthropic);
-        assert_eq!(profile.provider_id(), ProviderId::anthropic());
+        assert_eq!(profile.provider_id(), builtin::anthropic());
         assert_eq!(profile.model(), "mock-model");
     }
 

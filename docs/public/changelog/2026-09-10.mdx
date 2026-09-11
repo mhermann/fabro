@@ -1,0 +1,36 @@
+---
+title: "Kubernetes sandbox provider"
+date: "2026-09-10"
+---
+
+## Kubernetes sandbox provider
+
+Fabro can now run workflow stages in pods on your own Kubernetes cluster. The new `kubernetes` provider joins `local`, `docker`, and `daytona` as a clone-based sandbox: one pod per run, GitHub clone into `/workspace`, and agent commands executed through the Kubernetes exec API. Connection uses kube-standard inference (in-cluster ServiceAccount, `KUBECONFIG`, then `~/.kube/config`) — no new secrets or settings beyond `server.sandbox.providers.kubernetes.enabled`.
+
+```toml title="workflow.toml"
+[environments.kube]
+provider = "kubernetes"
+
+[environments.kube.image]
+docker = "buildpack-deps:noble"
+
+[environments.kube.resources]
+cpu = 2
+memory = "4GB"
+disk = "20GB"
+
+[environments.kube.network]
+mode = "block"
+```
+
+Environments accept an image reference plus CPU/memory/disk limits (disk maps to `ephemeral-storage`), and all three network modes are enforced with a per-pod NetworkPolicy — including a CNI-enforcement caveat for clusters whose networking layer ignores policies. Stopping a sandbox deletes its pod, and embedded terminals are not offered in this first release. See [Sandboxing](/administration/sandboxing) and [Environments](/execution/environments#kubernetes) for the RBAC surface and full reference.
+
+One compatibility note: run records created with `provider: "kubernetes"` will not deserialize on older Fabro binaries, so rolling back a server that has run Kubernetes sandboxes requires cleaning those records first — the same property the Daytona provider addition had.
+
+## SearXNG web search backend
+
+The built-in `web_search` tool now supports a self-hosted [SearXNG](/integrations/searxng) instance as its preferred backend. Store the instance URL with `fabro secret set SEARXNG_URL http://searxng:8080` and agents search the web with no API key and no per-query cost.
+
+Fabro selects the backend in order: SearXNG when `SEARXNG_URL` is present, then direct Brave Search (`BRAVE_SEARCH_API_KEY`), then Venice Search (`VENICE_API_KEY`). Users who never set the URL see no change. The instance must whitelist the `json` output format in its `settings.yml`; `fabro doctor` probes it and reports `searxng: configured and reachable` when the setup is correct.
+
+Failed calls still do not fall back between providers, matching the existing behavior for Brave and Venice.

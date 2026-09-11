@@ -3,8 +3,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use fabro_llm::types::ToolDefinition;
 use fabro_types::{AgentToolCategory, AgentToolSource, AgentToolSummary};
+use lithos_llm::types::{ToolDefinition, ToolDefinitionKind};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{ToolAccessPolicy, ToolExposureMode};
@@ -62,6 +62,37 @@ impl ToolContext {
     pub fn record_tool_output_stats(&self, stats: OutputCaptureStats) {
         if let Some(emitter) = self.agent_event_emitter.as_ref() {
             emitter.record_tool_output_stats(stats);
+        }
+    }
+}
+
+/// Schema accessors over the lithos tool definition.
+///
+/// lithos keeps the schema inside [`ToolDefinitionKind`] so a custom tool can
+/// never leak a JSON Schema onto the wire. Fabro's tool code reads the
+/// function schema often enough to want a direct accessor.
+pub trait ToolDefinitionExt {
+    /// The JSON Schema of a function tool. Panics for a custom tool, which
+    /// has no schema; Fabro registers custom tools only where the codec
+    /// accepts them.
+    fn parameters(&self) -> &serde_json::Value;
+
+    /// The provider-specific format of a custom tool.
+    fn custom_format(&self) -> Option<&serde_json::Value>;
+}
+
+impl ToolDefinitionExt for ToolDefinition {
+    fn parameters(&self) -> &serde_json::Value {
+        match &self.kind {
+            ToolDefinitionKind::Function { input_schema } => input_schema,
+            _ => panic!("custom tool '{}' has no parameter schema", self.name),
+        }
+    }
+
+    fn custom_format(&self) -> Option<&serde_json::Value> {
+        match &self.kind {
+            ToolDefinitionKind::Custom { format } => Some(format),
+            _ => None,
         }
     }
 }
@@ -306,11 +337,11 @@ mod tests {
 
     fn make_tool(name: &str) -> RegisteredTool {
         RegisteredTool {
-            definition: ToolDefinition {
-                name:        name.into(),
-                description: format!("Tool {name}"),
-                parameters:  serde_json::json!({"type": "object"}),
-            },
+            definition: ToolDefinition::function(
+                name,
+                format!("Tool {name}"),
+                serde_json::json!({"type": "object"}),
+            ),
             executor:   Arc::new(|_args, _ctx| Box::pin(async { Ok("ok".into()) })),
             source:     ToolSource::Native,
         }
@@ -391,20 +422,12 @@ mod tests {
     fn name_collision_overrides() {
         let mut registry = ToolRegistry::new();
         registry.register(RegisteredTool {
-            definition: ToolDefinition {
-                name:        "tool_a".into(),
-                description: "version 1".into(),
-                parameters:  serde_json::json!({}),
-            },
+            definition: ToolDefinition::function("tool_a", "version 1", serde_json::json!({})),
             executor:   Arc::new(|_args, _ctx| Box::pin(async { Ok("v1".into()) })),
             source:     ToolSource::Native,
         });
         registry.register(RegisteredTool {
-            definition: ToolDefinition {
-                name:        "tool_a".into(),
-                description: "version 2".into(),
-                parameters:  serde_json::json!({}),
-            },
+            definition: ToolDefinition::function("tool_a", "version 2", serde_json::json!({})),
             executor:   Arc::new(|_args, _ctx| Box::pin(async { Ok("v2".into()) })),
             source:     ToolSource::Native,
         });
@@ -530,14 +553,14 @@ mod tests {
 
     fn tool_with_source(name: &str, source: ToolSource) -> ToolDefinitionWithSource {
         ToolDefinitionWithSource {
-            definition: ToolDefinition {
-                name:        name.to_string(),
-                description: format!("{name} description"),
-                parameters:  serde_json::json!({
+            definition: ToolDefinition::function(
+                name.to_string(),
+                format!("{name} description"),
+                serde_json::json!({
                     "type": "object",
                     "properties": { "path": { "type": "string" } }
                 }),
-            },
+            ),
             source,
         }
     }

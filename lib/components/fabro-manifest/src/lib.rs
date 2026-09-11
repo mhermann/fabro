@@ -557,10 +557,6 @@ fn remotely_available_sha(
 /// Resolve a workflow reference and reject it when neither its config nor
 /// its graph exists on disk.
 /// A missing workflow surfaces as `fabro_config::Error::WorkflowNotFound`.
-#[expect(
-    clippy::result_large_err,
-    reason = "callers match on the concrete config error to classify missing workflows"
-)]
 fn resolve_existing_workflow_location(
     workflow: &Path,
     cwd: &Path,

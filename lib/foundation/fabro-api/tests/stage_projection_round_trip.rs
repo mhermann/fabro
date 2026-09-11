@@ -22,17 +22,18 @@ use fabro_api::types::{
     SubAgentProjection as ApiSubAgentProjection, SubAgentStatus as ApiSubAgentStatus,
     TodoListProjection as ApiTodoListProjection,
 };
-use fabro_model::{ModelId, ModelRef, ProviderId, Speed};
 use fabro_types::{
     ActivatedSkill, AgentControlState, AgentMcpToolSummary, AgentSkillActivationSource,
     AgentSkillSummary, AgentToolCategory, AgentToolSource, AgentToolSummary,
-    AgentToolsAvailableProps, LlmOutputKind, McpServerProjection, McpServerStatus,
+    AgentToolsAvailableProps, LlmOutputKind, McpServerProjection, McpServerStatus, ModelRef,
     ParallelBranchId, ParallelBranchResult, PermissionLevel, SkillsProjection, StageContextWindow,
     StageContextWindowBreakdownItem, StageContextWindowCategory, StageContextWindowCountMethod,
     StageContextWindowProjection, StageContextWindowStaleness, StageContextWindowUnavailableReason,
     StageContextWindowWarning, StageId, StageInferenceProjection, StageProjection,
     StageToolBatchProjection, SubAgentProjection, SubAgentStatus, TodoListKind, TodoListProjection,
 };
+use lithos_llm::catalog::{ModelId, ProviderId};
+use lithos_llm::types::Speed;
 use serde_json::json;
 
 #[test]

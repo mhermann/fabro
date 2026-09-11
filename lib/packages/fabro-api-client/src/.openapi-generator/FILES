@@ -11,7 +11,6 @@ api/install-api.ts
 api/integrations-api.ts
 api/mcpservers-api.ts
 api/models-api.ts
-api/playground-api.ts
 api/repos-api.ts
 api/run-internals-api.ts
 api/run-outputs-api.ts
@@ -90,9 +89,13 @@ models/code-location.ts
 models/command-log-response.ts
 models/command-termination.ts
 models/completion-content-part.ts
+models/completion-cost.ts
 models/completion-message.ts
+models/completion-response-format.ts
+models/completion-response-warnings-inner.ts
 models/completion-response.ts
 models/completion-tool-choice.ts
+models/completion-tool-definition-kind.ts
 models/completion-tool-definition.ts
 models/completion-usage.ts
 models/conclusion.ts
@@ -101,7 +104,6 @@ models/create-automation-request.ts
 models/create-completion-request.ts
 models/create-environment-request.ts
 models/create-mcp-server-request.ts
-models/create-playground-chat-request.ts
 models/create-run-pull-request-request.ts
 models/create-run-request.ts
 models/create-run-session-request.ts
@@ -238,6 +240,7 @@ models/merge-run-pull-request-response.ts
 models/model-controls.ts
 models/model-costs.ts
 models/model-features.ts
+models/model-handle.ts
 models/model-limits.ts
 models/model-reference.ts
 models/model-test-mode.ts
@@ -325,7 +328,6 @@ models/pull-request-settings.ts
 models/pull-request-user.ts
 models/pull-request.ts
 models/question-type.ts
-models/reasoning-effort-feature.ts
 models/reasoning-effort.ts
 models/reasoning-output-trace-only.ts
 models/reasoning-output-with-summary.ts

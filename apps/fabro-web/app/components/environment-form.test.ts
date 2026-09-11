@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
+import { EnvironmentProvider } from "@qltysh/fabro-api-client";
+
 import {
   EMPTY_ENVIRONMENT_FORM,
   createRequestFromForm,
   isEnvironmentFormValid,
+  parseCreatableProvider,
   type EnvironmentFormValues,
 } from "./environment-form";
 
@@ -46,5 +49,19 @@ describe("environment image source", () => {
     );
     expect(request.image.docker).toBeNull();
     expect(request.image.dockerfile?.value).toBe("FROM ubuntu");
+  });
+});
+
+describe("creatable provider parsing", () => {
+  test("known creatable providers parse to themselves", () => {
+    expect(parseCreatableProvider("docker")).toBe(EnvironmentProvider.DOCKER);
+    expect(parseCreatableProvider("daytona")).toBe(EnvironmentProvider.DAYTONA);
+    expect(parseCreatableProvider("kubernetes")).toBe(EnvironmentProvider.KUBERNETES);
+  });
+
+  test("unexpected values default to Docker", () => {
+    expect(parseCreatableProvider(null)).toBe(EnvironmentProvider.DOCKER);
+    expect(parseCreatableProvider("local")).toBe(EnvironmentProvider.DOCKER);
+    expect(parseCreatableProvider("nonsense")).toBe(EnvironmentProvider.DOCKER);
   });
 });

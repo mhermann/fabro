@@ -1,7 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use fabro_model::{AgentProfileKind, Catalog, CodecKind, ProviderId};
+use fabro_llm::lithos_catalog::Catalog;
+use fabro_types::AgentProfileKind;
+use lithos_llm::catalog::ProviderId;
+#[cfg(test)]
+use lithos_llm::catalog::builtin;
 
 pub mod anthropic;
 pub mod claude5;
@@ -101,7 +105,7 @@ impl AgentProfileBuilder {
     /// `web_fetch` discard it instead of retaining an unused LLM client.
     #[must_use]
     pub fn with_web_fetch_summarizer(mut self, summarizer: Option<WebFetchSummarizer>) -> Self {
-        if self.profile_kind != AgentProfileKind::Gpt56 {
+        if !self.profile_kind.uses_codex_core_tools() {
             self.summarizer = summarizer;
         }
         self
@@ -112,7 +116,7 @@ impl AgentProfileBuilder {
         let model = self.model.as_str();
         let deps = ProfileDeps {
             options:      self.native_tool_options.clone(),
-            summarizer:   if self.profile_kind == AgentProfileKind::Gpt56 {
+            summarizer:   if self.profile_kind.uses_codex_core_tools() {
                 None
             } else {
                 self.summarizer.clone()
@@ -144,7 +148,7 @@ impl AgentProfileBuilder {
                     .with_provider_id(self.provider_id.clone())
                     .with_catalog(Arc::clone(&self.catalog)),
             ),
-            AgentProfileKind::Gpt56 => Box::new(
+            AgentProfileKind::Gpt56 | AgentProfileKind::Gpt6 => Box::new(
                 Gpt56Profile::with_native_tools(model, &deps)
                     .with_route(self.provider_id.clone(), Arc::clone(&self.catalog)),
             ),
@@ -169,9 +173,12 @@ pub(crate) enum FileEditToolKind {
     EditFile,
 }
 
+/// The lithos codec that carries freeform (custom) tool definitions.
+pub(crate) const OPENAI_RESPONSES_CODEC: &str = "openai-responses";
+
 impl FileEditToolKind {
-    pub(crate) fn for_codec(codec: CodecKind) -> Self {
-        if codec == CodecKind::OpenAiResponses {
+    pub(crate) fn for_codec(codec: &str) -> Self {
+        if codec == OPENAI_RESPONSES_CODEC {
             Self::ApplyPatch
         } else {
             Self::EditFile
@@ -210,11 +217,11 @@ impl FileEditToolKind {
 /// trait defaults: there is no sensible default for a profile that has no base.
 macro_rules! impl_base_profile_accessors {
     () => {
-        fn profile_kind(&self) -> ::fabro_model::AgentProfileKind {
+        fn profile_kind(&self) -> ::fabro_types::AgentProfileKind {
             self.base.profile_kind
         }
 
-        fn provider_id(&self) -> ::fabro_model::ProviderId {
+        fn provider_id(&self) -> ::lithos_llm::catalog::ProviderId {
             self.base.provider_id.clone()
         }
 
@@ -222,8 +229,8 @@ macro_rules! impl_base_profile_accessors {
             &self.base.model
         }
 
-        fn catalog(&self) -> Option<&::fabro_model::Catalog> {
-            self.base.catalog.as_deref()
+        fn catalog(&self) -> Option<&::std::sync::Arc<::fabro_llm::lithos_catalog::Catalog>> {
+            self.base.catalog.as_ref()
         }
 
         fn tool_registry(&self) -> &$crate::tool_registry::ToolRegistry {
@@ -259,10 +266,10 @@ impl BaseProfile {
     fn provider_display_name(&self) -> String {
         self.catalog
             .as_ref()
-            .and_then(|catalog| catalog.provider(&self.provider_id))
+            .and_then(|catalog| catalog.provider(self.provider_id.as_str()).ok())
             .map_or_else(
-                || self.provider_id.display_name(),
-                |provider| provider.display_name.clone(),
+                || self.provider_id.to_string(),
+                |provider| provider.display_name().to_string(),
             )
     }
 
@@ -274,11 +281,9 @@ impl BaseProfile {
     ///
     /// Returns the newly selected editor when the registry changed.
     fn configure_file_edit_tool(&mut self) -> Option<FileEditToolKind> {
-        let codec = self
-            .catalog
-            .as_ref()?
-            .effective_codec(&self.provider_id, Some(&self.model))?;
-        let desired = FileEditToolKind::for_codec(codec);
+        let catalog = self.catalog.as_ref()?;
+        let provider = catalog.provider(self.provider_id.as_str()).ok()?;
+        let desired = FileEditToolKind::for_codec(provider.codec().as_str());
         if self.file_edit_tool() == Some(desired) {
             return None;
         }
@@ -451,8 +456,8 @@ pub fn build_env_context_block_with(env: &dyn Sandbox, ctx: &EnvContext) -> Stri
 
 #[cfg(test)]
 mod tests {
-    use fabro_llm::types::ToolDefinition;
-    use fabro_model::catalog::LlmCatalogSettings;
+    use fabro_llm::test_support::{test_catalog, test_catalog_with_overlay};
+    use lithos_llm::types::ToolDefinition;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -460,6 +465,10 @@ mod tests {
     use crate::subagent::{SessionFactory, SubAgentSupervisor};
     use crate::test_support::MockSandbox;
     use crate::tool_registry::ToolContext;
+
+    /// OpenRouter ships disabled, so an operator opts in before its models are
+    /// selectable.
+    const OPENROUTER_ENABLED: &str = "[providers.openrouter]\nenabled = true\n";
 
     fn native_tool_options(
         profile_kind: AgentProfileKind,
@@ -536,21 +545,17 @@ mod tests {
     fn gpt56_edit_file_profile(has_web_search: bool) -> Gpt56Profile {
         let options = native_tool_options(AgentProfileKind::Gpt56, has_web_search);
         let deps = ProfileDeps::standalone(options);
-        let overrides: LlmCatalogSettings =
-            toml::from_str("[providers.openrouter]\nenabled = true\n").unwrap();
         Gpt56Profile::with_native_tools("gpt-5.6-sol", &deps).with_route(
             ProviderId::new("openrouter"),
-            Arc::new(Catalog::from_builtin_with_overrides(&overrides).unwrap()),
+            Arc::new(test_catalog_with_overlay(OPENROUTER_ENABLED)),
         )
     }
 
     fn openai_edit_file_profile(has_web_search: bool) -> OpenAiProfile {
         let options = native_tool_options(AgentProfileKind::OpenAi, has_web_search);
         let deps = ProfileDeps::standalone(options);
-        OpenAiProfile::with_native_tools("kimi-k2.5", &deps).with_route(
-            ProviderId::new("moonshot"),
-            Arc::new(Catalog::from_builtin().unwrap()),
-        )
+        OpenAiProfile::with_native_tools("kimi-k2.5", &deps)
+            .with_route(ProviderId::new("moonshot"), Arc::new(test_catalog()))
     }
 
     /// Profiles using fabro's native tool vocabulary get the same `shell`
@@ -575,7 +580,7 @@ mod tests {
             .collect();
 
         for definition in &definitions {
-            assert_eq!(definition.parameters, definitions[0].parameters);
+            assert_eq!(definition.kind, definitions[0].kind);
             assert_eq!(definition.description, definitions[0].description);
             assert!(
                 definition.description.contains("Bash"),
@@ -694,30 +699,26 @@ mod tests {
 
     #[test]
     fn profile_builder_keeps_tool_availability_and_prompt_guidance_in_sync() {
-        let catalog = Arc::new(Catalog::from_builtin().unwrap());
+        let catalog = Arc::new(test_catalog());
         let env = MockSandbox::linux();
         let cases = [
-            (
-                AgentProfileKind::OpenAi,
-                ProviderId::openai(),
-                "gpt-5.4-mini",
-            ),
+            (AgentProfileKind::OpenAi, builtin::openai(), "gpt-5.4-mini"),
             (
                 AgentProfileKind::Anthropic,
-                ProviderId::anthropic(),
+                builtin::anthropic(),
                 "claude-haiku-4-5",
             ),
             (
                 AgentProfileKind::Gemini,
-                ProviderId::gemini(),
+                builtin::gemini(),
                 "gemini-3-flash-preview",
             ),
             (
                 AgentProfileKind::Claude5,
-                ProviderId::anthropic(),
+                builtin::anthropic(),
                 "claude-sonnet-5",
             ),
-            (AgentProfileKind::Gpt56, ProviderId::openai(), "gpt-5.6-sol"),
+            (AgentProfileKind::Gpt56, builtin::openai(), "gpt-5.6-sol"),
         ];
 
         for (profile_kind, provider_id, model) in cases {
@@ -774,9 +775,9 @@ mod tests {
     ) {
         let builder = AgentProfileBuilder::new(
             profile_kind,
-            ProviderId::anthropic(),
+            builtin::anthropic(),
             model,
-            Arc::new(Catalog::from_builtin().unwrap()),
+            Arc::new(test_catalog()),
         );
         let root = builder.build();
         let child = builder.build();
@@ -844,9 +845,7 @@ mod tests {
 
     #[test]
     fn profile_builder_selects_a_codec_compatible_gpt56_editor() {
-        let overrides: LlmCatalogSettings =
-            toml::from_str("[providers.openrouter]\nenabled = true\n").unwrap();
-        let catalog = Arc::new(Catalog::from_builtin_with_overrides(&overrides).unwrap());
+        let catalog = Arc::new(test_catalog_with_overlay(OPENROUTER_ENABLED));
         let profile = AgentProfileBuilder::new(
             AgentProfileKind::Gpt56,
             ProviderId::new("openrouter"),

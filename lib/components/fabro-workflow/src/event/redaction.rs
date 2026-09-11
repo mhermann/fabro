@@ -30,10 +30,10 @@ pub fn event_payload_from_redacted_json(line: &str, run_id: &RunId) -> Result<Ev
 
 #[cfg(test)]
 mod tests {
-    use ::fabro_types::{ReasoningOutput, fixtures, run_event as fabro_types};
+    use ::fabro_types::{ModelRef, fixtures, run_event as fabro_types};
     use fabro_agent::AgentEvent;
-    use fabro_llm::types::TokenCounts as LlmTokenCounts;
-    use fabro_model::{ModelRef, ProviderId};
+    use lithos_llm::catalog::{ModelId, builtin};
+    use lithos_llm::types::{ReasoningOutput, TokenCounts as LlmTokenCounts};
 
     use super::*;
     use crate::event::{Event, to_run_event};
@@ -124,14 +124,9 @@ mod tests {
             visit:             1,
             event:             AgentEvent::AssistantMessage {
                 text:            "done".to_string(),
-                model:           ModelRef {
-                    provider: ProviderId::openai(),
-                    model_id: "gpt-5.4".into(),
-                    speed:    None,
-                },
+                model:           ModelRef::new(builtin::openai(), ModelId::new("gpt-5.4")),
                 usage:           LlmTokenCounts::default(),
-                cost_usd:        None,
-                cost_source:     None,
+                cost:            None,
                 tool_call_count: 0,
                 context_window:  None,
                 reasoning:       Some(ReasoningOutput::new(

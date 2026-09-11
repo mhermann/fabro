@@ -104,7 +104,7 @@ pub(crate) fn repo_symlink_command(layout: &CloneRepoLayout) -> String {
     )
 }
 
-#[cfg(any(feature = "docker", test))]
+#[cfg(any(feature = "docker", feature = "kubernetes", test))]
 pub(crate) fn exact_repository_init_command(clone_url: &str, checkout_path: &str) -> String {
     format!(
         "{git} init -- {path} && git -C {path} remote add origin {origin}",
@@ -190,7 +190,7 @@ pub(crate) fn tag_ref(tag: &str) -> String {
 ///
 /// The fetch names the revision directly rather than the branch, and
 /// `--no-tags` keeps unrelated tags from being pulled alongside it.
-#[cfg(any(feature = "docker", test))]
+#[cfg(any(feature = "docker", feature = "kubernetes", test))]
 pub(crate) fn pinned_fetch_command(
     checkout_path: &str,
     fetch_source: &str,
@@ -209,7 +209,7 @@ pub(crate) fn pinned_fetch_command(
 
 /// Leading-space ` --depth N` fragment for a Git command, or empty when
 /// `depth` is `None` to fetch full history.
-#[cfg(any(feature = "docker", test))]
+#[cfg(any(feature = "docker", feature = "kubernetes", test))]
 pub(crate) fn depth_argument(depth: Option<usize>) -> String {
     depth.map_or_else(String::new, |depth| format!(" --depth {depth}"))
 }
@@ -246,7 +246,7 @@ pub(crate) fn exact_head_revision_command(checkout_path: &str) -> String {
 /// Check out the admitted branch and print the resulting HEAD in one shell
 /// command; stdout is the `rev-parse HEAD` output for
 /// [`PinnedRevision::verify_head`].
-#[cfg(any(feature = "docker", test))]
+#[cfg(any(feature = "docker", feature = "kubernetes", test))]
 pub(crate) fn exact_checkout_verify_command(
     checkout_path: &str,
     branch: &str,
@@ -261,7 +261,7 @@ pub(crate) fn exact_checkout_verify_command(
 
 /// The peeled commit behind whatever `git fetch` just wrote to `FETCH_HEAD`;
 /// a commit peels to itself, an annotated tag to the commit it points at.
-#[cfg(any(feature = "docker", test))]
+#[cfg(any(feature = "docker", feature = "kubernetes", test))]
 pub(crate) const FETCH_HEAD_COMMIT: &str = "FETCH_HEAD^{commit}";
 
 /// Validate that a `rev-parse HEAD` output is a single commit ID and return it

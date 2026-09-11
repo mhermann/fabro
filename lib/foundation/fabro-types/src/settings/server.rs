@@ -117,9 +117,10 @@ pub struct ServerSandboxSettings {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerSandboxProvidersSettings {
-    pub local:   ServerSandboxProviderSettings,
-    pub docker:  ServerSandboxProviderSettings,
-    pub daytona: ServerSandboxProviderSettings,
+    pub local:      ServerSandboxProviderSettings,
+    pub docker:     ServerSandboxProviderSettings,
+    pub daytona:    ServerSandboxProviderSettings,
+    pub kubernetes: ServerSandboxProviderSettings,
 }
 
 impl ServerSandboxProvidersSettings {
@@ -133,6 +134,7 @@ impl ServerSandboxProvidersSettings {
             crate::SandboxProviderKind::Local => &self.local,
             crate::SandboxProviderKind::Docker => &self.docker,
             crate::SandboxProviderKind::Daytona => &self.daytona,
+            crate::SandboxProviderKind::Kubernetes => &self.kubernetes,
         }
     }
 }

@@ -4,13 +4,12 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use fabro_auth::auth_issue_message;
 use fabro_http::Response;
-use fabro_llm::client::Client as LlmClient;
-use fabro_llm::model_test::{ModelTestStatus, run_basic_model_probe_with_timeout};
-use fabro_model::{Catalog, ProviderId};
+use fabro_llm::Client;
+use fabro_llm::lithos_catalog::{Catalog, CatalogProvider};
+use fabro_llm::probe::{self, ModelTestStatus};
 use fabro_redact::redact_string;
-use fabro_sandbox::{DockerSandboxProvider, daytona};
+use fabro_sandbox::{DockerSandboxProvider, KubernetesSandboxProvider, daytona};
 use fabro_static::EnvVars;
 use fabro_types::settings::ServerAuthMethod;
 use fabro_types::settings::server::GithubIntegrationStrategy;
@@ -19,6 +18,7 @@ use fabro_util::dev_token::validate_dev_token_format;
 use fabro_util::session_secret;
 use fabro_util::version::FABRO_VERSION;
 use futures_util::future::join_all;
+use lithos_llm::catalog::ProviderId;
 use serde::Serialize;
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
@@ -94,12 +94,22 @@ fn validate_session_secret(value: &str) -> Result<(), String> {
 }
 
 pub async fn run_all(state: &AppState) -> DiagnosticsReport {
-    let (llm, github, forgejo, docker_sandbox, cloud_sandbox, web_search, crypto) = tokio::join!(
+    let (
+        llm,
+        github,
+        forgejo,
+        docker_sandbox,
+        cloud_sandbox,
+        kubernetes_sandbox,
+        web_search,
+        crypto,
+    ) = tokio::join!(
         check_llm_providers(state),
         check_github_app(state),
         check_forgejo(state),
         check_docker_sandbox(state),
         check_cloud_sandbox(state),
+        check_kubernetes_sandbox(state),
         check_web_search(state),
         check_crypto(state),
     );
@@ -115,6 +125,7 @@ pub async fn run_all(state: &AppState) -> DiagnosticsReport {
                     forgejo,
                     docker_sandbox,
                     cloud_sandbox,
+                    kubernetes_sandbox,
                     web_search,
                 ],
             },
@@ -296,12 +307,12 @@ pub(crate) async fn test_llm_providers(state: &AppState) -> anyhow::Result<Provi
             .auth_issues
             .iter()
             .find(|(issue_provider, _)| issue_provider == &provider)
-            .map(|(_, issue)| redact_string(&auth_issue_message(&provider, issue)));
+            .map(|(_, issue)| redact_string(&issue.to_string()));
         let registration_issue = result
-            .registration_issues
+            .build_issues
             .iter()
             .find(|issue| issue.provider == provider)
-            .map(|issue| redact_string(&issue.error.to_string()));
+            .map(|issue| redact_string(&issue.cause.to_string()));
         async move {
             probe_single_provider(client, &catalog, provider, auth_issue, registration_issue).await
         }
@@ -312,14 +323,14 @@ pub(crate) async fn test_llm_providers(state: &AppState) -> anyhow::Result<Provi
 }
 
 async fn probe_single_provider(
-    client: Arc<LlmClient>,
+    client: Arc<Client>,
     catalog: &Catalog,
     provider: ProviderId,
     auth_issue: Option<String>,
     registration_issue: Option<String>,
 ) -> ProviderProbeResult {
     if let Some(message) = auth_issue {
-        // `auth_issue_message` already embeds the provider's display name, so the
+        // The credential error already names the provider, so the
         // diagnostics detail uses the message as-is rather than re-prefixing.
         return provider_probe_error(provider, None, message.clone(), Some(message));
     }
@@ -327,7 +338,10 @@ async fn probe_single_provider(
         return provider_probe_error(provider, None, message, None);
     }
 
-    let Some(model) = catalog.probe_for_provider(&provider) else {
+    let Some(model) = catalog
+        .enabled_provider(provider.as_str())
+        .and_then(CatalogProvider::probe_offering)
+    else {
         return provider_probe_error(
             provider,
             None,
@@ -335,12 +349,11 @@ async fn probe_single_provider(
             None,
         );
     };
-    let model_id = model.id.to_string();
+    let model_id = model.model.id().to_string();
 
-    let outcome = run_basic_model_probe_with_timeout(
-        &model_id,
-        &provider,
-        client,
+    let outcome = probe::run_basic_probe(
+        &client,
+        &format!("{provider}/{model_id}"),
         EXTERNAL_SERVICE_PROBE_TIMEOUT,
     )
     .await;
@@ -723,6 +736,82 @@ fn docker_sandbox_probe_check(probe: Result<(), String>) -> CheckResult {
     }
 }
 
+async fn check_kubernetes_sandbox(state: &AppState) -> CheckResult {
+    check_kubernetes_sandbox_with_probe(
+        state
+            .server_settings()
+            .server
+            .sandbox
+            .providers
+            .kubernetes
+            .enabled,
+        || async {
+            KubernetesSandboxProvider::check_cluster()
+                .await
+                .map_err(|err| err.display_with_causes())
+        },
+        DOCKER_PROBE_TIMEOUT,
+    )
+    .await
+}
+
+async fn check_kubernetes_sandbox_with_probe<F, Fut>(
+    enabled: bool,
+    probe: F,
+    probe_timeout: Duration,
+) -> CheckResult
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<String, String>>,
+{
+    if !enabled {
+        return CheckResult {
+            name:        "Kubernetes Sandbox".to_string(),
+            status:      CheckStatus::Pass,
+            summary:     "disabled".to_string(),
+            details:     vec![CheckDetail::new(
+                "server.sandbox.providers.kubernetes.enabled = false".to_string(),
+            )],
+            remediation: None,
+        };
+    }
+
+    let probe = timeout(probe_timeout, probe()).await;
+    match probe {
+        Ok(result) => kubernetes_sandbox_probe_check(result),
+        Err(_) => {
+            kubernetes_sandbox_probe_check(Err("Kubernetes API server probe timed out".to_string()))
+        }
+    }
+}
+
+fn kubernetes_sandbox_probe_check(probe: Result<String, String>) -> CheckResult {
+    match probe {
+        Ok(version) => CheckResult {
+            name:        "Kubernetes Sandbox".to_string(),
+            status:      CheckStatus::Pass,
+            summary:     "cluster reachable".to_string(),
+            details:     vec![CheckDetail::new(format!(
+                "Kubernetes API server {version} responded"
+            ))],
+            remediation: None,
+        },
+        Err(err) => CheckResult {
+            name:        "Kubernetes Sandbox".to_string(),
+            status:      CheckStatus::Error,
+            summary:     "cluster unavailable".to_string(),
+            details:     vec![CheckDetail::new(err)],
+            remediation: Some(
+                "Verify kubeconfig or in-cluster ServiceAccount access, then run \
+                 `kubectl auth can-i create pods; kubectl auth can-i create pods/exec` for the \
+                 target namespace, or disable the provider with \
+                 `server.sandbox.providers.kubernetes.enabled = false`."
+                    .to_string(),
+            ),
+        },
+    }
+}
+
 async fn check_cloud_sandbox(state: &AppState) -> CheckResult {
     let api_key = match diagnostic_secret(state, "Cloud Sandbox", EnvVars::DAYTONA_API_KEY).await {
         Ok(value) => value,
@@ -836,6 +925,15 @@ fn check_storage_dir_path(path: &std::path::Path) -> CheckResult {
 }
 
 async fn check_web_search(state: &AppState) -> CheckResult {
+    let searxng_url =
+        match diagnostic_secret(state, WEB_SEARCH_CHECK_NAME, EnvVars::SEARXNG_URL).await {
+            Ok(value) => value,
+            Err(result) => return result,
+        };
+    if let Some(base_url) = searxng_url {
+        return check_searxng_search(base_url).await;
+    }
+
     let brave_api_key = match diagnostic_secret(
         state,
         WEB_SEARCH_CHECK_NAME,
@@ -865,12 +963,34 @@ async fn check_web_search(state: &AppState) -> CheckResult {
         summary:     "optional, not configured".to_string(),
         details:     Vec::new(),
         remediation: Some(
-            "Run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY` to enable web search".to_string(),
+            "Run `fabro secret set SEARXNG_URL <url>` (self-hosted SearXNG), or `fabro secret set BRAVE_SEARCH_API_KEY` / `fabro secret set VENICE_API_KEY` to enable web search".to_string(),
         ),
     }
 }
 
 const WEB_SEARCH_CHECK_NAME: &str = "Web Search";
+
+async fn check_searxng_search(base_url: String) -> CheckResult {
+    let http = match http_client_or_check(WEB_SEARCH_CHECK_NAME, CheckStatus::Warning) {
+        Ok(http) => http,
+        Err(result) => return result,
+    };
+
+    let probe = timeout(EXTERNAL_SERVICE_PROBE_TIMEOUT, async move {
+        http.get(format!("{}/search", base_url.trim_end_matches('/')))
+            .query(&[("q", "test"), ("format", "json")])
+            .send()
+            .await
+            .map_err(anyhow::Error::new)
+    })
+    .await;
+
+    match_web_search_probe_with_remediation(
+        probe,
+        "searxng",
+        "Check the SearXNG instance and SEARXNG_URL".to_string(),
+    )
+}
 
 async fn check_brave_search(api_key: String) -> CheckResult {
     let http = match http_client_or_check(WEB_SEARCH_CHECK_NAME, CheckStatus::Warning) {
@@ -918,6 +1038,19 @@ fn match_web_search_probe(
     provider: &str,
     secret_name: &str,
 ) -> CheckResult {
+    match_web_search_probe_with_remediation(
+        probe,
+        provider,
+        format!("Check {secret_name} and network connectivity"),
+    )
+}
+
+fn match_web_search_probe_with_remediation(
+    probe: Result<anyhow::Result<Response>, Elapsed>,
+    provider: &str,
+    remediation: String,
+) -> CheckResult {
+    let remediation = Some(remediation);
     match probe {
         Ok(Ok(response)) if response.status().is_success() => CheckResult {
             name:        WEB_SEARCH_CHECK_NAME.to_string(),
@@ -927,27 +1060,27 @@ fn match_web_search_probe(
             remediation: None,
         },
         Ok(Ok(response)) => CheckResult {
-            name:        WEB_SEARCH_CHECK_NAME.to_string(),
-            status:      CheckStatus::Warning,
-            summary:     format!("{provider}: HTTP {}", response.status()),
-            details:     Vec::new(),
-            remediation: Some(format!("Check {secret_name} and network connectivity")),
+            name: WEB_SEARCH_CHECK_NAME.to_string(),
+            status: CheckStatus::Warning,
+            summary: format!("{provider}: HTTP {}", response.status()),
+            details: Vec::new(),
+            remediation,
         },
         Ok(Err(err)) => CheckResult {
-            name:        WEB_SEARCH_CHECK_NAME.to_string(),
-            status:      CheckStatus::Warning,
-            summary:     format!("{provider}: connectivity error"),
-            details:     vec![CheckDetail::new(format!("{err:#}"))],
-            remediation: Some(format!("Check {secret_name} and network connectivity")),
+            name: WEB_SEARCH_CHECK_NAME.to_string(),
+            status: CheckStatus::Warning,
+            summary: format!("{provider}: connectivity error"),
+            details: vec![CheckDetail::new(format!("{err:#}"))],
+            remediation,
         },
         Err(_) => CheckResult {
-            name:        WEB_SEARCH_CHECK_NAME.to_string(),
-            status:      CheckStatus::Warning,
-            summary:     format!("{provider}: timeout"),
-            details:     vec![CheckDetail::new(format!(
+            name: WEB_SEARCH_CHECK_NAME.to_string(),
+            status: CheckStatus::Warning,
+            summary: format!("{provider}: timeout"),
+            details: vec![CheckDetail::new(format!(
                 "Web Search ({provider}) probe timed out"
             ))],
-            remediation: Some(format!("Check {secret_name} and network connectivity")),
+            remediation,
         },
     }
 }
@@ -1039,7 +1172,7 @@ mod tests {
 
     use fabro_config::RunLayer;
     use fabro_vault::SecretType;
-    use httpmock::Method::POST;
+    use httpmock::Method::{GET, POST};
     use httpmock::MockServer;
     use serde_json::json;
 
@@ -1108,8 +1241,8 @@ mod tests {
             "expected remediation to start with provider name, got: {remediation}"
         );
         assert!(
-            remediation.contains("Authentication"),
-            "expected typed Display 'Authentication' in remediation, got: {remediation}"
+            remediation.contains("invalid api key"),
+            "expected the provider's message in remediation, got: {remediation}"
         );
         assert!(!result.details.is_empty(), "details should be populated");
         assert!(
@@ -1341,7 +1474,7 @@ enabled = false
         assert_eq!(
             result.remediation.as_deref(),
             Some(
-                "Run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY` to enable web search"
+                "Run `fabro secret set SEARXNG_URL <url>` (self-hosted SearXNG), or `fabro secret set BRAVE_SEARCH_API_KEY` / `fabro secret set VENICE_API_KEY` to enable web search"
             )
         );
     }
@@ -1362,7 +1495,7 @@ enabled = false
         assert_eq!(
             result.remediation.as_deref(),
             Some(
-                "Run `fabro secret set BRAVE_SEARCH_API_KEY` or `fabro secret set VENICE_API_KEY` to enable web search"
+                "Run `fabro secret set SEARXNG_URL <url>` (self-hosted SearXNG), or `fabro secret set BRAVE_SEARCH_API_KEY` / `fabro secret set VENICE_API_KEY` to enable web search"
             )
         );
     }
@@ -1394,6 +1527,73 @@ enabled = false
         assert_eq!(result.name, "Web Search");
         assert_eq!(result.status, CheckStatus::Warning);
         assert_eq!(result.summary, "venice: connectivity error");
+    }
+
+    #[tokio::test]
+    async fn check_web_search_prefers_searxng_over_paid_keys() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/search")
+                .query_param("q", "test")
+                .query_param("format", "json");
+            then.status(200)
+                .json_body(serde_json::json!({"results": []}));
+        });
+        // A newline key would fail any brave probe locally, so a passing
+        // searxng result proves searxng is checked first.
+        let state = TestAppStateBuilder::new()
+            .vault_entries([
+                (EnvVars::SEARXNG_URL, format!("{}/", server.base_url())),
+                (EnvVars::BRAVE_SEARCH_API_KEY, "invalid\n".to_string()),
+            ])
+            .build();
+
+        let result = check_web_search(&state).await;
+
+        mock.assert();
+        assert_eq!(result.name, "Web Search");
+        assert_eq!(result.status, CheckStatus::Pass);
+        assert_eq!(result.summary, "searxng: configured and reachable");
+    }
+
+    #[tokio::test]
+    async fn check_web_search_reports_searxng_http_403_with_remediation() {
+        let server = MockServer::start();
+        let _mock = server.mock(|when, then| {
+            when.method(GET).path("/search");
+            then.status(403).body("forbidden");
+        });
+        let state = TestAppStateBuilder::new()
+            .vault_entries([(EnvVars::SEARXNG_URL, server.base_url())])
+            .build();
+
+        let result = check_web_search(&state).await;
+
+        assert_eq!(result.name, "Web Search");
+        assert_eq!(result.status, CheckStatus::Warning);
+        assert_eq!(result.summary, "searxng: HTTP 403 Forbidden");
+        assert_eq!(
+            result.remediation.as_deref(),
+            Some("Check the SearXNG instance and SEARXNG_URL")
+        );
+    }
+
+    #[tokio::test]
+    async fn check_web_search_reports_searxng_connectivity_error() {
+        let state = TestAppStateBuilder::new()
+            .vault_entries([(EnvVars::SEARXNG_URL, "invalid\n")])
+            .build();
+
+        let result = check_web_search(&state).await;
+
+        assert_eq!(result.name, "Web Search");
+        assert_eq!(result.status, CheckStatus::Warning);
+        assert_eq!(result.summary, "searxng: connectivity error");
+        assert_eq!(
+            result.remediation.as_deref(),
+            Some("Check the SearXNG instance and SEARXNG_URL")
+        );
     }
 
     #[tokio::test]

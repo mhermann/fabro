@@ -1,6 +1,8 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+use fabro_types::tool_call_arguments;
+
 use crate::history::History;
 use crate::types::Message;
 
@@ -18,7 +20,7 @@ fn extract_signatures_from_assistant(turn: &Message) -> Vec<u64> {
     };
     tool_calls
         .iter()
-        .map(|tc| tool_call_signature(&tc.name, &tc.arguments))
+        .map(|tc| tool_call_signature(&tc.name, &tool_call_arguments(tc)))
         .collect()
 }
 
@@ -97,16 +99,16 @@ fn is_repeating_pattern(signatures: &[u64], pattern_len: usize) -> bool {
 mod tests {
     use std::time::SystemTime;
 
-    use fabro_llm::types::{TokenCounts, ToolCall};
+    use lithos_llm::types::{TokenCounts, ToolCall};
 
     use super::*;
 
     fn assistant_with_tool(name: &str, args: serde_json::Value) -> Message {
         Message::Assistant {
             content:        String::new(),
-            tool_calls:     vec![ToolCall::new("call_1", name, args)],
+            tool_calls:     vec![ToolCall::function("call_1", name, args)],
             provider_parts: vec![],
-            usage:          Box::new(TokenCounts::default()),
+            usage:          TokenCounts::default(),
             response_id:    "resp".into(),
             timestamp:      SystemTime::now(),
         }

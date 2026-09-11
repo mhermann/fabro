@@ -2472,11 +2472,13 @@ pub async fn twin_openai() -> &'static TwinOpenAi {
             let base_url = format!("http://127.0.0.1:{}/v1", addr.port());
 
             let config = TwinConfig {
-                bind_addr:    addr,
+                bind_addr: addr,
                 require_auth: true,
                 enable_admin: true,
+                ..TwinConfig::from_lookup(&|_| None).expect("twin-openai defaults should load")
             };
-            let app = twin_openai::build_app_with_config(config);
+            let app =
+                twin_openai::build_app_with_config(config).expect("twin-openai app should build");
 
             tokio::spawn(async move {
                 axum::serve(listener, app).await.expect("twin-openai serve");

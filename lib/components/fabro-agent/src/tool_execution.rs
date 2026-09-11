@@ -1,8 +1,9 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use fabro_llm::types::{ToolCall, ToolResult};
+use fabro_types::{tool_call_arguments, tool_result_from_json};
 use futures::future;
+use lithos_llm::types::{ContentPart, ToolCall, ToolDefinitionKind, ToolInput, ToolResult};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -108,7 +109,7 @@ async fn execute_tool_calls_sequential(
     let mut results = Vec::new();
     for tc in tool_calls {
         if cancel_token.is_cancelled() {
-            results.push(ToolResult::error(tc.id.clone(), "Cancelled"));
+            results.push(error_result(&tc.id, "Cancelled"));
             continue;
         }
 
@@ -218,7 +219,7 @@ async fn execute_question_tool_round(
 
     for (index, tc) in tool_calls.iter().enumerate() {
         if cancel_token.is_cancelled() {
-            results.push(ToolResult::error(tc.id.clone(), "Cancelled"));
+            results.push(error_result(&tc.id, "Cancelled"));
             continue;
         }
 
@@ -281,7 +282,7 @@ fn finish_error_result(
     config: &SessionOptions,
     message: &str,
 ) -> ToolResult {
-    let retained = retain_tool_result(ToolResult::error(&tc.id, message), None);
+    let retained = retain_tool_result(error_result(&tc.id, message), None);
     emit_tool_call_result(
         emitter,
         session_id,
@@ -292,11 +293,30 @@ fn finish_error_result(
     truncate_tool_result(&retained.result, &tc.name, config)
 }
 
+/// A tool result carrying one error message.
+fn error_result(tool_call_id: &str, message: impl Into<String>) -> ToolResult {
+    tool_result_from_json(
+        tool_call_id,
+        serde_json::Value::String(message.into()),
+        true,
+    )
+}
+
+/// A successful tool result carrying one output value.
+fn success_result(tool_call_id: &str, output: serde_json::Value) -> ToolResult {
+    tool_result_from_json(tool_call_id, output, false)
+}
+
+/// The single JSON value a tool result carries: a string for text output.
+fn result_output(result: &ToolResult) -> serde_json::Value {
+    fabro_types::tool_result_to_json(result)
+}
+
 fn emit_tool_call_started(emitter: &Emitter, session_id: &str, tc: &ToolCall) {
     emitter.emit(session_id.to_owned(), AgentEvent::ToolCallStarted {
         tool_name:    tc.name.clone(),
         tool_call_id: tc.id.clone(),
-        arguments:    tc.arguments.clone(),
+        arguments:    tool_call_arguments(tc),
     });
 }
 
@@ -307,17 +327,18 @@ fn emit_tool_call_result(
     result: &ToolResult,
     output_stats: OutputCaptureStats,
 ) {
+    let output = result_output(result);
     emitter.emit(session_id.to_owned(), AgentEvent::ToolCallOutputDelta {
-        delta: result.content.to_string(),
+        delta: output.to_string(),
     });
     emitter.emit(session_id.to_owned(), AgentEvent::ToolCallCompleted {
-        tool_name:             tc.name.clone(),
-        tool_call_id:          tc.id.clone(),
-        output:                result.content.clone(),
-        is_error:              result.is_error,
+        tool_name: tc.name.clone(),
+        tool_call_id: tc.id.clone(),
+        output,
+        is_error: result.is_error,
         output_bytes_observed: output_stats.observed_bytes,
         output_bytes_retained: output_stats.retained_bytes,
-        output_bytes_omitted:  output_stats.omitted_bytes,
+        output_bytes_omitted: output_stats.omitted_bytes,
     });
 }
 
@@ -424,7 +445,7 @@ async fn execute_and_emit_one_tool_with_lookup(
     if let Some(hooks) = tool_hooks {
         debug!(tool = %tc.name, hook_event = "pre_tool_use", "Calling tool hook");
         let start = std::time::Instant::now();
-        let decision = hooks.pre_tool_use(&tc.name, &tc.arguments).await;
+        let decision = hooks.pre_tool_use(&tc.name, &tool_call_arguments(tc)).await;
         let elapsed = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
         debug!(tool = %tc.name, hook_event = "pre_tool_use", ?decision, duration_ms = elapsed, "Tool hook complete");
 
@@ -452,11 +473,12 @@ async fn execute_and_emit_one_tool_with_lookup(
 
     // Post-tool-use hooks
     if let Some(hooks) = tool_hooks {
+        let output = result_output(&result);
         let fallback;
-        let content_str = if let Some(s) = result.content.as_str() {
+        let content_str = if let Some(s) = output.as_str() {
             s
         } else {
-            fallback = result.content.to_string();
+            fallback = output.to_string();
             &fallback
         };
         if result.is_error {
@@ -485,8 +507,8 @@ fn retain_tool_result(
     mut result: ToolResult,
     previous_stats: Option<OutputCaptureStats>,
 ) -> RetainedToolResult {
-    let output_stats = match &mut result.content {
-        serde_json::Value::String(output) => {
+    let output_stats = match result.content.as_mut_slice() {
+        [ContentPart::Text { text: output }] => {
             let previously_omitted = previous_stats.map_or(0, |stats| stats.omitted_bytes);
             let previewed =
                 preview_tool_output(output, MAX_RETAINED_TOOL_OUTPUT_BYTES, previously_omitted);
@@ -496,7 +518,7 @@ fn retain_tool_result(
             }
             stats
         }
-        other => OutputCaptureStats::complete(serialized_json_bytes(other)),
+        _ => OutputCaptureStats::complete(serialized_json_bytes(&result_output(&result))),
     };
 
     RetainedToolResult {
@@ -528,14 +550,29 @@ async fn execute_one_tool(
 ) -> ExecutedToolResult {
     match registered_tool {
         Some(tool) => {
-            if tc.tool_type != "custom" {
-                if let Err(validation_error) =
-                    validate_tool_args(&tool.definition.parameters, &tc.arguments)
-                {
-                    return ExecutedToolResult {
-                        result:       ToolResult::error(&tc.id, validation_error),
-                        output_stats: None,
-                    };
+            let arguments = match &tc.input {
+                ToolInput::Function(arguments) => match arguments.json() {
+                    Ok(value) => value.clone(),
+                    Err(err) => {
+                        return ExecutedToolResult {
+                            result:       error_result(
+                                &tc.id,
+                                format!("Tool arguments are not valid JSON: {err}"),
+                            ),
+                            output_stats: None,
+                        };
+                    }
+                },
+                _ => tool_call_arguments(tc),
+            };
+            if matches!(tc.input, ToolInput::Function(_)) {
+                if let ToolDefinitionKind::Function { input_schema } = &tool.definition.kind {
+                    if let Err(validation_error) = validate_tool_args(input_schema, &arguments) {
+                        return ExecutedToolResult {
+                            result:       error_result(&tc.id, validation_error),
+                            output_stats: None,
+                        };
+                    }
                 }
             }
 
@@ -555,15 +592,15 @@ async fn execute_one_tool(
                 tool_call_id: Some(tc.id.clone()),
                 agent_event_emitter,
             };
-            let execution = (tool.executor)(tc.arguments.clone(), ctx);
+            let execution = (tool.executor)(arguments, ctx);
             let result = match question_tools::scope_agent_tool_runtime(
                 agent_tool_runtime.clone(),
                 execution,
             )
             .await
             {
-                Ok(output) => ToolResult::success(&tc.id, serde_json::json!(output)),
-                Err(err) => ToolResult::error(&tc.id, err),
+                Ok(output) => success_result(&tc.id, serde_json::Value::String(output)),
+                Err(err) => error_result(&tc.id, err),
             };
             ExecutedToolResult {
                 result,
@@ -571,7 +608,7 @@ async fn execute_one_tool(
             }
         }
         None => ExecutedToolResult {
-            result:       ToolResult::error(&tc.id, format!("Unknown tool: {}", tc.name)),
+            result:       error_result(&tc.id, format!("Unknown tool: {}", tc.name)),
             output_stats: None,
         },
     }
@@ -583,19 +620,20 @@ fn truncate_tool_result(
     tool_name: &str,
     config: &SessionOptions,
 ) -> ToolResult {
-    let truncated_content = match &result.content {
-        serde_json::Value::String(s) => {
-            serde_json::json!(truncate_tool_output(s, tool_name, config))
+    let content = match result.content.as_slice() {
+        [ContentPart::Text { text }] => {
+            vec![ContentPart::Text {
+                text: truncate_tool_output(text, tool_name, config),
+            }]
         }
-        other => other.clone(),
+        other => other.to_vec(),
     };
 
     ToolResult {
-        tool_call_id:     result.tool_call_id.clone(),
-        content:          truncated_content,
-        is_error:         result.is_error,
-        image_data:       result.image_data.clone(),
-        image_media_type: result.image_media_type.clone(),
+        tool_call_id: result.tool_call_id.clone(),
+        name: result.name.clone(),
+        content,
+        is_error: result.is_error,
     }
 }
 
@@ -634,9 +672,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use fabro_llm::types::{ToolCall, ToolDefinition};
-    use fabro_model::AgentProfileKind;
     use fabro_types::run_event::{AgentToolCompletedProps, MAX_RUN_EVENT_BODY_BYTES};
+    use fabro_types::{AgentProfileKind, tool_result_to_json};
+    use lithos_llm::types::{ToolCall, ToolDefinition};
     use tokio::sync::broadcast;
 
     use super::*;
@@ -681,17 +719,17 @@ mod tests {
 
     fn make_echo_tool() -> RegisteredTool {
         RegisteredTool {
-            definition: ToolDefinition {
-                name:        "echo".to_string(),
-                description: "Echo input".to_string(),
-                parameters:  serde_json::json!({
+            definition: ToolDefinition::function(
+                "echo",
+                "Echo input",
+                serde_json::json!({
                     "type": "object",
                     "properties": {
                         "text": {"type": "string"}
                     },
                     "required": ["text"]
                 }),
-            },
+            ),
             executor:   Arc::new(|args: serde_json::Value, _ctx: ToolContext| {
                 Box::pin(async move {
                     let text = args["text"].as_str().unwrap_or("").to_string();
@@ -704,11 +742,11 @@ mod tests {
 
     fn make_fail_tool() -> RegisteredTool {
         RegisteredTool {
-            definition: ToolDefinition {
-                name:        "fail_tool".to_string(),
-                description: "Always fails".to_string(),
-                parameters:  serde_json::json!({}),
-            },
+            definition: ToolDefinition::function(
+                "fail_tool",
+                "Always fails",
+                serde_json::json!({}),
+            ),
             executor:   Arc::new(|_args: serde_json::Value, _ctx: ToolContext| {
                 Box::pin(async move { Err("tool failed".to_string()) })
             }),
@@ -717,14 +755,7 @@ mod tests {
     }
 
     fn make_tool_call(name: &str, id: &str, args: serde_json::Value) -> ToolCall {
-        ToolCall {
-            id:                id.to_string(),
-            name:              name.to_string(),
-            tool_type:         "function".to_string(),
-            arguments:         args,
-            raw_arguments:     None,
-            provider_metadata: None,
-        }
+        ToolCall::function(id, name, args)
     }
 
     struct StubQuestionRuntime;
@@ -793,8 +824,7 @@ mod tests {
         assert_eq!(results[1].tool_call_id, "call_echo");
         assert!(results[1].is_error);
         assert!(
-            results[1]
-                .content
+            tool_result_to_json(&results[1])
                 .as_str()
                 .unwrap()
                 .contains("human-question tools must run alone")
@@ -838,8 +868,7 @@ mod tests {
         assert!(!results[0].is_error);
         assert!(results[1].is_error);
         assert!(
-            results[1]
-                .content
+            tool_result_to_json(&results[1])
                 .as_str()
                 .unwrap()
                 .contains("Combine all questions into a single questions[] batch")
@@ -922,8 +951,8 @@ mod tests {
         .await;
 
         assert!(result.is_error);
-        let content = result.content.as_str().unwrap();
-        assert!(content.contains("blocked by hook"));
+        let content = tool_result_to_json(&result);
+        assert!(content.as_str().unwrap().contains("blocked by hook"));
     }
 
     #[tokio::test]
@@ -953,7 +982,7 @@ mod tests {
         .await;
 
         assert!(!result.is_error);
-        let content = result.content.to_string();
+        let content = tool_result_to_json(&result).to_string();
         assert!(content.contains("echo: hello"));
     }
 
@@ -980,7 +1009,8 @@ mod tests {
         )
         .await;
 
-        let result_output = result.content.as_str().expect("string tool output");
+        let result_output = tool_result_to_json(&result);
+        let result_output = result_output.as_str().expect("string tool output");
         assert!(result_output.len() <= MAX_RETAINED_TOOL_OUTPUT_BYTES);
         assert!(result_output.starts_with("Warning: truncated output"));
         assert!(result_output.contains("bytes omitted"));
@@ -1210,7 +1240,7 @@ mod tests {
         .await;
 
         assert!(!result.is_error);
-        let content = result.content.to_string();
+        let content = tool_result_to_json(&result).to_string();
         assert!(content.contains("echo: hello"));
     }
 
@@ -1220,11 +1250,11 @@ mod tests {
         let mut registry = ToolRegistry::new();
         let executions_for_tool = Arc::clone(&executions);
         registry.register(RegisteredTool {
-            definition: ToolDefinition {
-                name:        "write_file".to_string(),
-                description: "Writes a file".to_string(),
-                parameters:  serde_json::json!({"type": "object"}),
-            },
+            definition: ToolDefinition::function(
+                "write_file",
+                "Writes a file",
+                serde_json::json!({"type": "object"}),
+            ),
             executor:   Arc::new(move |_args: serde_json::Value, _ctx: ToolContext| {
                 let executions = Arc::clone(&executions_for_tool);
                 Box::pin(async move {
@@ -1260,8 +1290,7 @@ mod tests {
 
         assert!(result.is_error);
         assert!(
-            result
-                .content
+            tool_result_to_json(&result)
                 .as_str()
                 .unwrap_or_default()
                 .contains("denied by tool access policy")
@@ -1275,11 +1304,11 @@ mod tests {
         let mut registry = ToolRegistry::new();
         let executions_for_tool = Arc::clone(&executions);
         registry.register(RegisteredTool {
-            definition: ToolDefinition {
-                name:        "shell".to_string(),
-                description: "Runs a command".to_string(),
-                parameters:  serde_json::json!({"type": "object"}),
-            },
+            definition: ToolDefinition::function(
+                "shell",
+                "Runs a command",
+                serde_json::json!({"type": "object"}),
+            ),
             executor:   Arc::new(move |_args: serde_json::Value, _ctx: ToolContext| {
                 let executions = Arc::clone(&executions_for_tool);
                 Box::pin(async move {
@@ -1315,8 +1344,7 @@ mod tests {
 
         assert!(result.is_error);
         assert!(
-            result
-                .content
+            tool_result_to_json(&result)
                 .as_str()
                 .unwrap_or_default()
                 .contains("requires approval")
@@ -1394,9 +1422,12 @@ mod tests {
 
         assert!(result.is_error);
         assert!(
-            result.content.as_str().unwrap().contains("Exit code: 7"),
+            tool_result_to_json(&result)
+                .as_str()
+                .unwrap()
+                .contains("Exit code: 7"),
             "got: {}",
-            result.content
+            tool_result_to_json(&result)
         );
     }
 
@@ -1554,12 +1585,16 @@ mod tests {
 
     #[test]
     fn truncation_preserves_tool_call_id_and_error_state() {
-        let result = ToolResult::error("call_1", "x".repeat(60_000));
+        let result = tool_result_from_json(
+            "call_1",
+            serde_json::Value::String("x".repeat(60_000)),
+            true,
+        );
 
         let truncated = truncate_tool_result(&result, "shell", &SessionOptions::default());
 
         assert_eq!(truncated.tool_call_id, "call_1");
         assert!(truncated.is_error);
-        assert!(truncated.content.as_str().unwrap().len() < 60_000);
+        assert!(tool_result_to_json(&truncated).as_str().unwrap().len() < 60_000);
     }
 }

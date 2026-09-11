@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroU32;
 
 use chrono::{DateTime, Utc};
-use fabro_model::{Catalog, ReasoningEffort, Speed};
+use lithos_llm::types::{ReasoningEffort, Speed};
 use strum::{Display, EnumString, IntoStaticStr};
 
 use crate::run_event::{AgentSessionActivatedProps, StagePromptProps};
@@ -605,29 +605,6 @@ impl StageProjection {
         self.state
     }
 
-    /// This stage's token counts with a cost attached.
-    ///
-    /// A provider-reported cost always wins. Otherwise the catalog prices the
-    /// recorded tokens for the stage's model. The stored counts pass through
-    /// untouched when there is no catalog, no model, or no price for that
-    /// model. Empty usage also passes through untouched. These cases leave
-    /// `total_usd_micros` as `None` rather than zero.
-    #[must_use]
-    pub fn billed_usage(&self, catalog: Option<&Catalog>) -> Cow<'_, BilledTokenCounts> {
-        if self.usage.total_usd_micros.is_some() || self.usage.is_zero() {
-            return Cow::Borrowed(&self.usage);
-        }
-        let (Some(catalog), Some(model)) = (catalog, self.model.as_ref()) else {
-            return Cow::Borrowed(&self.usage);
-        };
-        let Some(total_usd_micros) = catalog.price_tokens(model, &self.usage.token_counts()) else {
-            return Cow::Borrowed(&self.usage);
-        };
-        let mut usage = self.usage.clone();
-        usage.total_usd_micros = Some(total_usd_micros);
-        Cow::Owned(usage)
-    }
-
     /// Live wall-clock time in milliseconds.
     ///
     /// While the stage is non-terminal (`Pending`, `Running`, or `Retrying`),
@@ -1119,11 +1096,10 @@ mod iter_stages_tests {
     use std::num::NonZeroU32;
 
     use chrono::Utc;
-    use fabro_model::{Catalog, ModelRef, ProviderId};
     use serde_json::json;
 
     use super::RunProjection;
-    use crate::{AgentControlState, BilledTokenCounts, StageProjection, test_support};
+    use crate::{AgentControlState, StageProjection, test_support};
 
     fn seq(n: u32) -> NonZeroU32 {
         NonZeroU32::new(n).unwrap()
@@ -1230,77 +1206,6 @@ mod iter_stages_tests {
             assert_eq!(order, vec!["build@1", "verify@1", "verify@2"]);
         }
     }
-
-    fn priced_stage(total_usd_micros: Option<i64>) -> StageProjection {
-        let mut stage = StageProjection::new(seq(1));
-        stage.usage = BilledTokenCounts {
-            input_tokens: 500_000,
-            output_tokens: 125_000,
-            total_tokens: 625_000,
-            total_usd_micros,
-            ..BilledTokenCounts::default()
-        };
-        stage.model = Some(ModelRef {
-            provider: ProviderId::openai(),
-            model_id: "gpt-5.4".into(),
-            speed:    None,
-        });
-        stage
-    }
-
-    #[test]
-    fn billed_usage_prices_uncosted_tokens_from_the_catalog() {
-        let stage = priced_stage(None);
-
-        assert_eq!(stage.billed_usage(None).total_usd_micros, None);
-        let priced = stage.billed_usage(Some(Catalog::builtin()));
-        assert!(
-            priced.total_usd_micros.is_some_and(|cost| cost > 0),
-            "expected a catalog price, got {:?}",
-            priced.total_usd_micros
-        );
-        // Pricing only fills in the cost; the token buckets pass through.
-        assert_eq!(priced.input_tokens, 500_000);
-        assert_eq!(priced.output_tokens, 125_000);
-    }
-
-    #[test]
-    fn billed_usage_keeps_a_provider_reported_cost_over_the_catalog_estimate() {
-        let stage = priced_stage(Some(42));
-
-        assert_eq!(
-            stage
-                .billed_usage(Some(Catalog::builtin()))
-                .total_usd_micros,
-            Some(42)
-        );
-    }
-
-    #[test]
-    fn billed_usage_leaves_a_modelless_stage_uncosted() {
-        let mut stage = priced_stage(None);
-        stage.model = None;
-
-        assert_eq!(
-            stage
-                .billed_usage(Some(Catalog::builtin()))
-                .total_usd_micros,
-            None
-        );
-    }
-
-    #[test]
-    fn billed_usage_leaves_zero_tokens_uncosted() {
-        let mut stage = priced_stage(None);
-        stage.usage = BilledTokenCounts::default();
-
-        assert_eq!(
-            stage
-                .billed_usage(Some(Catalog::builtin()))
-                .total_usd_micros,
-            None
-        );
-    }
 }
 
 #[cfg(test)]
@@ -1334,11 +1239,7 @@ mod live_timing_tests {
         StageInferenceProjection {
             session_id: "session-1".to_string(),
             started_at,
-            requested_model: ModelRef {
-                provider: "anthropic".parse().unwrap(),
-                model_id: "claude-sonnet-5".into(),
-                speed:    None,
-            },
+            requested_model: ModelRef::new("anthropic".into(), "claude-sonnet-5".into()),
             first_output_at: None,
             first_output_kind: None,
             retries: 0,

@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use fabro_llm::types::{ToolCall, ToolResult};
+use fabro_types::{tool_call_arguments, tool_result_to_json};
+use lithos_llm::types::{ToolCall, ToolResult};
 
 use crate::native_tool::NativeTool;
 use crate::tool_permissions::canonical_tool_name;
@@ -71,24 +72,25 @@ impl FileTracker {
             }
             match canonical_tool_name(&tc.name) {
                 name if name == NativeTool::ReadFile.canonical_name() => {
-                    if let Some(path) = file_path(&tc.arguments) {
+                    if let Some(path) = file_path(&tool_call_arguments(tc)) {
                         self.record_read(path);
                     }
                 }
                 name if name == NativeTool::WriteFile.canonical_name() => {
-                    if let Some(path) = file_path(&tc.arguments) {
+                    if let Some(path) = file_path(&tool_call_arguments(tc)) {
                         self.record_write(path);
                     }
                 }
                 name if name == NativeTool::EditFile.canonical_name() => {
-                    if let Some(path) = file_path(&tc.arguments) {
+                    if let Some(path) = file_path(&tool_call_arguments(tc)) {
                         self.record_edit(path);
                     }
                 }
                 name if name == NativeTool::ApplyPatch.canonical_name() => {
-                    let content = match result.content.as_str() {
+                    let output = tool_result_to_json(result);
+                    let content = match output.as_str() {
                         Some(s) => s.to_string(),
-                        None => result.content.to_string(),
+                        None => output.to_string(),
                     };
                     for line in content.lines() {
                         let line = line.trim();
@@ -107,6 +109,8 @@ impl FileTracker {
 
 #[cfg(test)]
 mod tests {
+    use fabro_types::tool_result_from_json;
+
     use super::*;
 
     #[test]
@@ -137,14 +141,15 @@ mod tests {
     #[test]
     fn record_from_tool_calls_read_file() {
         let mut tracker = FileTracker::default();
-        let tool_calls = vec![ToolCall::new(
+        let tool_calls = vec![ToolCall::function(
             "tc1",
             "read_file",
             serde_json::json!({"file_path": "/tmp/foo.rs"}),
         )];
-        let results = vec![ToolResult::success(
+        let results = vec![tool_result_from_json(
             "tc1",
             serde_json::json!("file contents"),
+            false,
         )];
         tracker.record_from_tool_calls(&tool_calls, &results);
         assert_eq!(tracker.render(), "- /tmp/foo.rs (read)\n");
@@ -153,12 +158,12 @@ mod tests {
     #[test]
     fn record_from_tool_calls_write_file() {
         let mut tracker = FileTracker::default();
-        let tool_calls = vec![ToolCall::new(
+        let tool_calls = vec![ToolCall::function(
             "tc1",
             "write_file",
             serde_json::json!({"file_path": "/tmp/bar.rs", "content": "hello"}),
         )];
-        let results = vec![ToolResult::success("tc1", serde_json::json!("ok"))];
+        let results = vec![tool_result_from_json("tc1", serde_json::json!("ok"), false)];
         tracker.record_from_tool_calls(&tool_calls, &results);
         assert_eq!(tracker.render(), "- /tmp/bar.rs (written)\n");
     }
@@ -166,12 +171,12 @@ mod tests {
     #[test]
     fn record_from_tool_calls_edit_file() {
         let mut tracker = FileTracker::default();
-        let tool_calls = vec![ToolCall::new(
+        let tool_calls = vec![ToolCall::function(
             "tc1",
             "edit_file",
             serde_json::json!({"file_path": "/tmp/baz.rs"}),
         )];
-        let results = vec![ToolResult::success("tc1", serde_json::json!("ok"))];
+        let results = vec![tool_result_from_json("tc1", serde_json::json!("ok"), false)];
         tracker.record_from_tool_calls(&tool_calls, &results);
         assert_eq!(tracker.render(), "- /tmp/baz.rs (edited)\n");
     }
@@ -180,17 +185,17 @@ mod tests {
     fn record_from_kimi_tool_calls_uses_path_argument() {
         let mut tracker = FileTracker::default();
         let tool_calls = vec![
-            ToolCall::new("tc1", "Read", serde_json::json!({"path": "/tmp/a.rs"})),
-            ToolCall::new(
+            ToolCall::function("tc1", "Read", serde_json::json!({"path": "/tmp/a.rs"})),
+            ToolCall::function(
                 "tc2",
                 "Write",
                 serde_json::json!({"path": "/tmp/b.rs", "content": "x"}),
             ),
-            ToolCall::new("tc3", "Edit", serde_json::json!({"path": "/tmp/c.rs"})),
+            ToolCall::function("tc3", "Edit", serde_json::json!({"path": "/tmp/c.rs"})),
         ];
         let results = ["tc1", "tc2", "tc3"]
             .into_iter()
-            .map(|id| ToolResult::success(id, serde_json::json!("ok")))
+            .map(|id| tool_result_from_json(id, serde_json::json!("ok"), false))
             .collect::<Vec<_>>();
 
         tracker.record_from_tool_calls(&tool_calls, &results);
@@ -204,12 +209,16 @@ mod tests {
     #[test]
     fn record_from_tool_calls_skips_errors() {
         let mut tracker = FileTracker::default();
-        let tool_calls = vec![ToolCall::new(
+        let tool_calls = vec![ToolCall::function(
             "tc1",
             "read_file",
             serde_json::json!({"file_path": "/tmp/missing.rs"}),
         )];
-        let results = vec![ToolResult::error("tc1", "File not found")];
+        let results = vec![tool_result_from_json(
+            "tc1",
+            serde_json::Value::String("File not found".into()),
+            true,
+        )];
         tracker.record_from_tool_calls(&tool_calls, &results);
         assert!(tracker.is_empty());
     }
@@ -217,16 +226,17 @@ mod tests {
     #[test]
     fn record_from_tool_calls_apply_patch_added() {
         let mut tracker = FileTracker::default();
-        let tool_calls = vec![ToolCall::new(
+        let tool_calls = vec![ToolCall::function(
             "tc1",
             "apply_patch",
             serde_json::json!({"patch": "..."}),
         )];
-        let results = vec![ToolResult::success(
+        let results = vec![tool_result_from_json(
             "tc1",
             serde_json::json!(
                 "Success. Updated the following files:\nA src/new.rs\nM src/old.rs\n"
             ),
+            false,
         )];
         tracker.record_from_tool_calls(&tool_calls, &results);
         assert_eq!(
@@ -250,14 +260,15 @@ mod tests {
     #[test]
     fn record_from_tool_calls_ignores_unknown_tools() {
         let mut tracker = FileTracker::default();
-        let tool_calls = vec![ToolCall::new(
+        let tool_calls = vec![ToolCall::function(
             "tc1",
             "shell",
             serde_json::json!({"command": "ls"}),
         )];
-        let results = vec![ToolResult::success(
+        let results = vec![tool_result_from_json(
             "tc1",
             serde_json::json!("file1\nfile2"),
+            false,
         )];
         tracker.record_from_tool_calls(&tool_calls, &results);
         assert!(tracker.is_empty());

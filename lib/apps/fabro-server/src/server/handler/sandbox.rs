@@ -432,7 +432,9 @@ async fn create_ssh_access(
                 }
             }
         }
-        SandboxProviderKind::Docker => {
+        // Docker and Kubernetes both expose a plain exec-based access
+        // command via the generic reconnect path.
+        SandboxProviderKind::Docker | SandboxProviderKind::Kubernetes => {
             let sandbox = match reconnect_run_sandbox_instance(&state, &id, &record).await {
                 Ok(sandbox) => sandbox,
                 Err(response) => return response,

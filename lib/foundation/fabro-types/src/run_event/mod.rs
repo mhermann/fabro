@@ -8,7 +8,6 @@ pub mod todo;
 
 pub use agent::*;
 use chrono::{DateTime, Utc};
-pub use fabro_model::BilledTokenCounts;
 pub use infra::*;
 pub use misc::*;
 pub use run::*;
@@ -20,7 +19,7 @@ pub use session::*;
 pub use stage::*;
 pub use todo::*;
 
-use crate::{ParallelBranchId, Principal, RunId, StageId, UsdMicros};
+use crate::{BilledTokenCounts, ParallelBranchId, Principal, RunId, StageId};
 
 /// Maximum accepted body size for `POST /runs/{id}/events`.
 ///
@@ -920,8 +919,10 @@ impl RunEvent {
     }
 }
 
-/// Upgrades historical wire shapes only in the value being decoded. Legacy
-/// importers still retain and compare the original stored JSON.
+/// Upgrades historical envelope shapes only in the value being decoded.
+///
+/// Event bodies carry no compatibility rewrites: Fabro is greenfield, so a
+/// stored body either matches the current schema or fails to decode.
 fn normalize_legacy_event(value: &mut Value) {
     let Some(event) = value
         .get("event")
@@ -941,78 +942,14 @@ fn normalize_legacy_event_properties(event: &str, properties: &mut Value) {
         return;
     };
     match event {
-        "agent.message" => normalize_legacy_agent_message(object),
         "run.completed" => normalize_legacy_timing(object, false),
         "run.failed" => {
             normalize_legacy_run_failure(object);
             normalize_legacy_timing(object, false);
         }
-        "stage.completed" => {
-            normalize_legacy_usage_field(object);
-            normalize_legacy_billing_field(object, "billing");
-            normalize_legacy_timing(object, true);
-        }
-        "stage.failed" => normalize_legacy_billing_field(object, "billing"),
-        "prompt.completed" => {
-            normalize_legacy_usage_field(object);
-            normalize_legacy_billing_field(object, "billing");
-        }
-        "checkpoint.completed" => normalize_legacy_checkpoint_billing(object),
+        "stage.completed" => normalize_legacy_timing(object, true),
         "sandbox.initialized" => normalize_legacy_sandbox_id(object),
         _ => {}
-    }
-}
-
-fn normalize_legacy_agent_message(properties: &mut Map<String, Value>) {
-    let speed = properties
-        .get("usage")
-        .and_then(Value::as_object)
-        .and_then(|usage| usage.get("speed"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    if let Some(model_id) = properties.get("model").and_then(Value::as_str) {
-        let mut model = Map::from_iter([
-            (
-                "provider".to_owned(),
-                Value::String(legacy_provider_for_model(model_id).to_owned()),
-            ),
-            ("model_id".to_owned(), Value::String(model_id.to_owned())),
-        ]);
-        if let Some(speed @ ("standard" | "fast")) = speed.as_deref() {
-            model.insert("speed".to_owned(), Value::String(speed.to_owned()));
-        }
-        properties.insert("model".to_owned(), Value::Object(model));
-    }
-    if !properties.contains_key("billing") {
-        if let Some(usage) = properties.remove("usage") {
-            properties.insert("billing".to_owned(), usage);
-        }
-    }
-}
-
-fn normalize_legacy_usage_field(properties: &mut Map<String, Value>) {
-    if !properties.contains_key("billing") {
-        if let Some(usage) = properties.remove("usage") {
-            properties.insert("billing".to_owned(), usage);
-        }
-    }
-}
-
-fn normalize_legacy_billing_field(properties: &mut Map<String, Value>, field: &str) {
-    if let Some(billing) = properties.get_mut(field) {
-        normalize_legacy_billing_values(billing);
-    }
-}
-
-fn normalize_legacy_checkpoint_billing(properties: &mut Map<String, Value>) {
-    let Some(outcomes) = properties
-        .get_mut("node_outcomes")
-        .and_then(Value::as_object_mut)
-    else {
-        return;
-    };
-    for outcome in outcomes.values_mut().filter_map(Value::as_object_mut) {
-        normalize_legacy_billing_field(outcome, "usage");
     }
 }
 
@@ -1076,135 +1013,6 @@ fn normalize_legacy_sandbox_id(properties: &mut Map<String, Value>) {
     properties.insert("id".to_owned(), Value::String(id.to_owned()));
 }
 
-fn normalize_legacy_billing_values(value: &mut Value) {
-    if legacy_stage_usage(value) {
-        let legacy = std::mem::take(value);
-        *value = normalized_legacy_stage_usage(&legacy);
-        return;
-    }
-    match value {
-        Value::Array(values) => {
-            for value in values {
-                normalize_legacy_billing_values(value);
-            }
-        }
-        Value::Object(object) => {
-            if let Some(facts) = object.get_mut("facts").and_then(Value::as_object_mut) {
-                if !facts.contains_key("algorithm") {
-                    let provider = facts
-                        .get("provider")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
-                    if let Some(provider) = provider {
-                        facts.remove("provider");
-                        facts.insert(
-                            "algorithm".to_owned(),
-                            Value::String(legacy_billing_algorithm(&provider).to_owned()),
-                        );
-                    }
-                }
-            }
-            for value in object.values_mut() {
-                normalize_legacy_billing_values(value);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn legacy_stage_usage(value: &Value) -> bool {
-    let Some(object) = value.as_object() else {
-        return false;
-    };
-    object.get("model").is_some_and(Value::is_string)
-        && object.get("input_tokens").is_some_and(Value::is_number)
-        && object.get("output_tokens").is_some_and(Value::is_number)
-}
-
-fn normalized_legacy_stage_usage(legacy: &Value) -> Value {
-    let object = legacy
-        .as_object()
-        .expect("legacy stage usage was validated as an object");
-    let model_id = object
-        .get("model")
-        .and_then(Value::as_str)
-        .expect("legacy stage usage was validated with a string model");
-    let provider = legacy_provider_for_model(model_id);
-    let mut model = json!({
-        "provider": provider,
-        "model_id": model_id,
-    });
-    if let Some(speed @ ("standard" | "fast")) = object.get("speed").and_then(Value::as_str) {
-        model["speed"] = Value::String(speed.to_owned());
-    }
-    let input_tokens = object
-        .get("input_tokens")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let output_tokens = object
-        .get("output_tokens")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let reasoning_tokens = object
-        .get("reasoning_tokens")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let cache_read_tokens = object
-        .get("cache_read_tokens")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let cache_write_tokens = object
-        .get("cache_write_tokens")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let mut normalized = json!({
-        "input": {
-            "usage": {
-                "model": model,
-                "tokens": {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "reasoning_tokens": reasoning_tokens,
-                    "cache_read_tokens": cache_read_tokens,
-                    "cache_write_tokens": cache_write_tokens,
-                }
-            },
-            "facts": {
-                "algorithm": legacy_billing_algorithm(provider),
-            }
-        }
-    });
-    if let Some(cost) = object.get("cost").and_then(Value::as_f64) {
-        normalized["total_usd_micros"] = Value::from(UsdMicros::from_usd(cost).0);
-    }
-    normalized
-}
-
-fn legacy_provider_for_model(model_id: &str) -> &'static str {
-    if model_id.starts_with("claude-") {
-        "anthropic"
-    } else if model_id.starts_with("gemini-") {
-        "gemini"
-    } else if model_id.starts_with("gpt-")
-        || model_id.starts_with("chatgpt-")
-        || model_id.starts_with("o1")
-        || model_id.starts_with("o3")
-        || model_id.starts_with("o4")
-    {
-        "openai"
-    } else {
-        "legacy"
-    }
-}
-
-fn legacy_billing_algorithm(provider: &str) -> &'static str {
-    match provider {
-        "anthropic" => "anthropic",
-        "gemini" => "gemini",
-        _ => "openai",
-    }
-}
-
 impl Serialize for RunEvent {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -1228,12 +1036,14 @@ impl<'de> Deserialize<'de> for RunEvent {
 
 #[cfg(test)]
 mod tests {
+    use lithos_llm::catalog::builtin;
+    use lithos_llm::types::ReasoningOutput;
     use serde_json::json;
 
     use super::*;
     use crate::{
-        AuthMethod, BlobHash, CommandTermination, Edge, Graph, IdpIdentity, Node, PendingReason,
-        WorkflowSettings, fixtures, test_support,
+        AuthMethod, BlobHash, CommandTermination, Edge, Graph, IdpIdentity, ModelRef, Node,
+        PendingReason, WorkflowSettings, fixtures, test_support,
     };
 
     fn user_principal(login: &str) -> Principal {
@@ -1375,138 +1185,6 @@ mod tests {
         };
 
         assert_eq!(props.settings.run, WorkflowSettings::default().run);
-    }
-
-    #[test]
-    fn historical_agent_message_accepts_string_model() {
-        let line = stored_event(
-            "agent.message",
-            &json!({
-                "text": "done",
-                "model": "gemini-3.1-pro-preview",
-                "billing": {
-                    "input_tokens": 10,
-                    "output_tokens": 5,
-                    "total_tokens": 15
-                },
-                "tool_call_count": 0,
-                "visit": 1
-            }),
-        );
-
-        let parsed = RunEvent::from_value(line).unwrap();
-        let normalized = parsed.to_value().unwrap();
-
-        assert_eq!(normalized["properties"]["model"]["provider"], "gemini");
-        assert_eq!(
-            normalized["properties"]["model"]["model_id"],
-            "gemini-3.1-pro-preview"
-        );
-    }
-
-    #[test]
-    fn historical_stage_usage_and_duration_are_upgraded() {
-        let line = stored_event(
-            "stage.completed",
-            &json!({
-                "index": 0,
-                "duration_ms": 42,
-                "status": "succeeded",
-                "usage": {
-                    "model": "claude-sonnet-4-6",
-                    "input_tokens": 100,
-                    "output_tokens": 20,
-                    "cache_read_tokens": 7,
-                    "cache_write_tokens": 3,
-                    "reasoning_tokens": 2,
-                    "speed": "fast",
-                    "cost": 0.012_345
-                },
-                "attempt": 1,
-                "max_attempts": 1
-            }),
-        );
-
-        let parsed = RunEvent::from_value(line).unwrap();
-        let normalized = parsed.to_value().unwrap();
-        let properties = &normalized["properties"];
-
-        assert_eq!(properties["timing"]["wall_time_ms"], 42);
-        assert_eq!(
-            properties["billing"]["input"]["facts"]["algorithm"],
-            "anthropic"
-        );
-        assert_eq!(
-            properties["billing"]["input"]["usage"]["model"]["speed"],
-            "fast"
-        );
-        assert_eq!(properties["billing"]["total_usd_micros"], 12_345);
-        assert!(properties.get("duration_ms").is_none());
-        assert!(properties.get("usage").is_none());
-    }
-
-    #[test]
-    fn historical_billing_provider_tags_are_upgraded() {
-        let legacy_billing = json!({
-            "input": {
-                "usage": {
-                    "model": {
-                        "provider": "anthropic",
-                        "model_id": "claude-sonnet-4-6"
-                    },
-                    "tokens": {
-                        "input_tokens": 100,
-                        "output_tokens": 20,
-                        "reasoning_tokens": 0,
-                        "cache_read_tokens": 7,
-                        "cache_write_tokens": 3
-                    }
-                },
-                "facts": {
-                    "provider": "anthropic",
-                    "cache_write_5m_tokens": 3,
-                    "cache_write_1h_tokens": 0
-                }
-            },
-            "total_usd_micros": 123
-        });
-        let prompt = stored_event(
-            "prompt.completed",
-            &json!({
-                "response": "done",
-                "model": "claude-sonnet-4-6",
-                "provider": "anthropic",
-                "billing": legacy_billing.clone()
-            }),
-        );
-        let checkpoint = stored_event(
-            "checkpoint.completed",
-            &json!({
-                "status": "succeeded",
-                "current_node": "build",
-                "node_outcomes": {
-                    "build": {
-                        "status": "succeeded",
-                        "usage": legacy_billing
-                    }
-                }
-            }),
-        );
-
-        let prompt = RunEvent::from_value(prompt).unwrap().to_value().unwrap();
-        let checkpoint = RunEvent::from_value(checkpoint)
-            .unwrap()
-            .to_value()
-            .unwrap();
-
-        assert_eq!(
-            prompt["properties"]["billing"]["input"]["facts"]["algorithm"],
-            "anthropic"
-        );
-        assert_eq!(
-            checkpoint["properties"]["node_outcomes"]["build"]["usage"]["input"]["facts"]["algorithm"],
-            "anthropic"
-        );
     }
 
     #[test]
@@ -2690,11 +2368,7 @@ mod tests {
     fn agent_message_omits_context_window_when_absent() {
         let body = EventBody::AgentMessage(AgentMessageProps {
             text:            "ok".to_string(),
-            model:           crate::ModelRef {
-                provider: fabro_model::ProviderId::openai(),
-                model_id: "gpt-5.4".into(),
-                speed:    None,
-            },
+            model:           ModelRef::new(builtin::openai(), "gpt-5.4".into()),
             billing:         BilledTokenCounts::default(),
             cost_source:     None,
             tool_call_count: 0,
@@ -2721,11 +2395,7 @@ mod tests {
     fn agent_message_omits_reasoning_when_absent() {
         let body = EventBody::AgentMessage(AgentMessageProps {
             text:            "ok".to_string(),
-            model:           crate::ModelRef {
-                provider: fabro_model::ProviderId::openai(),
-                model_id: "gpt-5.4".into(),
-                speed:    None,
-            },
+            model:           ModelRef::new(builtin::openai(), "gpt-5.4".into()),
             billing:         BilledTokenCounts::default(),
             cost_source:     None,
             tool_call_count: 0,
@@ -2749,18 +2419,14 @@ mod tests {
     fn agent_message_carries_reasoning_through_canonical_json() {
         let body = EventBody::AgentMessage(AgentMessageProps {
             text:            String::new(),
-            model:           crate::ModelRef {
-                provider: fabro_model::ProviderId::openai(),
-                model_id: "gpt-5.4".into(),
-                speed:    None,
-            },
+            model:           ModelRef::new(builtin::openai(), "gpt-5.4".into()),
             billing:         BilledTokenCounts::default(),
             cost_source:     None,
             tool_call_count: 1,
             visit:           1,
             message:         None,
             context_window:  None,
-            reasoning:       Some(crate::ReasoningOutput::new(
+            reasoning:       Some(ReasoningOutput::new(
                 "inspect the implementation first",
                 "read convert.rs, then the sink",
             )),
@@ -2806,11 +2472,7 @@ mod tests {
         };
         let body = EventBody::AgentMessage(AgentMessageProps {
             text:            "ok".to_string(),
-            model:           crate::ModelRef {
-                provider: fabro_model::ProviderId::openai(),
-                model_id: "gpt-5.4".into(),
-                speed:    None,
-            },
+            model:           ModelRef::new(builtin::openai(), "gpt-5.4".into()),
             billing:         BilledTokenCounts::default(),
             cost_source:     None,
             tool_call_count: 0,

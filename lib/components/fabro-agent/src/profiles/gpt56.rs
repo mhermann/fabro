@@ -16,8 +16,10 @@
 
 use std::sync::Arc;
 
-use fabro_llm::types::ToolDefinition;
-use fabro_model::{AgentProfileKind, Catalog, ProviderId};
+use fabro_llm::lithos_catalog::Catalog;
+use fabro_types::AgentProfileKind;
+use lithos_llm::catalog::{ProviderId, builtin};
+use lithos_llm::types::ToolDefinition;
 use serde_json::Value;
 
 use super::EnvContext;
@@ -69,7 +71,7 @@ impl Gpt56Profile {
         Self {
             base:                     BaseProfile {
                 profile_kind: AgentProfileKind::Gpt56,
-                provider_id: ProviderId::openai(),
+                provider_id: builtin::openai(),
                 model: model.into(),
                 catalog: None,
                 registry,
@@ -137,12 +139,12 @@ fn make_shell_command_tool(options: &NativeToolOptions) -> RegisteredTool {
     );
 
     RegisteredTool {
-        definition: ToolDefinition {
+        definition: ToolDefinition::function(
             // Supply the canonical identity; registry insertion rewrites the
             // stored and wire name to `shell_command`.
-            name: NativeTool::Shell.canonical_name().to_string(),
+            NativeTool::Shell.canonical_name(),
             description,
-            parameters: serde_json::json!({
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": {
@@ -162,7 +164,7 @@ fn make_shell_command_tool(options: &NativeToolOptions) -> RegisteredTool {
                 },
                 "required": ["command"]
             }),
-        },
+        ),
         executor:   Arc::new(move |args, ctx| {
             Box::pin(async move {
                 let command = tools::required_str(&args, "command")?;
@@ -222,21 +224,25 @@ impl AgentProfile for Gpt56Profile {
 mod tests {
     use std::sync::Arc;
 
-    use fabro_model::catalog::LlmCatalogSettings;
+    use fabro_llm::catalog;
+    use fabro_llm::test_support::{test_catalog as fabro_test_catalog, test_catalog_with_overlay};
 
     use super::*;
     use crate::subagent::{SessionFactory, SubAgentSupervisor};
     use crate::test_support::MockSandbox;
+    use crate::tool_registry::ToolDefinitionExt;
 
     fn test_catalog() -> Arc<Catalog> {
-        Arc::new(Catalog::from_builtin().unwrap())
+        Arc::new(fabro_test_catalog())
     }
 
     /// OpenRouter ships disabled in the built-in catalog.
     fn catalog_with_openrouter() -> Arc<Catalog> {
-        let overrides: LlmCatalogSettings =
-            toml::from_str("[providers.openrouter]\nenabled = true\n").unwrap();
-        Arc::new(Catalog::from_builtin_with_overrides(&overrides).unwrap())
+        Arc::new(test_catalog_with_overlay(
+            "[providers.openrouter]
+enabled = true
+",
+        ))
     }
 
     fn prompt(profile: &Gpt56Profile) -> String {
@@ -248,7 +254,7 @@ mod tests {
     fn gpt56_profile_identity() {
         let profile = Gpt56Profile::new("gpt-5.6-sol");
         assert_eq!(profile.profile_kind(), AgentProfileKind::Gpt56);
-        assert_eq!(profile.provider_id(), ProviderId::openai());
+        assert_eq!(profile.provider_id(), builtin::openai());
         assert_eq!(profile.model(), "gpt-5.6-sol");
     }
 
@@ -285,14 +291,14 @@ mod tests {
     fn shell_command_accepts_a_workdir() {
         let profile = Gpt56Profile::new("gpt-5.6-sol");
         let shell = profile.tool_registry().get("shell_command").unwrap();
-        assert_eq!(shell.definition.parameters["type"], "object");
-        assert!(shell.definition.parameters["properties"]["workdir"].is_object());
+        assert_eq!(shell.definition.parameters()["type"], "object");
+        assert!(shell.definition.parameters()["properties"]["workdir"].is_object());
         assert_eq!(
-            shell.definition.parameters["required"],
+            shell.definition.parameters()["required"],
             serde_json::json!(["command"])
         );
         assert_eq!(
-            shell.definition.parameters["properties"]["command"]["description"],
+            shell.definition.parameters()["properties"]["command"]["description"],
             "Bash source to evaluate, run by a non-login Bash shell."
         );
     }
@@ -315,7 +321,7 @@ mod tests {
                 "tool '{}' must not be a custom definition on an openai_compatible route",
                 definition.name
             );
-            assert_eq!(definition.parameters["type"], "object");
+            assert_eq!(definition.parameters()["type"], "object");
         }
     }
 
@@ -323,8 +329,7 @@ mod tests {
     /// it points 5.6 at a tool it was never given.
     #[test]
     fn shell_description_names_the_editor_actually_registered() {
-        let direct =
-            Gpt56Profile::new("gpt-5.6-sol").with_route(ProviderId::openai(), test_catalog());
+        let direct = Gpt56Profile::new("gpt-5.6-sol").with_route(builtin::openai(), test_catalog());
         let shell = direct.tool_registry().get("shell_command").unwrap();
         assert!(shell.definition.description.contains("`apply_patch`"));
         assert!(!shell.definition.description.contains("`edit_file`"));
@@ -345,8 +350,7 @@ mod tests {
         assert!(!rendered.contains("apply_patch"));
         assert!(!rendered.contains("*** Begin Patch"));
 
-        let direct =
-            Gpt56Profile::new("gpt-5.6-sol").with_route(ProviderId::openai(), test_catalog());
+        let direct = Gpt56Profile::new("gpt-5.6-sol").with_route(builtin::openai(), test_catalog());
         let rendered = prompt(&direct);
         assert!(rendered.contains("Use `apply_patch` for local file edits"));
         assert!(rendered.contains("*** Begin Patch"));
@@ -423,8 +427,7 @@ mod tests {
 
     #[test]
     fn provider_prompt_uses_catalog_display_name() {
-        let direct =
-            Gpt56Profile::new("gpt-5.6-sol").with_route(ProviderId::openai(), test_catalog());
+        let direct = Gpt56Profile::new("gpt-5.6-sol").with_route(builtin::openai(), test_catalog());
         assert!(prompt(&direct).contains("powered by OpenAI"));
 
         let gateway = Gpt56Profile::new("gpt-5.6-sol")
@@ -443,14 +446,14 @@ mod tests {
             let provider_id = ProviderId::new(provider);
             for model in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
                 assert_eq!(
-                    catalog.effective_agent_profile(&provider_id, Some(model)),
+                    catalog::agent_profile(&catalog, provider_id.as_str(), Some(model)),
                     Some(AgentProfileKind::Gpt56),
                     "{provider}/{model} should use the gpt56 profile"
                 );
             }
             for model in ["gpt-5.5", "gpt-5.4"] {
                 assert_eq!(
-                    catalog.effective_agent_profile(&provider_id, Some(model)),
+                    catalog::agent_profile(&catalog, provider_id.as_str(), Some(model)),
                     Some(AgentProfileKind::OpenAi),
                     "{provider}/{model} should keep the openai profile"
                 );
@@ -461,7 +464,7 @@ mod tests {
     #[test]
     fn catalog_reports_the_5_6_context_window() {
         let profile =
-            Gpt56Profile::new("gpt-5.6-sol").with_route(ProviderId::openai(), test_catalog());
-        assert_eq!(profile.context_window_size(), 272_000);
+            Gpt56Profile::new("gpt-5.6-sol").with_route(builtin::openai(), test_catalog());
+        assert_eq!(profile.context_window_size(), 1_050_000);
     }
 }

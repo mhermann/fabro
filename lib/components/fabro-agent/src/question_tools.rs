@@ -6,9 +6,8 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use fabro_llm::types::ToolDefinition;
-use fabro_model::AgentProfileKind;
-use fabro_types::{InterviewOption, QuestionType};
+use fabro_types::{AgentProfileKind, InterviewOption, QuestionType};
+use lithos_llm::types::ToolDefinition;
 use serde::Deserialize;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -196,8 +195,8 @@ pub fn is_question_tool(name: &str) -> bool {
 
 pub fn register_question_tools(profile_kind: AgentProfileKind, registry: &mut ToolRegistry) {
     match profile_kind {
-        // Codex names this tool `request_user_input` for GPT-5.6 too.
-        AgentProfileKind::OpenAi | AgentProfileKind::Gpt56 => {
+        // Codex names this tool `request_user_input` for GPT-5.6 and GPT-6 too.
+        AgentProfileKind::OpenAi | AgentProfileKind::Gpt56 | AgentProfileKind::Gpt6 => {
             registry.register(make_openai_question_tool());
         }
         // Kimi Code names this tool `AskUserQuestion` with the same
@@ -214,10 +213,10 @@ pub fn register_question_tools(profile_kind: AgentProfileKind, registry: &mut To
 
 fn make_openai_question_tool() -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        OPENAI_REQUEST_USER_INPUT_TOOL.to_string(),
-            description: "Ask the human one or more questions and wait for their answers before continuing this stage.".to_string(),
-            parameters:  json!({
+        definition: ToolDefinition::function(
+            OPENAI_REQUEST_USER_INPUT_TOOL.to_string(),
+            "Ask the human one or more questions and wait for their answers before continuing this stage.",
+            json!({
                 "type": "object",
                 "required": ["questions"],
                 "properties": {
@@ -247,7 +246,7 @@ fn make_openai_question_tool() -> RegisteredTool {
                     }
                 }
             }),
-        },
+        ),
         executor:   Arc::new(|args, ctx| {
             Box::pin(async move {
                 let parsed: OpenAiQuestionToolArgs = parse_tool_args(args)?;
@@ -262,10 +261,10 @@ fn make_openai_question_tool() -> RegisteredTool {
 
 fn make_anthropic_question_tool() -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        ANTHROPIC_ASK_USER_QUESTION_TOOL.to_string(),
-            description: "Ask the human one or more questions and wait for their answers before continuing this stage.".to_string(),
-            parameters:  json!({
+        definition: ToolDefinition::function(
+            ANTHROPIC_ASK_USER_QUESTION_TOOL.to_string(),
+            "Ask the human one or more questions and wait for their answers before continuing this stage.",
+            json!({
                 "type": "object",
                 "required": ["questions"],
                 "properties": {
@@ -296,12 +295,11 @@ fn make_anthropic_question_tool() -> RegisteredTool {
                     }
                 }
             }),
-        },
+        ),
         executor:   Arc::new(|args, ctx| {
             Box::pin(async move {
                 let parsed: AnthropicQuestionToolArgs = parse_tool_args(args)?;
-                let questions =
-                    normalize_anthropic_questions(parsed, &ANTHROPIC_QUESTION_LIMITS)?;
+                let questions = normalize_anthropic_questions(parsed, &ANTHROPIC_QUESTION_LIMITS)?;
                 let answers = execute_question_tool(ctx, questions).await?;
                 format_anthropic_answers(&answers)
             })
@@ -312,10 +310,10 @@ fn make_anthropic_question_tool() -> RegisteredTool {
 
 fn make_claude5_question_tool() -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        ANTHROPIC_ASK_USER_QUESTION_TOOL.to_string(),
-            description: "Ask the human up to four questions when a decision is genuinely theirs to make. The UI automatically provides an Other option for custom text.".to_string(),
-            parameters:  json!({
+        definition: ToolDefinition::function(
+            ANTHROPIC_ASK_USER_QUESTION_TOOL.to_string(),
+            "Ask the human up to four questions when a decision is genuinely theirs to make. The UI automatically provides an Other option for custom text.",
+            json!({
                 "type": "object",
                 "properties": {
                     "questions": {
@@ -373,12 +371,11 @@ fn make_claude5_question_tool() -> RegisteredTool {
                 "required": ["questions"],
                 "additionalProperties": false
             }),
-        },
+        ),
         executor:   Arc::new(|args, ctx| {
             Box::pin(async move {
                 let parsed: AnthropicQuestionToolArgs = parse_tool_args(args)?;
-                let questions =
-                    normalize_anthropic_questions(parsed, &CLAUDE5_QUESTION_LIMITS)?;
+                let questions = normalize_anthropic_questions(parsed, &CLAUDE5_QUESTION_LIMITS)?;
                 let answers = execute_question_tool(ctx, questions).await?;
                 format_anthropic_answers(&answers)
             })
@@ -652,6 +649,7 @@ mod tests {
     use super::*;
     use crate::native_tool::ToolVocabulary;
     use crate::test_support::MockSandbox;
+    use crate::tool_registry::ToolDefinitionExt;
 
     fn answered(
         original_id: Option<&str>,
@@ -784,9 +782,9 @@ mod tests {
         let mut claude5 = ToolRegistry::with_vocabulary(ToolVocabulary::Claude5);
         register_question_tools(AgentProfileKind::Claude5, &mut claude5);
         let tool = claude5.get(ANTHROPIC_ASK_USER_QUESTION_TOOL).unwrap();
-        assert_eq!(tool.definition.parameters["additionalProperties"], false);
+        assert_eq!(tool.definition.parameters()["additionalProperties"], false);
         assert_eq!(
-            tool.definition.parameters["properties"]
+            tool.definition.parameters()["properties"]
                 .as_object()
                 .unwrap()
                 .keys()
@@ -795,7 +793,7 @@ mod tests {
             vec!["questions"]
         );
         assert_eq!(
-            tool.definition.parameters["properties"]["questions"]["maxItems"],
+            tool.definition.parameters()["properties"]["questions"]["maxItems"],
             4
         );
         assert!(claude5.get(OPENAI_REQUEST_USER_INPUT_TOOL).is_none());

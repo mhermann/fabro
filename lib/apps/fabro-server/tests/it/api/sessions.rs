@@ -305,16 +305,8 @@ async fn invalid_session_model_refs_are_rejected_at_creation() {
 
 #[tokio::test]
 async fn ambiguous_session_model_refs_are_rejected_at_creation() {
-    let mut catalog_settings = fabro_model::catalog::LlmCatalogSettings::default();
-    catalog_settings.providers.insert(
-        "openai".to_string(),
-        fabro_model::catalog::ProviderCatalogSettings {
-            aliases: Some(vec!["gpt54".to_string()]),
-            ..fabro_model::catalog::ProviderCatalogSettings::default()
-        },
-    );
     let state = fabro_server::test_support::TestAppStateBuilder::new()
-        .llm_catalog_settings(catalog_settings)
+        .llm_overlay_toml("[providers.openai]\naliases = [\"gpt54\"]\n")
         .vault_entries([(EnvVars::OPENAI_API_KEY, "test-openai-api-key")])
         .build();
     let app = fabro_server::test_support::build_test_router(state);

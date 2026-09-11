@@ -9,21 +9,19 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
 use clap::{Args, Parser};
-use fabro_auth::{CredentialSource, SqlVaultCredentialSource};
+use fabro_auth::SqlVaultCredentialSource;
 use fabro_config::Storage;
 use fabro_config::user::default_storage_dir;
-use fabro_llm::Error as LlmError;
-use fabro_llm::client::Client;
-use fabro_llm::middleware::{Middleware, NextFn, NextStreamFn};
-use fabro_llm::provider::StreamEventStream;
-use fabro_llm::types::{Request, Response};
+use fabro_llm::credentials::CredentialProvider;
+use fabro_llm::lithos_catalog::{Catalog, CatalogProvider};
+use fabro_llm::middleware::{Call, Middleware, Next, Output};
+use fabro_llm::{Client, ClientOptions, Error as LlmError, catalog};
 use fabro_mcp::config::McpServerSettings;
-#[cfg(test)]
-use fabro_model::catalog::LlmCatalogSettings;
-use fabro_model::{AgentProfileKind, Catalog, ModelHandle, ModelSelectionError, ProviderId};
 use fabro_static::EnvVars;
+use fabro_types::AgentProfileKind;
 use fabro_util::terminal::Styles;
 use fabro_vault::SecretStore;
+use lithos_llm::catalog::{ModelHandle, ModelId, ProviderId};
 use tokio::io::{AsyncWriteExt, stdout};
 use tokio::signal;
 
@@ -43,6 +41,7 @@ use crate::{
 )]
 fn cli_tool_secrets() -> ToolSecrets {
     ToolSecrets {
+        searxng_url:          std::env::var(EnvVars::SEARXNG_URL).ok(),
         brave_search_api_key: std::env::var(EnvVars::BRAVE_SEARCH_API_KEY).ok(),
         venice_api_key:       std::env::var(EnvVars::VENICE_API_KEY).ok(),
     }
@@ -196,20 +195,19 @@ fn summarizer_model_id(
     catalog: &Catalog,
     selected_model: &str,
 ) -> ModelHandle {
-    ModelHandle::ByName {
-        provider: provider_id.clone(),
-        model:    catalog
-            .default_for_provider(provider_id)
-            .map_or_else(
-                || match provider_id.as_str() {
-                    ProviderId::ANTHROPIC => "claude-haiku-4-5",
-                    ProviderId::GEMINI => "gemini-2.0-flash",
-                    _ => selected_model,
-                },
-                |model| model.id.as_str(),
-            )
-            .to_string(),
-    }
+    let model = catalog
+        .small_default_for([provider_id])
+        .filter(|entry| entry.provider.id() == provider_id)
+        .or_else(|| {
+            catalog
+                .enabled_provider(provider_id.as_str())?
+                .default_offering()
+        })
+        .map_or_else(
+            || selected_model.to_string(),
+            |entry| entry.model.id().to_string(),
+        );
+    ModelHandle::new(provider_id.clone(), ModelId::new(model))
 }
 
 fn build_summarizer(
@@ -224,36 +222,44 @@ fn build_summarizer(
     }
 }
 
-fn parse_provider(args: &AgentArgs) -> anyhow::Result<ProviderId> {
-    let provider_str = args.provider.as_deref().unwrap_or("anthropic");
-    Ok(provider_str.parse()?)
+fn parse_provider(args: &AgentArgs) -> ProviderId {
+    ProviderId::new(args.provider.as_deref().unwrap_or("anthropic"))
 }
 
 fn resolve_provider_id(
     catalog: &Catalog,
     args: &AgentArgs,
     eligible_providers: &std::collections::HashSet<ProviderId>,
-) -> anyhow::Result<ProviderId> {
+) -> ProviderId {
     if args.provider.is_some() {
-        let requested = parse_provider(args)?;
-        return Ok(catalog
-            .provider(&requested)
-            .map_or(requested, |provider| provider.id.clone()));
+        let requested = parse_provider(args);
+        return canonical_provider_id(catalog, &requested);
     }
     if let Some(model_id) = args.model.as_deref() {
-        match catalog.select(model_id, None, eligible_providers) {
-            Ok(model) => return Ok(model.provider.clone()),
-            Err(ModelSelectionError::UnknownSelector { .. }) => {}
-            Err(error) => return Err(error.into()),
+        // A bare model selector picks the highest-priority eligible provider
+        // offering it, matching how the client resolves the request.
+        let matches = catalog.offerings_matching(model_id);
+        if let Some(entry) = matches
+            .iter()
+            .find(|entry| eligible_providers.contains(entry.provider.id()))
+            .or_else(|| matches.first())
+        {
+            return entry.provider.id().clone();
         }
     }
-    let requested = parse_provider(args)?;
-    Ok(catalog
-        .provider(&requested)
-        .map_or(requested, |provider| provider.id.clone()))
+    let requested = parse_provider(args);
+    canonical_provider_id(catalog, &requested)
 }
 
-async fn standalone_llm_source() -> anyhow::Result<Arc<dyn CredentialSource>> {
+/// The catalog id for `requested`, resolving aliases; the request itself when
+/// the catalog does not know it, so the error names what the caller typed.
+fn canonical_provider_id(catalog: &Catalog, requested: &ProviderId) -> ProviderId {
+    catalog
+        .enabled_provider(requested.as_str())
+        .map_or_else(|| requested.clone(), |provider| provider.id().clone())
+}
+
+async fn standalone_llm_source() -> anyhow::Result<Arc<dyn CredentialProvider>> {
     let storage = Storage::new(default_storage_dir());
     let store = SecretStore::open(storage.sqlite_path(), storage.secrets_path())
         .await
@@ -266,17 +272,12 @@ fn profile_kind_for_provider(
     provider_id: &ProviderId,
     model: Option<&str>,
 ) -> anyhow::Result<AgentProfileKind> {
-    catalog
-        .effective_agent_profile(provider_id, model)
+    catalog::agent_profile(catalog, provider_id.as_str(), model)
         .ok_or_else(|| anyhow::anyhow!("provider '{provider_id}' is not configured"))
 }
 
 fn ensure_provider_registered(client: &Client, provider_id: &ProviderId) -> anyhow::Result<()> {
-    if client
-        .provider_names()
-        .iter()
-        .any(|name| *name == provider_id.as_str())
-    {
+    if client.available_providers().contains(provider_id) {
         return Ok(());
     }
 
@@ -328,7 +329,7 @@ fn print_output(session: &Session, styles: &Styles) {
     reason = "Session summaries are diagnostic metadata, not assistant output."
 )]
 fn print_summary(session: &Session, styles: &Styles) {
-    let (mut turn_count, mut tool_call_count, mut total_tokens) = (0usize, 0usize, 0i64);
+    let (mut turn_count, mut tool_call_count, mut total_tokens) = (0usize, 0usize, 0u64);
     for turn in session.history().turns() {
         if let Message::Assistant {
             tool_calls, usage, ..
@@ -336,7 +337,7 @@ fn print_summary(session: &Session, styles: &Styles) {
         {
             turn_count += 1;
             tool_call_count += tool_calls.len();
-            total_tokens += usage.total_tokens();
+            total_tokens = total_tokens.saturating_add(usage.total());
         }
     }
     let token_str = if total_tokens >= 1_000_000 {
@@ -365,38 +366,32 @@ impl Middleware for DebugMiddleware {
         clippy::print_stderr,
         reason = "Debug middleware logs request and response summaries to stderr."
     )]
-    async fn handle_complete(&self, request: Request, next: NextFn) -> Result<Response, LlmError> {
+    async fn handle(&self, call: Call, next: Next) -> Result<Output, LlmError> {
         let s = self.styles;
         eprintln!(
             "{}",
             s.dim.apply_to(format!(
                 "[debug] request: model={} messages={} tools={}",
-                request.model,
-                request.messages.len(),
-                request.tools.as_ref().map_or(0, Vec::len),
+                call.route().handle(),
+                call.request().messages().len(),
+                call.request().tools().len(),
             )),
         );
-        let response = next(request).await?;
-        eprintln!(
-            "{}",
-            s.dim.apply_to(format!(
-                "[debug] response: model={} finish={:?} usage=({}/{}/{})",
-                response.model,
-                response.finish_reason,
-                response.usage.input_tokens,
-                response.usage.output_tokens,
-                response.usage.total_tokens(),
-            )),
-        );
-        Ok(response)
-    }
-
-    async fn handle_stream(
-        &self,
-        request: Request,
-        next: NextStreamFn,
-    ) -> Result<StreamEventStream, LlmError> {
-        next(request).await
+        let output = next.run(call).await?;
+        if let Output::Complete(response) = &output {
+            eprintln!(
+                "{}",
+                s.dim.apply_to(format!(
+                    "[debug] response: model={} finish={:?} usage=({}/{}/{})",
+                    response.model,
+                    response.finish_reason,
+                    response.usage.input,
+                    response.usage.output,
+                    response.usage.total(),
+                )),
+            );
+        }
+        Ok(output)
     }
 }
 
@@ -411,31 +406,52 @@ impl Middleware for VerboseMiddleware {
         clippy::print_stderr,
         reason = "Verbose middleware dumps full request and response JSON to stderr."
     )]
-    async fn handle_complete(&self, request: Request, next: NextFn) -> Result<Response, LlmError> {
+    async fn handle(&self, call: Call, next: Next) -> Result<Output, LlmError> {
         let s = self.styles;
         eprintln!(
             "{}\n{}",
             s.dim.apply_to("[verbose] request:"),
-            serde_json::to_string_pretty(&request)
+            serde_json::to_string_pretty(call.request())
                 .unwrap_or_else(|e| format!("<serialize error: {e}>"))
         );
-        let response = next(request).await?;
-        eprintln!(
-            "{}\n{}",
-            s.dim.apply_to("[verbose] response:"),
-            serde_json::to_string_pretty(&response)
-                .unwrap_or_else(|e| format!("<serialize error: {e}>"))
-        );
-        Ok(response)
+        let output = next.run(call).await?;
+        if let Output::Complete(response) = &output {
+            eprintln!(
+                "{}\n{}",
+                s.dim.apply_to("[verbose] response:"),
+                serde_json::to_string_pretty(response)
+                    .unwrap_or_else(|e| format!("<serialize error: {e}>"))
+            );
+        }
+        Ok(output)
     }
+}
 
-    async fn handle_stream(
-        &self,
-        request: Request,
-        next: NextStreamFn,
-    ) -> Result<StreamEventStream, LlmError> {
-        next(request).await
+/// Client options for the standalone agent: standard retries plus the
+/// requested diagnostic middleware.
+fn cli_client_options(args: &AgentArgs, styles: &'static Styles) -> ClientOptions {
+    let options = ClientOptions::standard();
+    if args.verbose {
+        options.with_middleware(Arc::new(VerboseMiddleware { styles }))
+    } else if args.debug {
+        options.with_middleware(Arc::new(DebugMiddleware { styles }))
+    } else {
+        options
     }
+}
+
+/// The catalog the standalone agent runs against: the lithos built-ins and
+/// the operator's `[llm]` overlay from the active settings file.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "Standalone agent honors OPENAI_BASE_URL from the process environment."
+)]
+fn standalone_catalog() -> anyhow::Result<Arc<Catalog>> {
+    let overlay =
+        fabro_config::load_llm_overlay(None).context("failed to load the LLM settings overlay")?;
+    let catalog = fabro_llm::build_catalog(&overlay, &|name| std::env::var(name).ok())
+        .context("failed to build standalone agent LLM catalog")?;
+    Ok(Arc::new(catalog))
 }
 
 pub async fn run_with_args(
@@ -443,23 +459,7 @@ pub async fn run_with_args(
     mcp_servers: Vec<McpServerSettings>,
 ) -> anyhow::Result<()> {
     let llm_source = standalone_llm_source().await?;
-    let catalog =
-        Arc::new(Catalog::from_builtin().context("failed to build standalone agent LLM catalog")?);
-    run_with_args_and_source_and_catalog(args, llm_source, mcp_servers, catalog).await
-}
-
-#[allow(
-    clippy::print_stdout,
-    clippy::print_stderr,
-    reason = "Assistant output stays on stdout while prompts and diagnostics use stderr."
-)]
-pub async fn run_with_args_and_source(
-    args: AgentArgs,
-    llm_source: Arc<dyn CredentialSource>,
-    mcp_servers: Vec<McpServerSettings>,
-) -> anyhow::Result<()> {
-    let catalog =
-        Arc::new(Catalog::from_builtin().context("failed to build standalone agent LLM catalog")?);
+    let catalog = standalone_catalog()?;
     run_with_args_and_source_and_catalog(args, llm_source, mcp_servers, catalog).await
 }
 
@@ -470,31 +470,35 @@ pub async fn run_with_args_and_source(
 )]
 pub async fn run_with_args_and_source_and_catalog(
     args: AgentArgs,
-    llm_source: Arc<dyn CredentialSource>,
+    llm_source: Arc<dyn CredentialProvider>,
     mcp_servers: Vec<McpServerSettings>,
     catalog: Arc<Catalog>,
 ) -> anyhow::Result<()> {
-    let client = Client::from_source(llm_source.as_ref(), Arc::clone(&catalog))
+    // Resolve color support once, leak to get 'static lifetime for use across
+    // threads
+    let styles: &'static Styles = Box::leak(Box::new(Styles::detect_stderr()));
+    let built = fabro_llm::build_client(
+        Catalog::clone(&catalog),
+        llm_source,
+        cli_client_options(&args, styles),
+    )
+    .await
+    .context("Failed to create LLM client")?;
+    for issue in &built.build_issues {
+        eprintln!(
+            "{}",
+            styles.dim.apply_to(format!(
+                "[llm] provider '{}' is unavailable: {}",
+                issue.provider, issue.cause
+            ))
+        );
+    }
+    run_with_args_and_client_and_catalog_styled(args, built.client, mcp_servers, catalog, styles)
         .await
-        .context("Failed to create LLM client")?;
-    run_with_args_and_client_and_catalog(args, client, mcp_servers, catalog).await
 }
 
-#[allow(
-    clippy::print_stdout,
-    clippy::print_stderr,
-    reason = "Assistant output stays on stdout while prompts and diagnostics use stderr."
-)]
-pub async fn run_with_args_and_client(
-    args: AgentArgs,
-    client: Client,
-    mcp_servers: Vec<McpServerSettings>,
-) -> anyhow::Result<()> {
-    let catalog =
-        Arc::new(Catalog::from_builtin().context("failed to build standalone agent LLM catalog")?);
-    run_with_args_and_client_and_catalog(args, client, mcp_servers, catalog).await
-}
-
+/// Run against an already-built client, such as the `fabro exec` gateway
+/// client. Diagnostic middleware is the caller's responsibility.
 #[allow(
     clippy::print_stdout,
     clippy::print_stderr,
@@ -502,35 +506,51 @@ pub async fn run_with_args_and_client(
 )]
 pub async fn run_with_args_and_client_and_catalog(
     args: AgentArgs,
-    mut client: Client,
+    client: Client,
     mcp_servers: Vec<McpServerSettings>,
     catalog: Arc<Catalog>,
 ) -> anyhow::Result<()> {
-    // Resolve color support once, leak to get 'static lifetime for use across
-    // threads
     let styles: &'static Styles = Box::leak(Box::new(Styles::detect_stderr()));
+    run_with_args_and_client_and_catalog_styled(args, client, mcp_servers, catalog, styles).await
+}
 
-    let provider_id = resolve_provider_id(&catalog, &args, &client.provider_ids())?;
+/// Client options a caller building its own client can use so `--debug` and
+/// `--verbose` behave the same as with the standalone client.
+#[must_use]
+pub fn diagnostic_client_options(args: &AgentArgs) -> ClientOptions {
+    let styles: &'static Styles = Box::leak(Box::new(Styles::detect_stderr()));
+    cli_client_options(args, styles)
+}
+
+#[allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "Assistant output stays on stdout while prompts and diagnostics use stderr."
+)]
+async fn run_with_args_and_client_and_catalog_styled(
+    args: AgentArgs,
+    client: Client,
+    mcp_servers: Vec<McpServerSettings>,
+    catalog: Arc<Catalog>,
+    styles: &'static Styles,
+) -> anyhow::Result<()> {
+    let available: std::collections::HashSet<ProviderId> =
+        client.available_providers().iter().cloned().collect();
+    let provider_id = resolve_provider_id(&catalog, &args, &available);
     ensure_provider_registered(&client, &provider_id)?;
-
-    if args.verbose {
-        client.add_middleware(Arc::new(VerboseMiddleware { styles }));
-    } else if args.debug {
-        client.add_middleware(Arc::new(DebugMiddleware { styles }));
-    }
 
     let model = if let Some(model) = args.model.clone() {
         model
     } else {
         catalog
-            .default_for_provider(&provider_id)
-            .map(|model| model.id.clone())
+            .enabled_provider(provider_id.as_str())
+            .and_then(CatalogProvider::default_offering)
+            .map(|entry| entry.model.id().to_string())
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "provider '{provider_id}' has no default model in the catalog; pass --model explicitly"
                 )
             })?
-            .to_string()
     };
     let profile_kind = profile_kind_for_provider(&catalog, &provider_id, Some(&model))?;
     eprintln!("{}", styles.dim.apply_to(format!("Using model: {model}")));
@@ -541,7 +561,7 @@ pub async fn run_with_args_and_client_and_catalog(
         &model,
         Arc::clone(&catalog),
     );
-    let profile_builder = if profile_kind == AgentProfileKind::Gpt56 {
+    let profile_builder = if profile_kind.uses_codex_core_tools() {
         profile_builder
     } else {
         profile_builder.with_web_fetch_summarizer(Some(build_summarizer(
@@ -801,11 +821,10 @@ pub async fn run() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use fabro_model::catalog::{
-        ModelCatalogSettings, ProviderCatalogSettings, SettingsModelFeatures, SettingsModelLimits,
+    use fabro_llm::test_support::{
+        client_with_adapters, test_catalog as fabro_test_catalog, test_catalog_with_overlay,
     };
+    use lithos_llm::catalog::builtin;
     use serde_json::json;
 
     use super::*;
@@ -940,14 +959,77 @@ mod tests {
         assert!(approval_fn("shell", &json!({})).is_ok());
     }
 
+    fn enabled_ids(catalog: &Catalog) -> std::collections::HashSet<ProviderId> {
+        catalog.enabled_provider_ids().into_iter().collect()
+    }
+
     fn test_catalog() -> Arc<Catalog> {
-        Arc::new(Catalog::from_builtin().unwrap())
+        Arc::new(fabro_test_catalog())
+    }
+
+    /// An operator-defined OpenAI-compatible provider with one Claude model,
+    /// the shape an `[llm]` overlay produces.
+    const ACME_OVERLAY: &str = r#"
+[providers.acme-aws]
+display_name = "Acme AWS"
+aliases = ["br"]
+adapter = "openai-compatible"
+codec = "openai-chat"
+base_url = "https://example.invalid/v1"
+auth = { type = "bearer" }
+default_model = "acme-aws-claude"
+
+[providers.acme-aws.metadata.agent]
+profile = "openai"
+
+[providers.acme-aws.models.acme-aws-claude]
+display_name = "Acme AWS Claude"
+api_model = "acme-aws-claude"
+limits = { context_tokens = 1000, max_output_tokens = 500 }
+capabilities = { text = true, tools = true }
+family = "claude"
+
+[providers.acme-aws.models.acme-aws-claude.metadata.agent]
+profile = "anthropic"
+"#;
+
+    /// The same provider with no models, so its default comes from the
+    /// operator's `--model` alone.
+    const ACME_OVERLAY_WITHOUT_MODELS: &str = r#"
+[providers.acme-aws]
+display_name = "Acme AWS"
+adapter = "openai-compatible"
+codec = "openai-chat"
+base_url = "https://example.invalid/v1"
+auth = { type = "bearer" }
+allow_passthrough = true
+
+[providers.acme-aws.metadata.agent]
+profile = "openai"
+"#;
+
+    fn acme_catalog() -> Catalog {
+        test_catalog_with_overlay(ACME_OVERLAY)
+    }
+
+    fn args_with(provider: Option<&str>, model: Option<&str>) -> AgentArgs {
+        AgentArgs {
+            prompt:        "test".to_string(),
+            provider:      provider.map(str::to_string),
+            model:         model.map(str::to_string),
+            permissions:   None,
+            auto_approve:  false,
+            debug:         false,
+            verbose:       false,
+            skills_dir:    None,
+            output_format: None,
+        }
     }
 
     #[test]
     fn ensure_provider_registered_reports_missing_credentials() {
-        let client = Client::new(HashMap::new(), None, vec![]);
-        let error = ensure_provider_registered(&client, &ProviderId::anthropic()).unwrap_err();
+        let client = client_with_adapters(Vec::new(), ClientOptions::default());
+        let error = ensure_provider_registered(&client, &builtin::anthropic()).unwrap_err();
         assert_eq!(
             error.to_string(),
             "LLM credentials not configured for provider 'anthropic'"
@@ -956,30 +1038,10 @@ mod tests {
 
     #[test]
     fn profile_kind_accepts_custom_catalog_provider() {
-        let mut settings = LlmCatalogSettings::default();
-        settings
-            .providers
-            .insert("acme-aws".to_string(), ProviderCatalogSettings {
-                display_name: Some("Acme AWS".to_string()),
-                adapter: Some("openai_compatible".to_string()),
-                base_url: Some("https://example.invalid/v1".to_string()),
-                agent_profile: Some(AgentProfileKind::OpenAi),
-                ..ProviderCatalogSettings::default()
-            });
-        let catalog = Catalog::from_builtin_with_overrides(&settings).unwrap();
-        let args = AgentArgs {
-            prompt:        "test".to_string(),
-            provider:      Some("acme-aws".to_string()),
-            model:         None,
-            permissions:   None,
-            auto_approve:  false,
-            debug:         false,
-            verbose:       false,
-            skills_dir:    None,
-            output_format: None,
-        };
+        let catalog = acme_catalog();
+        let args = args_with(Some("acme-aws"), None);
 
-        let provider_id = parse_provider(&args).unwrap();
+        let provider_id = parse_provider(&args);
         assert_eq!(provider_id, ProviderId::new("acme-aws"));
         assert_eq!(
             profile_kind_for_provider(&catalog, &provider_id, None).unwrap(),
@@ -989,127 +1051,29 @@ mod tests {
 
     #[test]
     fn standalone_provider_resolution_uses_catalog_model_provider_when_provider_omitted() {
-        let mut settings = LlmCatalogSettings::default();
-        settings
-            .providers
-            .insert("acme-aws".to_string(), ProviderCatalogSettings {
-                display_name: Some("Acme AWS".to_string()),
-                adapter: Some("openai_compatible".to_string()),
-                base_url: Some("https://example.invalid/v1".to_string()),
-                agent_profile: Some(AgentProfileKind::OpenAi),
-                ..ProviderCatalogSettings::default()
-            });
-        settings
-            .models
-            .insert("acme-aws-claude".to_string(), ModelCatalogSettings {
-                provider: Some("acme-aws".to_string()),
-                display_name: Some("Acme AWS Claude".to_string()),
-                family: Some("claude".to_string()),
-                default: Some(true),
-                limits: Some(SettingsModelLimits {
-                    context_window: Some(1000),
-                    max_output:     None,
-                }),
-                features: Some(SettingsModelFeatures {
-                    tools:                     Some(true),
-                    vision:                    Some(false),
-                    reasoning:                 Some(false),
-                    reasoning_by_default:      None,
-                    reasoning_effort:          None,
-                    prompt_cache:              None,
-                    cache_control_breakpoints: None,
-                    sampling_params:           None,
-                }),
-                ..ModelCatalogSettings::default()
-            });
-        let catalog = Catalog::from_builtin_with_overrides(&settings).unwrap();
-        let args = AgentArgs {
-            prompt:        "test".to_string(),
-            provider:      None,
-            model:         Some("acme-aws-claude".to_string()),
-            permissions:   None,
-            auto_approve:  false,
-            debug:         false,
-            verbose:       false,
-            skills_dir:    None,
-            output_format: None,
-        };
+        let catalog = acme_catalog();
+        let args = args_with(None, Some("acme-aws-claude"));
 
         assert_eq!(
-            resolve_provider_id(&catalog, &args, &catalog.all_provider_ids()).unwrap(),
+            resolve_provider_id(&catalog, &args, &enabled_ids(&catalog)),
             ProviderId::new("acme-aws")
         );
     }
 
     #[test]
     fn standalone_provider_resolution_canonicalizes_explicit_provider_alias() {
-        let mut settings = LlmCatalogSettings::default();
-        settings
-            .providers
-            .insert("acme-aws".to_string(), ProviderCatalogSettings {
-                display_name: Some("Acme AWS".to_string()),
-                adapter: Some("openai_compatible".to_string()),
-                base_url: Some("https://example.invalid/v1".to_string()),
-                agent_profile: Some(AgentProfileKind::OpenAi),
-                aliases: Some(vec!["br".to_string()]),
-                ..ProviderCatalogSettings::default()
-            });
-        let catalog = Catalog::from_builtin_with_overrides(&settings).unwrap();
-        let args = AgentArgs {
-            prompt:        "test".to_string(),
-            provider:      Some("br".to_string()),
-            model:         None,
-            permissions:   None,
-            auto_approve:  false,
-            debug:         false,
-            verbose:       false,
-            skills_dir:    None,
-            output_format: None,
-        };
+        let catalog = acme_catalog();
+        let args = args_with(Some("br"), None);
 
         assert_eq!(
-            resolve_provider_id(&catalog, &args, &catalog.all_provider_ids()).unwrap(),
+            resolve_provider_id(&catalog, &args, &enabled_ids(&catalog)),
             ProviderId::new("acme-aws")
         );
     }
 
     #[test]
     fn standalone_profile_kind_uses_model_agent_profile_override() {
-        let mut settings = LlmCatalogSettings::default();
-        settings
-            .providers
-            .insert("acme-aws".to_string(), ProviderCatalogSettings {
-                display_name: Some("Acme AWS".to_string()),
-                adapter: Some("openai_compatible".to_string()),
-                base_url: Some("https://example.invalid/v1".to_string()),
-                agent_profile: Some(AgentProfileKind::OpenAi),
-                ..ProviderCatalogSettings::default()
-            });
-        settings
-            .models
-            .insert("acme-aws-claude".to_string(), ModelCatalogSettings {
-                provider: Some("acme-aws".to_string()),
-                display_name: Some("Acme AWS Claude".to_string()),
-                family: Some("claude".to_string()),
-                default: Some(true),
-                agent_profile: Some(AgentProfileKind::Anthropic),
-                limits: Some(SettingsModelLimits {
-                    context_window: Some(1000),
-                    max_output:     None,
-                }),
-                features: Some(SettingsModelFeatures {
-                    tools:                     Some(true),
-                    vision:                    Some(false),
-                    reasoning:                 Some(false),
-                    reasoning_by_default:      None,
-                    reasoning_effort:          None,
-                    prompt_cache:              None,
-                    cache_control_breakpoints: None,
-                    sampling_params:           None,
-                }),
-                ..ModelCatalogSettings::default()
-            });
-        let catalog = Catalog::from_builtin_with_overrides(&settings).unwrap();
+        let catalog = acme_catalog();
 
         assert_eq!(
             profile_kind_for_provider(
@@ -1124,44 +1088,22 @@ mod tests {
 
     #[test]
     fn summarizer_model_id_uses_selected_model_for_custom_provider_without_default() {
-        let mut settings = LlmCatalogSettings::default();
-        settings
-            .providers
-            .insert("acme-aws".to_string(), ProviderCatalogSettings {
-                display_name: Some("Acme AWS".to_string()),
-                adapter: Some("openai_compatible".to_string()),
-                base_url: Some("https://example.invalid/v1".to_string()),
-                agent_profile: Some(AgentProfileKind::OpenAi),
-                ..ProviderCatalogSettings::default()
-            });
-        let catalog = Catalog::from_builtin_with_overrides(&settings).unwrap();
+        let catalog = test_catalog_with_overlay(ACME_OVERLAY_WITHOUT_MODELS);
         let provider_id = ProviderId::new("acme-aws");
 
         let model_id = summarizer_model_id(&provider_id, &catalog, "acme-aws-claude-sonnet-4-6");
 
         assert_eq!(model_id.provider(), &provider_id);
-        assert_eq!(model_id.model_id(), "acme-aws-claude-sonnet-4-6");
+        assert_eq!(model_id.model().as_str(), "acme-aws-claude-sonnet-4-6");
     }
 
     #[test]
-    fn summarizer_model_id_ignores_profile_for_custom_provider_without_default() {
-        let mut settings = LlmCatalogSettings::default();
-        settings
-            .providers
-            .insert("acme-aws".to_string(), ProviderCatalogSettings {
-                display_name: Some("Acme AWS".to_string()),
-                adapter: Some("openai_compatible".to_string()),
-                base_url: Some("https://example.invalid/v1".to_string()),
-                agent_profile: Some(AgentProfileKind::Anthropic),
-                ..ProviderCatalogSettings::default()
-            });
-        let catalog = Catalog::from_builtin_with_overrides(&settings).unwrap();
-        let provider_id = ProviderId::new("acme-aws");
+    fn summarizer_model_id_prefers_the_provider_small_default() {
+        let catalog = test_catalog();
+        let model_id = summarizer_model_id(&builtin::openai(), &catalog, "gpt-5.4");
 
-        let model_id = summarizer_model_id(&provider_id, &catalog, "acme-aws-claude-sonnet-4-6");
-
-        assert_eq!(model_id.provider(), &provider_id);
-        assert_eq!(model_id.model_id(), "acme-aws-claude-sonnet-4-6");
+        assert_eq!(model_id.provider(), &builtin::openai());
+        assert_eq!(model_id.model().as_str(), "gpt-5.4-mini");
     }
 
     // subagent tool registration tests
@@ -1170,7 +1112,7 @@ mod tests {
     fn build_profile_can_register_subagent_tools() {
         let mut profile = AgentProfileBuilder::new(
             AgentProfileKind::Anthropic,
-            ProviderId::anthropic(),
+            builtin::anthropic(),
             "model",
             test_catalog(),
         )

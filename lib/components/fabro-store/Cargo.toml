@@ -17,6 +17,7 @@ test-support = ["dep:fabro-db"]
 [dependencies]
 fabro-db = { path = "../../foundation/fabro-db", optional = true }
 fabro-types = { path = "../../foundation/fabro-types" }
+lithos-llm = { workspace = true, features = ["runtime"] }
 fabro-util = { path = "../../foundation/fabro-util" }
 hex.workspace = true
 slatedb.workspace = true

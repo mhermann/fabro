@@ -20,7 +20,7 @@ These tools are registered for every provider profile:
 | `write_file` | write | Create or overwrite a file |
 | `grep` | read | Search file contents with regex patterns |
 | `glob` | read | Find files by name pattern |
-| `web_search` | shell | Search the web via Brave or Venice |
+| `web_search` | shell | Search the web via SearXNG, Brave, or Venice |
 | `web_fetch` | shell | Fetch and optionally summarize a URL |
 
 ## Provider-specific tools
@@ -123,18 +123,18 @@ Patterns are case-sensitive and relative to `path`: `*` and `?` stay within one 
 
 ### web_search
 
-Searches the web using Brave Search or Venice Search. Fabro selects the backend automatically from the available credentials.
+Searches the web using a self-hosted SearXNG instance, Brave Search, or Venice Search. Fabro selects the backend automatically from the available credentials.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `query` | string | yes | Search query. Venice rejects queries longer than 400 characters before the HTTP call. |
 | `max_results` | integer | no | Maximum results (default: 5, max: 20) |
 
-Fabro uses direct [Brave Search](/integrations/brave-search) when `BRAVE_SEARCH_API_KEY` is present. Otherwise it uses [Venice Search](/integrations/venice-search) when `VENICE_API_KEY` is present. If both credentials are present, Brave wins. Venice always uses its Brave search engine.
+Fabro uses a self-hosted [SearXNG](/integrations/searxng) instance when `SEARXNG_URL` is present. Otherwise it uses direct [Brave Search](/integrations/brave-search) when `BRAVE_SEARCH_API_KEY` is present, then [Venice Search](/integrations/venice-search) when `VENICE_API_KEY` is present. Venice always uses its Brave search engine.
 
-Runs read both keys from the server vault. Workers start from a cleared environment, so exporting a key in the server's shell has no effect. The standalone agent CLI reads the keys from the invoking shell instead.
+Runs read these values from the server vault. Workers start from a cleared environment, so exporting a key or URL in the server's shell has no effect. The standalone agent CLI reads them from the invoking shell instead.
 
-The tool is registered when either credential is available. Once Fabro selects a backend, a failed call returns an error; it does not retry through the other backend. Results contain numbered titles, URLs, and descriptions. Venice includes `date` on a fourth line when present.
+The tool is registered when any credential is available. Once Fabro selects a backend, a failed call returns an error; it does not retry through the other backends. Results contain numbered titles, URLs, and descriptions. SearXNG includes `date` on a fourth line when the instance supplies `publishedDate`; Venice includes `date` when present.
 
 ### web_fetch
 

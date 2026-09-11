@@ -76,7 +76,7 @@ pub use todo_tools::{
     make_todo_list_tool, make_update_plan_tool,
 };
 pub use tool_permissions::canonical_tool_name;
-pub use tool_registry::{AgentEventEmitter, ToolRegistry};
+pub use tool_registry::{AgentEventEmitter, ToolDefinitionExt, ToolRegistry};
 pub use tools::{
     WebFetchSummarizer, make_edit_file_tool, make_glob_tool, make_grep_tool, make_read_file_tool,
     make_shell_tool, make_shell_tool_with_options, make_write_file_tool, register_core_tools,

@@ -103,11 +103,13 @@ pub struct ServerSandboxLayer {
 #[serde(deny_unknown_fields)]
 pub struct ServerSandboxProvidersLayer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local:   Option<ServerSandboxProviderLayer>,
+    pub local:      Option<ServerSandboxProviderLayer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub docker:  Option<ServerSandboxProviderLayer>,
+    pub docker:     Option<ServerSandboxProviderLayer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub daytona: Option<ServerSandboxProviderLayer>,
+    pub daytona:    Option<ServerSandboxProviderLayer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kubernetes: Option<ServerSandboxProviderLayer>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, fabro_macros::Combine)]

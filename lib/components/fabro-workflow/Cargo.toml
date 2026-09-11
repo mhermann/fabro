@@ -29,7 +29,7 @@ fabro-graphviz = { path = "../fabro-graphviz" }
 fabro-hooks = { path = "../fabro-hooks" }
 fabro-validate = { path = "../fabro-validate" }
 fabro-dump = { path = "../fabro-dump" }
-fabro-sandbox = { path = "../fabro-sandbox", features = ["daytona"] }
+fabro-sandbox = { path = "../fabro-sandbox", features = ["daytona", "kubernetes"] }
 fabro-mcp = { path = "../fabro-mcp" }
 fabro-github = { path = "../fabro-github" }
 fabro-forgejo = { path = "../fabro-forgejo" }
@@ -40,11 +40,11 @@ fabro-util = { path = "../../foundation/fabro-util" }
 fabro-redact.workspace = true
 fabro-checkpoint = { path = "../fabro-checkpoint" }
 fabro-llm = { path = "../fabro-llm" }
-fabro-model = { path = "../../foundation/fabro-model" }
 fabro-core = { path = "../../foundation/fabro-core" }
 fabro-store = { path = "../fabro-store" }
 fabro-static.workspace = true
 fabro-types = { path = "../../foundation/fabro-types" }
+lithos-llm = { workspace = true, features = ["runtime"] }
 fabro-http.workspace = true
 thiserror.workspace = true
 strum.workspace = true
@@ -76,6 +76,7 @@ tempfile = "3"
 toml.workspace = true
 fabro-vault = { path = "../../foundation/fabro-vault" }
 [dev-dependencies]
+fabro-llm = { path = "../fabro-llm", features = ["test-support"] }
 fabro-store = { path = "../fabro-store", features = ["test-support"] }
 fabro-auth = { path = "../../foundation/fabro-auth", features = ["test-support"] }
 fabro-github = { path = "../fabro-github", features = ["test-support"] }

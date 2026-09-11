@@ -1,6 +1,5 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
-use fabro_model::{AgentProfileKind, BillingPolicy, CodecKind, ProviderAuthConfig};
 use fabro_types::PermissionLevel;
 use fabro_types::settings::cli::{CliAuthStrategy, OutputFormat, OutputVerbosity};
 use fabro_types::settings::run::{
@@ -15,7 +14,6 @@ use fabro_types::settings::{Duration, InterpString, Size};
 use super::LogFilter;
 use super::cli::{CliAuthLayer, CliLoggingLayer, CliTargetLayer};
 use super::environment::EnvironmentDockerfileLayer;
-use super::llm::{CostRates, CredentialRef, ReasoningEffortFeature};
 use super::run::{
     HookAgentMarker, HookEntry, HookTlsMode, InterviewProviderLayer, ModelRefOrSplice,
     NotificationProviderLayer, RunArtifactsLayer, RunCheckpointLayer, RunGoalLayer,
@@ -85,11 +83,6 @@ impl_combine_or_option!(
     ServerAuthMethod,
     WebhookStrategy,
     LogFilter,
-    AgentProfileKind,
-    BillingPolicy,
-    CodecKind,
-    ProviderAuthConfig,
-    ReasoningEffortFeature,
 );
 
 impl Combine for Option<Vec<String>> {
@@ -98,19 +91,7 @@ impl Combine for Option<Vec<String>> {
     }
 }
 
-impl Combine for Option<Vec<CredentialRef>> {
-    fn combine(self, other: Self) -> Self {
-        self.or(other)
-    }
-}
-
 impl Combine for Option<Vec<ServerAuthMethod>> {
-    fn combine(self, other: Self) -> Self {
-        self.or(other)
-    }
-}
-
-impl Combine for Option<BTreeMap<String, CostRates>> {
     fn combine(self, other: Self) -> Self {
         self.or(other)
     }

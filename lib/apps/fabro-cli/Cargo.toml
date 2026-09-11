@@ -22,7 +22,6 @@ fabro-auth = { path = "../../foundation/fabro-auth" }
 fabro-config = { path = "../../foundation/fabro-config" }
 fabro-environment = { path = "../../components/fabro-environment" }
 fabro-llm = { path = "../../components/fabro-llm" }
-fabro-model = { path = "../../foundation/fabro-model", features = ["clap"] }
 fabro-oauth = { path = "../../foundation/fabro-oauth" }
 fabro-github = { path = "../../components/fabro-github" }
 fabro-forgejo = { path = "../../components/fabro-forgejo" }
@@ -47,6 +46,7 @@ fabro-telemetry = { path = "../../foundation/fabro-telemetry" }
 fabro-store = { path = "../../components/fabro-store" }
 fabro-vault = { path = "../../foundation/fabro-vault" }
 fabro-types = { path = "../../foundation/fabro-types", features = ["clap"] }
+lithos-llm = { workspace = true, features = ["runtime"] }
 fabro-redact.workspace = true
 fabro-util = { path = "../../foundation/fabro-util" }
 fabro-http.workspace = true

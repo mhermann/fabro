@@ -81,7 +81,7 @@ mod tests {
     use async_trait::async_trait;
     use fabro_agent::{LocalSandbox, Sandbox};
     use fabro_graphviz::graph::{AttrValue, Node};
-    use fabro_model::{ReasoningEffort, Speed};
+    use lithos_llm::types::{ReasoningEffort, Speed};
     use tokio_util::sync::CancellationToken;
 
     use super::*;

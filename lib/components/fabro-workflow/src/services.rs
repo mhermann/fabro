@@ -5,14 +5,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fabro_agent::{Sandbox, ToolEnvProvider};
-use fabro_auth::CredentialSource;
-#[cfg(test)]
-use fabro_auth::ResolvedCredentials;
 use fabro_github::token_source::InstallationTokenSource;
 use fabro_hooks::{HookContext, HookDecision, HookExecutionContext, HookRunner};
 use fabro_interview::Interviewer;
-use fabro_model::{Catalog, ProviderId};
+use fabro_llm::credentials::CredentialProvider;
+use fabro_llm::lithos_catalog::Catalog;
 use fabro_types::{ManifestPath, RunId};
+use lithos_llm::catalog::ProviderId;
 use tokio_util::sync::CancellationToken;
 
 use crate::event::Emitter;
@@ -101,7 +100,7 @@ pub struct RunServices {
     pub(crate) cancel_token:      CancellationToken,
     pub provider_id:              ProviderId,
     pub model:                    String,
-    pub llm_source:               Arc<dyn CredentialSource>,
+    pub llm_source:               Arc<dyn CredentialProvider>,
     pub catalog:                  Arc<Catalog>,
     pub(crate) sandbox_git:       Arc<SandboxGitRuntime>,
     pub(crate) metadata_runtime:  Arc<RunMetadataRuntime>,
@@ -123,7 +122,7 @@ impl RunServices {
         cancel_token: CancellationToken,
         provider_id: ProviderId,
         model: String,
-        llm_source: Arc<dyn CredentialSource>,
+        llm_source: Arc<dyn CredentialProvider>,
         catalog: Arc<Catalog>,
         sandbox_git: Arc<SandboxGitRuntime>,
         metadata_runtime: Arc<RunMetadataRuntime>,
@@ -277,18 +276,22 @@ impl EngineServices {
         struct StubCredentialSource;
 
         #[async_trait::async_trait]
-        impl CredentialSource for StubCredentialSource {
-            async fn resolve(&self, catalog: &Catalog) -> anyhow::Result<ResolvedCredentials> {
-                let _ = catalog;
-                Ok(ResolvedCredentials {
-                    credentials: Vec::new(),
-                    auth_issues: Vec::new(),
+        impl CredentialProvider for StubCredentialSource {
+            async fn credentials(
+                &self,
+                provider: &fabro_llm::lithos_catalog::CatalogProvider,
+            ) -> Result<fabro_llm::credentials::Credentials, fabro_llm::credentials::CredentialError>
+            {
+                Err(fabro_llm::credentials::CredentialError::NotConfigured {
+                    provider: provider.id().clone(),
                 })
             }
 
-            async fn configured_providers(&self, catalog: &Catalog) -> Vec<ProviderId> {
-                let _ = catalog;
-                Vec::new()
+            async fn is_configured(
+                &self,
+                _provider: &fabro_llm::lithos_catalog::CatalogProvider,
+            ) -> bool {
+                false
             }
         }
 
@@ -325,10 +328,10 @@ impl EngineServices {
                 None,
                 locations,
                 CancellationToken::new(),
-                ProviderId::anthropic(),
-                "claude-sonnet-4-6".to_string(),
+                lithos_llm::catalog::builtin::anthropic(),
+                "claude-sonnet-4.6".to_string(),
                 Arc::new(StubCredentialSource),
-                Arc::new(Catalog::from_builtin().expect("default catalog should build")),
+                Arc::new(fabro_llm::default_catalog()),
                 Arc::new(SandboxGitRuntime::new()),
                 Arc::new(RunMetadataRuntime::new()),
                 None,
@@ -402,12 +405,12 @@ mod tests {
         let services = EngineServices::test_default();
 
         assert!(
-            services
-                .run
-                .llm_source
-                .configured_providers(&services.run.catalog)
-                .await
-                .is_empty()
+            fabro_llm::configured_providers(
+                &services.run.catalog,
+                services.run.llm_source.as_ref()
+            )
+            .await
+            .is_empty()
         );
     }
 

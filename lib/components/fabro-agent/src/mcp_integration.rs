@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use fabro_llm::types::ToolDefinition;
 use fabro_mcp::connection_manager::{McpConnectionManager, call_result_to_string};
+use lithos_llm::types::ToolDefinition;
 
 use crate::tool_registry::{RegisteredTool, ToolSource};
 
@@ -18,11 +18,11 @@ pub fn make_mcp_tools(manager: &Arc<McpConnectionManager>) -> Vec<RegisteredTool
             let original_name = info.original_tool_name.clone();
 
             RegisteredTool {
-                definition: ToolDefinition {
-                    name:        qualified_name.clone(),
-                    description: info.description.clone(),
-                    parameters:  info.input_schema.clone(),
-                },
+                definition: ToolDefinition::function(
+                    qualified_name.clone(),
+                    info.description.clone(),
+                    info.input_schema.clone(),
+                ),
                 executor:   Arc::new(move |args, _ctx| {
                     let mgr = Arc::clone(&mgr);
                     let name = name.clone();

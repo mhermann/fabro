@@ -1,17 +1,18 @@
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use fabro_llm::Error as LlmError;
-use fabro_llm::client::Client;
-use fabro_llm::provider::{ProviderAdapter, StreamEventStream};
-use fabro_llm::types::{
-    ContentPart, FinishReason, Message, Request, Response, StreamEvent, TokenCounts,
+use fabro_llm::adapter::{ProviderAdapter, ResolvedCall};
+use fabro_llm::lithos_catalog::AdapterId;
+use fabro_llm::test_support::client_with_adapters;
+pub use fabro_llm::test_support::{response_to_stream, test_retry_policy};
+use fabro_llm::{
+    Client, ClientOptions, Error as LlmError, FinishReason, Request, Response, ResponseStream,
 };
-use fabro_model::{AgentProfileKind, ProviderId};
 pub use fabro_sandbox::test_support::{MockSandbox, MutableMockSandbox};
-use futures::stream;
+use fabro_types::AgentProfileKind;
+use lithos_llm::catalog::{ModelId, ProviderId, builtin};
+use lithos_llm::types::{ContentPart, TokenCounts, ToolCall};
 
 use crate::agent_profile::AgentProfile;
 use crate::config::SessionOptions;
@@ -21,6 +22,12 @@ use crate::sandbox::*;
 use crate::session::Session;
 use crate::skills::{Skill, format_skills_prompt_section};
 use crate::tool_registry::{RegisteredTool, ToolRegistry, ToolSource};
+
+/// The provider every test profile routes to.
+pub const TEST_PROVIDER: &str = builtin::ids::ANTHROPIC;
+/// The model every test profile requests. It is not in the catalog, so the
+/// provider's passthrough route serves it.
+pub const TEST_MODEL: &str = "mock-model";
 
 // --- TestProfile ---
 
@@ -58,11 +65,11 @@ impl AgentProfile for TestProfile {
     }
 
     fn provider_id(&self) -> ProviderId {
-        ProviderId::anthropic()
+        builtin::anthropic()
     }
 
     fn model(&self) -> &'static str {
-        "mock-model"
+        TEST_MODEL
     }
 
     fn tool_registry(&self) -> &ToolRegistry {
@@ -102,9 +109,11 @@ impl AgentProfile for TestProfile {
 
 // --- MockLlmProvider ---
 
+/// Answers from a script of responses, repeating the last one.
 pub struct MockLlmProvider {
     pub responses:  Vec<Response>,
     pub call_index: AtomicUsize,
+    id:             AdapterId,
 }
 
 impl MockLlmProvider {
@@ -112,94 +121,110 @@ impl MockLlmProvider {
         Self {
             responses,
             call_index: AtomicUsize::new(0),
+            id: AdapterId::new("mock"),
         }
+    }
+
+    fn next_response(&self) -> Response {
+        let idx = self.call_index.fetch_add(1, Ordering::SeqCst);
+        self.responses[idx.min(self.responses.len() - 1)].clone()
     }
 }
 
 #[async_trait]
 impl ProviderAdapter for MockLlmProvider {
-    fn name(&self) -> &'static str {
-        "mock"
+    fn id(&self) -> &AdapterId {
+        &self.id
     }
 
-    async fn complete(&self, _request: &Request) -> Result<Response, LlmError> {
-        let idx = self.call_index.fetch_add(1, Ordering::SeqCst);
-        if idx < self.responses.len() {
-            Ok(self.responses[idx].clone())
-        } else {
-            Ok(self.responses[self.responses.len() - 1].clone())
-        }
+    async fn complete(&self, _call: &ResolvedCall) -> Result<Response, LlmError> {
+        Ok(self.next_response())
     }
 
-    async fn stream(&self, _request: &Request) -> Result<StreamEventStream, LlmError> {
-        let idx = self.call_index.fetch_add(1, Ordering::SeqCst);
-        let response = if idx < self.responses.len() {
-            self.responses[idx].clone()
-        } else {
-            self.responses[self.responses.len() - 1].clone()
-        };
-        Ok(response_to_stream(response))
+    async fn stream(&self, _call: &ResolvedCall) -> Result<ResponseStream, LlmError> {
+        Ok(response_to_stream(self.next_response()))
     }
-}
-
-/// Convert a canned `Response` into a `StreamEventStream` for mock streaming.
-pub fn response_to_stream(response: Response) -> StreamEventStream {
-    let mut events: Vec<Result<StreamEvent, LlmError>> = Vec::new();
-
-    // Emit text deltas for text content
-    let text = response.text();
-    if !text.is_empty() {
-        events.push(Ok(StreamEvent::text_delta(text, None)));
-    }
-
-    // Emit tool call events
-    for part in &response.message.content {
-        if let ContentPart::ToolCall(tc) = part {
-            events.push(Ok(StreamEvent::ToolCallEnd {
-                tool_call: tc.clone(),
-            }));
-        }
-    }
-
-    // Emit finish
-    events.push(Ok(StreamEvent::finish(
-        response.finish_reason.clone(),
-        response.usage.clone(),
-        response,
-    )));
-
-    Box::pin(stream::iter(events))
 }
 
 // --- Helper functions ---
 
-pub fn text_response(text: &str) -> Response {
-    Response {
-        id:            format!("resp_{text}"),
-        model:         "mock-model".into(),
-        provider:      "mock".into(),
-        message:       Message::assistant(text),
-        finish_reason: FinishReason::Stop,
-        usage:         TokenCounts {
-            input_tokens: 10,
-            output_tokens: 5,
-            ..Default::default()
-        },
-        raw:           None,
-        warnings:      vec![],
-        rate_limit:    None,
-        cost_usd:      None,
-        cost_source:   None,
-    }
+/// A response attributed to the test route with the given content parts.
+pub fn response_with_parts(id: &str, parts: Vec<ContentPart>) -> Response {
+    let has_tool_calls = parts
+        .iter()
+        .any(|part| matches!(part, ContentPart::ToolCall(_)));
+    let mut response = Response::new(
+        ProviderId::new(TEST_PROVIDER),
+        ModelId::new(TEST_MODEL),
+        parts,
+    );
+    response.id = Some(id.to_string());
+    response.finish_reason = if has_tool_calls {
+        FinishReason::ToolCall
+    } else {
+        FinishReason::Stop
+    };
+    response.usage = TokenCounts {
+        input: 10,
+        output: 5,
+        ..TokenCounts::default()
+    };
+    response
 }
 
+pub fn text_response(text: &str) -> Response {
+    response_with_parts(&format!("resp_{text}"), vec![ContentPart::Text {
+        text: text.to_string(),
+    }])
+}
+
+pub fn tool_call_response(
+    tool_name: &str,
+    tool_call_id: &str,
+    args: serde_json::Value,
+) -> Response {
+    response_with_parts(&format!("resp_{tool_call_id}"), vec![
+        ContentPart::Text {
+            text: "Let me use a tool.".to_string(),
+        },
+        ContentPart::ToolCall(ToolCall::function(tool_call_id, tool_name, args)),
+    ])
+}
+
+pub fn multi_tool_call_response(calls: Vec<(&str, &str, serde_json::Value)>) -> Response {
+    let mut content = vec![ContentPart::Text {
+        text: "Let me use multiple tools.".to_string(),
+    }];
+    for (tool_name, tool_call_id, args) in calls {
+        content.push(ContentPart::ToolCall(ToolCall::function(
+            tool_call_id,
+            tool_name,
+            args,
+        )));
+    }
+    response_with_parts("resp_multi", content)
+}
+
+/// A client over the Fabro test catalog that routes the test provider to
+/// `provider`, with client-side retries but no delay between attempts.
 pub async fn make_client(provider: Arc<dyn ProviderAdapter>) -> Client {
-    let mut providers = HashMap::new();
-    providers.insert(provider.name().to_string(), provider.clone());
-    // Also register under "anthropic" so TestProfile (ProviderId::anthropic())
-    // routes correctly
-    providers.insert("anthropic".to_string(), provider);
-    Client::new(providers, Some("mock".into()), vec![])
+    make_client_with_options(
+        provider,
+        ClientOptions::default().with_retry(Some(test_retry_policy())),
+    )
+}
+
+/// A client over the Fabro test catalog with no client-side retries. Tests
+/// that count provider calls made by the agent's own replay loop use this.
+pub fn make_client_without_retries(provider: Arc<dyn ProviderAdapter>) -> Client {
+    make_client_with_options(provider, ClientOptions::default())
+}
+
+pub fn make_client_with_options(
+    provider: Arc<dyn ProviderAdapter>,
+    options: ClientOptions,
+) -> Client {
+    client_with_adapters(vec![(TEST_PROVIDER, provider)], options)
 }
 
 pub async fn make_session(responses: Vec<Response>) -> Session {
@@ -245,47 +270,14 @@ pub async fn make_session_with_tools_and_config(
     Session::new(client, profile, env, config, None)
 }
 
-pub fn tool_call_response(
-    tool_name: &str,
-    tool_call_id: &str,
-    args: serde_json::Value,
-) -> Response {
-    use fabro_llm::types::{ContentPart, Role, ToolCall};
-    Response {
-        id:            format!("resp_{tool_call_id}"),
-        model:         "mock-model".into(),
-        provider:      "mock".into(),
-        message:       Message {
-            role:         Role::Assistant,
-            content:      vec![
-                ContentPart::text("Let me use a tool."),
-                ContentPart::ToolCall(ToolCall::new(tool_call_id, tool_name, args)),
-            ],
-            name:         None,
-            tool_call_id: None,
-        },
-        finish_reason: FinishReason::ToolCalls,
-        usage:         TokenCounts {
-            input_tokens: 10,
-            output_tokens: 5,
-            ..Default::default()
-        },
-        raw:           None,
-        warnings:      vec![],
-        rate_limit:    None,
-        cost_usd:      None,
-        cost_source:   None,
-    }
-}
-
 pub fn make_echo_tool() -> RegisteredTool {
-    use fabro_llm::types::ToolDefinition;
+    use lithos_llm::types::ToolDefinition;
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "echo".into(),
-            description: "Echoes the input".into(),
-            parameters:  serde_json::json!({"type": "object", "properties": {"text": {"type": "string"}}}),
-        },
+        definition: ToolDefinition::function(
+            "echo",
+            "Echoes the input",
+            serde_json::json!({"type": "object", "properties": {"text": {"type": "string"}}}),
+        ),
         executor:   Arc::new(|args, _ctx| {
             Box::pin(async move {
                 let text = args
@@ -300,13 +292,13 @@ pub fn make_echo_tool() -> RegisteredTool {
 }
 
 pub fn make_error_tool() -> RegisteredTool {
-    use fabro_llm::types::ToolDefinition;
+    use lithos_llm::types::ToolDefinition;
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "fail_tool".into(),
-            description: "Always fails".into(),
-            parameters:  serde_json::json!({"type": "object"}),
-        },
+        definition: ToolDefinition::function(
+            "fail_tool",
+            "Always fails",
+            serde_json::json!({"type": "object"}),
+        ),
         executor:   Arc::new(|_args, _ctx| {
             Box::pin(async move { Err("tool execution failed".to_string()) })
         }),
@@ -316,22 +308,41 @@ pub fn make_error_tool() -> RegisteredTool {
 
 // --- MockErrorProvider ---
 
+/// Fails every call with a fresh error from `factory`.
 pub struct MockErrorProvider {
-    pub error: LlmError,
+    factory: Box<dyn Fn() -> LlmError + Send + Sync>,
+    calls:   AtomicUsize,
+    id:      AdapterId,
+}
+
+impl MockErrorProvider {
+    pub fn new(factory: impl Fn() -> LlmError + Send + Sync + 'static) -> Self {
+        Self {
+            factory: Box::new(factory),
+            calls:   AtomicUsize::new(0),
+            id:      AdapterId::new("mock"),
+        }
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait]
 impl ProviderAdapter for MockErrorProvider {
-    fn name(&self) -> &'static str {
-        "mock"
+    fn id(&self) -> &AdapterId {
+        &self.id
     }
 
-    async fn complete(&self, _request: &Request) -> Result<Response, LlmError> {
-        Err(self.error.clone())
+    async fn complete(&self, _call: &ResolvedCall) -> Result<Response, LlmError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err((self.factory)())
     }
 
-    async fn stream(&self, _request: &Request) -> Result<StreamEventStream, LlmError> {
-        Err(self.error.clone())
+    async fn stream(&self, _call: &ResolvedCall) -> Result<ResponseStream, LlmError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err((self.factory)())
     }
 }
 
@@ -340,69 +351,37 @@ impl ProviderAdapter for MockErrorProvider {
 /// A mock LLM provider that captures the full Request for test assertions.
 pub struct CapturingLlmProvider {
     pub captured_request: Mutex<Option<Request>>,
+    id:                   AdapterId,
 }
 
 impl CapturingLlmProvider {
     pub fn new() -> Self {
         Self {
             captured_request: Mutex::new(None),
+            id:               AdapterId::new("mock"),
         }
     }
 }
 
 #[async_trait]
 impl ProviderAdapter for CapturingLlmProvider {
-    fn name(&self) -> &'static str {
-        "mock"
+    fn id(&self) -> &AdapterId {
+        &self.id
     }
 
-    async fn complete(&self, request: &Request) -> Result<Response, LlmError> {
+    async fn complete(&self, call: &ResolvedCall) -> Result<Response, LlmError> {
         *self
             .captured_request
             .lock()
-            .expect("captured_request lock poisoned") = Some(request.clone());
+            .expect("captured_request lock poisoned") = Some(call.request().clone());
         Ok(text_response("captured"))
     }
 
-    async fn stream(&self, request: &Request) -> Result<StreamEventStream, LlmError> {
+    async fn stream(&self, call: &ResolvedCall) -> Result<ResponseStream, LlmError> {
         *self
             .captured_request
             .lock()
-            .expect("captured_request lock poisoned") = Some(request.clone());
+            .expect("captured_request lock poisoned") = Some(call.request().clone());
         Ok(response_to_stream(text_response("captured")))
-    }
-}
-
-pub fn multi_tool_call_response(calls: Vec<(&str, &str, serde_json::Value)>) -> Response {
-    use fabro_llm::types::{ContentPart, Role, ToolCall};
-    let mut content = vec![ContentPart::text("Let me use multiple tools.")];
-    for (tool_name, tool_call_id, args) in calls {
-        content.push(ContentPart::ToolCall(ToolCall::new(
-            tool_call_id,
-            tool_name,
-            args,
-        )));
-    }
-    Response {
-        id:            "resp_multi".into(),
-        model:         "mock-model".into(),
-        provider:      "mock".into(),
-        message:       Message {
-            role: Role::Assistant,
-            content,
-            name: None,
-            tool_call_id: None,
-        },
-        finish_reason: FinishReason::ToolCalls,
-        usage:         TokenCounts {
-            input_tokens: 10,
-            output_tokens: 5,
-            ..Default::default()
-        },
-        raw:           None,
-        warnings:      vec![],
-        rate_limit:    None,
-        cost_usd:      None,
-        cost_source:   None,
     }
 }

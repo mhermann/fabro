@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use fabro_model::AgentProfileKind;
+use fabro_types::AgentProfileKind;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -34,7 +34,7 @@ pub async fn discover_memory(
         AgentProfileKind::Anthropic | AgentProfileKind::Claude5 => {
             vec!["AGENTS.md", "CLAUDE.md"]
         }
-        AgentProfileKind::OpenAi | AgentProfileKind::Gpt56 => {
+        AgentProfileKind::OpenAi | AgentProfileKind::Gpt56 | AgentProfileKind::Gpt6 => {
             vec!["AGENTS.md", ".codex/instructions.md"]
         }
         AgentProfileKind::Gemini => vec!["AGENTS.md", "GEMINI.md"],

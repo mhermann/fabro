@@ -12,6 +12,8 @@ use crate::SandboxEventCallback;
 use crate::daytona::DaytonaSandbox;
 #[cfg(feature = "docker")]
 use crate::docker::DockerSandbox;
+#[cfg(feature = "kubernetes")]
+use crate::kubernetes::KubernetesSandbox;
 use crate::local::LocalSandbox;
 
 /// Reconnect to a sandbox from a saved record.
@@ -106,5 +108,29 @@ pub async fn reconnect_for_run_with_callback(
         }
         #[cfg(not(feature = "daytona"))]
         SandboxProviderKind::Daytona => bail!("Daytona sandbox support is not enabled"),
+        #[cfg(feature = "kubernetes")]
+        SandboxProviderKind::Kubernetes => {
+            let repo_cloned = runtime
+                .repo_cloned
+                .context("Kubernetes run sandbox missing repo_cloned metadata")?;
+
+            let mut sandbox = KubernetesSandbox::reconnect(
+                &runtime.id,
+                repo_cloned,
+                runtime.working_directory.clone(),
+                runtime.clone_origin_url.clone(),
+                runtime.clone_branch.clone(),
+                run_id,
+            )
+            .await
+            .map_err(anyhow::Error::new)
+            .context("Failed to reconnect Kubernetes sandbox")?;
+            if let Some(callback) = event_callback {
+                sandbox.set_event_callback(callback);
+            }
+            Ok(Box::new(sandbox))
+        }
+        #[cfg(not(feature = "kubernetes"))]
+        SandboxProviderKind::Kubernetes => bail!("Kubernetes sandbox support is not enabled"),
     }
 }

@@ -131,7 +131,7 @@ jobs:
       # in twin mode; widen as the remaining suites are fixed up for CI.
       # Must not use the e2e nextest profile here: NEXTEST_PROFILE=e2e implies
       # strict mode, which fails (rather than skips) live tests without keys.
-      - run: cargo nextest run --locked --workspace --status-level slow --profile ci --run-ignored only -E 'package(fabro-agent) + package(fabro-llm) + package(twin-openai)'
+      - run: cargo nextest run --locked --workspace --status-level slow --profile ci --run-ignored only -E 'package(fabro-agent) + package(fabro-llm)'
 
   test-macos:
     name: Test (macOS)

@@ -3,7 +3,7 @@ use std::any::{TypeId, type_name};
 use fabro_api::types::{
     AgentMessageProps as ApiAgentMessageProps, ReasoningOutput as ApiReasoningOutput,
 };
-use fabro_types::ReasoningOutput;
+use lithos_llm::types::ReasoningOutput;
 use serde_json::json;
 
 #[test]

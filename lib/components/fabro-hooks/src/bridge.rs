@@ -78,7 +78,8 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    use fabro_model::Catalog;
+    use fabro_llm::credentials::CredentialProvider;
+    use fabro_llm::lithos_catalog::Catalog;
     use fabro_types::fixtures;
 
     use super::*;
@@ -100,7 +101,7 @@ mod tests {
             context: &HookContext,
             _sandbox: Arc<dyn Sandbox>,
             execution_context: &HookExecutionContext,
-            _llm_source: &dyn fabro_auth::CredentialSource,
+            _llm_source: Arc<dyn CredentialProvider>,
             _catalog: Arc<Catalog>,
         ) -> HookResult {
             self.captured_contexts.lock().unwrap().push(context.clone());

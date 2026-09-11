@@ -1,17 +1,17 @@
 pub mod config;
 pub mod error;
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 pub mod from_environment;
 pub mod provider;
 pub mod sandbox;
 pub mod sandbox_spec;
 
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 mod clone_source;
 
 mod git_retry;
 
-#[cfg(any(feature = "docker", feature = "daytona", test))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes", test))]
 mod managed_labels;
 
 mod push_credentials;
@@ -32,6 +32,11 @@ pub mod docker;
 #[cfg(feature = "daytona")]
 pub mod daytona;
 
+#[cfg(feature = "kubernetes")]
+pub mod kubernetes;
+#[cfg(feature = "kubernetes")]
+pub use kubernetes::{KubernetesSandbox, KubernetesSandboxOptions};
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
@@ -51,6 +56,8 @@ pub use local::LocalSandbox;
 pub use provider::daytona::DaytonaSandboxProvider;
 #[cfg(feature = "docker")]
 pub use provider::docker::DockerSandboxProvider;
+#[cfg(feature = "kubernetes")]
+pub use provider::kubernetes::KubernetesSandboxProvider;
 pub use provider::{
     LocalSandboxProvider, SandboxCreateSpec, SandboxLookupError, SandboxProvider,
     SandboxProviderRegistry,

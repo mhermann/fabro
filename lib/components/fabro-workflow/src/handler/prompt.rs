@@ -220,9 +220,10 @@ mod tests {
     use std::time::Duration;
 
     use fabro_graphviz::graph::AttrValue;
-    use fabro_model::{ReasoningEffort, Speed};
     use fabro_store::{Database, RunDatabase, StageId};
     use fabro_types::{fixtures, test_support};
+    use lithos_llm::catalog::ProviderId;
+    use lithos_llm::types::{ReasoningEffort, Speed};
     use object_store::memory::InMemory;
     use tempfile::TempDir;
 
@@ -690,33 +691,31 @@ mod tests {
         tokio::fs::write(workspace.path().join("CLAUDE.md"), "anthropic memory")
             .await
             .unwrap();
-        let overrides: fabro_model::catalog::LlmCatalogSettings = toml::from_str(
+        let catalog = Arc::new(fabro_llm::test_support::test_catalog_with_overlay(
             r#"
-[providers.acme]
-adapter = "openai_compatible"
-agent_profile = "openai"
-base_url = "https://api.acme.test/v1"
-
-[models.acme-claude]
-provider = "acme"
-display_name = "Acme Claude"
-family = "claude"
-default = true
-agent_profile = "anthropic"
-aliases = ["ac"]
-
-[models.acme-claude.limits]
-context_window = 1000
-
-[models.acme-claude.features]
-tools = true
-vision = false
-reasoning = false
-"#,
-        )
-        .unwrap();
-        let catalog =
-            Arc::new(fabro_model::Catalog::from_builtin_with_overrides(&overrides).unwrap());
+            [providers.acme]
+            display_name = "Acme"
+            adapter = "openai-compatible"
+            codec = "openai-chat"
+            base_url = "https://api.acme.test/v1"
+            auth = { type = "bearer" }
+            default_model = "acme-claude"
+            
+            [providers.acme.metadata.agent]
+            profile = "openai"
+            
+            [providers.acme.models.acme-claude]
+            display_name = "Acme Claude"
+            aliases = ["ac"]
+            api_model = "acme-claude"
+            limits = { context_tokens = 1000, max_output_tokens = 500 }
+            capabilities = { text = true, tools = true }
+            family = "claude"
+            
+            [providers.acme.models.acme-claude.metadata.agent]
+            profile = "anthropic"
+            "#,
+        ));
         let mut services = make_services();
         services.run = services
             .run
@@ -725,7 +724,7 @@ reasoning = false
             )))
             .with_catalog_context(
                 Arc::clone(&catalog),
-                fabro_model::ProviderId::new("acme"),
+                ProviderId::new("acme"),
                 "acme-claude".to_string(),
             );
 
@@ -766,32 +765,31 @@ reasoning = false
         tokio::fs::write(workspace.path().join("CLAUDE.md"), "anthropic memory")
             .await
             .unwrap();
-        let overrides: fabro_model::catalog::LlmCatalogSettings = toml::from_str(
+        let catalog = Arc::new(fabro_llm::test_support::test_catalog_with_overlay(
             r#"
-[providers.acme]
-adapter = "openai_compatible"
-agent_profile = "openai"
-base_url = "https://api.acme.test/v1"
-
-[models.acme-claude]
-provider = "acme"
-display_name = "Acme Claude"
-family = "claude"
-default = true
-agent_profile = "anthropic"
-
-[models.acme-claude.limits]
-context_window = 1000
-
-[models.acme-claude.features]
-tools = true
-vision = false
-reasoning = false
-"#,
-        )
-        .unwrap();
-        let catalog =
-            Arc::new(fabro_model::Catalog::from_builtin_with_overrides(&overrides).unwrap());
+            [providers.acme]
+            display_name = "Acme"
+            adapter = "openai-compatible"
+            codec = "openai-chat"
+            base_url = "https://api.acme.test/v1"
+            auth = { type = "bearer" }
+            default_model = "acme-claude"
+            
+            [providers.acme.metadata.agent]
+            profile = "openai"
+            
+            [providers.acme.models.acme-claude]
+            display_name = "Acme Claude"
+            aliases = ["ac"]
+            api_model = "acme-claude"
+            limits = { context_tokens = 1000, max_output_tokens = 500 }
+            capabilities = { text = true, tools = true }
+            family = "claude"
+            
+            [providers.acme.models.acme-claude.metadata.agent]
+            profile = "anthropic"
+            "#,
+        ));
         let mut services = make_services();
         services.run = services
             .run
@@ -800,7 +798,7 @@ reasoning = false
             )))
             .with_catalog_context(
                 Arc::clone(&catalog),
-                fabro_model::ProviderId::new("acme"),
+                ProviderId::new("acme"),
                 "acme-claude".to_string(),
             );
 

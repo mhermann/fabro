@@ -5908,9 +5908,10 @@ paths:
       description: |
         Generate a text completion. Set `stream: true` for SSE streaming.
 
-        All SSE frames use `event: stream_event` with a JSON-serialized StreamEvent
-        payload. StreamEvent types: stream_start, text_start, text_delta, text_end,
-        tool_call_start, tool_call_delta, tool_call_end, finish, error.
+        All SSE frames use `event: stream_event` with a JSON-serialized lithos
+        `StreamEvent` payload, discriminated by `type`: started,
+        content_block_start, text_delta, reasoning_delta, tool_call_delta,
+        content_block_end, usage, rate_limits, ended, and error.
       requestBody:
         required: true
         content:
@@ -5924,44 +5925,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CompletionResponse"
-        "400":
-          description: Invalid request
-          headers:
-            x-request-id:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  # ── Playground ────────────────────────────────────────────────────────
-
-  /api/v1/playground/chat:
-    post:
-      operationId: createPlaygroundChat
-      tags: [Playground]
-      summary: Chat with the playground assistant
-      description: |
-        Drives a single turn of the playground chat that builds a workflow
-        graph incrementally. The server is stateless: each request includes
-        the full current draft, and the response streams text deltas plus a
-        single `write_workflow_file` tool call carrying the full new contents
-        of `workflow.fabro` for the client to parse, diff against its local
-        draft, and animate into the canvas.
-
-        Responses are always SSE. Frames use `event: stream_event` with a
-        JSON-serialized StreamEvent payload — see /api/v1/completions for the
-        StreamEvent shape. The tool call arrives on a `tool_call_end` event
-        with the tool name and parsed JSON arguments.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreatePlaygroundChatRequest"
-      responses:
-        "200":
-          description: SSE stream of text deltas and tool calls.
         "400":
           description: Invalid request
           headers:
@@ -8599,6 +8562,7 @@ components:
         - id
         - display_name
         - adapter
+        - base_url
         - priority
         - model_count
         - configured
@@ -8611,12 +8575,12 @@ components:
           example: "Anthropic"
         adapter:
           type: string
-          enum: [anthropic, openai, gemini, openai_compatible]
-          description: Protocol adapter the provider speaks.
+          description: "lithos adapter id the provider speaks, such as `anthropic`, `openai`, `gemini`, or `openai-compatible`."
           example: "anthropic"
         base_url:
-          type: ["string", "null"]
-          description: Operator-set base URL override, if any.
+          type: string
+          description: Effective API base URL, including any operator override.
+          example: "https://api.anthropic.com"
         api_key_url:
           type: ["string", "null"]
           description: URL where an operator can obtain an API key for this provider.
@@ -8675,22 +8639,11 @@ components:
           description: Maximum output tokens, if known.
           example: 128000
 
-    ReasoningEffortFeature:
-      description: >-
-        Whether the model endpoint supports a native reasoning-effort
-        parameter. `levels` accepts discrete effort levels; `always_adaptive`
-        accepts effort levels with natively always-on adaptive thinking;
-        `none` has no native effort parameter.
-      type: string
-      enum:
-        - levels
-        - always_adaptive
-        - none
-
     ReasoningEffort:
       description: Native reasoning-effort level requested for an LLM call.
       type: string
       enum:
+        - minimal
         - low
         - medium
         - high
@@ -8698,38 +8651,28 @@ components:
         - max
 
     ModelFeatures:
-      description: Capability flags for a model.
+      description: "Capability flags for a model, from the lithos catalog."
       type: object
       required:
         - tools
         - vision
         - reasoning
-        - reasoning_effort
         - prompt_cache
-        - cache_control_breakpoints
-        - sampling_params
+        - sampling
       properties:
         tools:
           type: boolean
           description: Whether the model supports tool use.
         vision:
           type: boolean
-          description: Whether the model supports vision/image inputs.
+          description: Whether the model supports image inputs.
         reasoning:
           type: boolean
           description: Whether the model supports extended reasoning.
-        reasoning_effort:
-          $ref: "#/components/schemas/ReasoningEffortFeature"
         prompt_cache:
           type: boolean
           description: Whether the model endpoint supports prompt caching.
-        cache_control_breakpoints:
-          type: boolean
-          description: >-
-            Whether the endpoint only caches when the request marks the
-            cacheable prefix with Anthropic-style cache_control breakpoints
-            (e.g. Claude via OpenRouter).
-        sampling_params:
+        sampling:
           type: boolean
           description: Whether the model accepts classic sampling parameters (temperature, top_p).
 
@@ -8882,13 +8825,13 @@ components:
     # ── Completion Schemas ─────────────────────────────────────────────
 
     CompletionMessage:
-      description: A message in the conversation.
+      description: "A lithos `Message`. `content` parts are discriminated by `type`."
       type: object
       required: [role, content]
       properties:
         role:
           type: string
-          enum: [system, user, assistant, tool, developer]
+          enum: [system, developer, user, assistant, tool]
           description: The role of the message author.
         content:
           type: array
@@ -8903,20 +8846,27 @@ components:
           description: Tool call ID for tool result messages.
 
     CompletionContentPart:
-      description: A content part within a message, discriminated by `kind`.
+      description: >-
+        A lithos `ContentPart`, discriminated by `type`: `text` ({text}),
+        `image`, `audio`, `document` ({source, ...}), `reasoning` ({text,
+        signature, redacted}), `tool_call` ({id, name, input}), `tool_result`
+        ({tool_call_id, content, is_error}), `json` ({value}), and `opaque`
+        ({kind, data}).
       type: object
-      required: [kind]
+      required: [type]
       properties:
-        kind:
+        type:
           type: string
-          description: "Content part type: text, image, tool_call, tool_result, thinking, etc."
-        data:
-          description: Content data, structure depends on kind.
+          description: Content part type.
+      additionalProperties: true
 
     CompletionToolDefinition:
-      description: A tool available for the model to call.
+      description: >-
+        A lithos `ToolDefinition`. `kind` is `{type: function, input_schema}`
+        for JSON-argument tools or `{type: custom, format}` for free-form
+        input.
       type: object
-      required: [name, description, parameters]
+      required: [name, description, kind]
       properties:
         name:
           type: string
@@ -8924,23 +8874,50 @@ components:
         description:
           type: string
           description: Human-readable tool description.
-        parameters:
-          description: JSON Schema for the tool's parameters.
+        kind:
+          $ref: "#/components/schemas/CompletionToolDefinitionKind"
+
+    CompletionToolDefinitionKind:
+      description: >-
+        lithos `ToolDefinitionKind`: `{type: function, input_schema}` for
+        JSON-argument tools or `{type: custom, format}` for free-form input.
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [function, custom]
+      additionalProperties: true
+
+    CompletionResponseFormat:
+      description: >-
+        lithos `ResponseFormat`, discriminated by `type`: `text`,
+        `json_object`, or `json_schema` ({name, schema}).
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [text, json_object, json_schema]
+      additionalProperties: true
 
     CompletionToolChoice:
-      description: Controls how the model selects tools.
+      description: "A lithos `ToolChoice`, discriminated by `type`."
       type: object
-      required: [mode]
+      required: [type]
       properties:
-        mode:
+        type:
           type: string
-          enum: [auto, none, required, named]
+          enum: [auto, none, required, tool]
           description: Tool selection mode.
-        tool_name:
+        name:
           type: string
-          description: Required when mode is "named".
+          description: Required when type is `tool`.
 
     CreateCompletionRequest:
+      description: >-
+        A lithos `Request` plus `stream`. Field names match the lithos wire
+        form so a serialized lithos request can be posted as-is.
       type: object
       required: [messages]
       properties:
@@ -8951,7 +8928,13 @@ components:
             $ref: "#/components/schemas/CompletionMessage"
         model:
           type: string
-          description: Model ID or alias. Server picks a ready-provider default if omitted.
+          description: >-
+            Model selector: `provider/model`, a model id or alias, or a
+            provider id. The server picks a ready-provider default when
+            omitted.
+        provider:
+          type: string
+          description: Optional provider pin for a bare model selector.
         system:
           type: string
           description: System prompt (convenience; prepended as a system message).
@@ -8966,14 +8949,18 @@ components:
             $ref: "#/components/schemas/CompletionToolDefinition"
         tool_choice:
           $ref: "#/components/schemas/CompletionToolChoice"
+        response_format:
+          $ref: "#/components/schemas/CompletionResponseFormat"
         schema:
-          description: JSON Schema for structured output.
+          description: >-
+            JSON Schema for structured output. Forces a non-streaming
+            response whose `output` is the parsed object.
+        max_output_tokens:
+          type: integer
+          format: int64
         temperature:
           type: number
           format: double
-        max_tokens:
-          type: integer
-          format: int64
         top_p:
           type: number
           format: double
@@ -8985,114 +8972,129 @@ components:
         reasoning_effort:
           $ref: "#/components/schemas/ReasoningEffort"
           description: Reasoning effort level.
-        provider:
-          type: string
-          description: Optional provider pin.
+        speed:
+          $ref: "#/components/schemas/BillingSpeed"
+          description: Requested speed tier.
+        metadata:
+          type: object
+          description: Request tags forwarded to providers that accept them.
+          additionalProperties:
+            type: string
         provider_options:
-          description: Provider-specific options.
+          type: object
+          description: Raw provider options keyed by provider id.
+          additionalProperties: true
 
     CompletionUsage:
       description: >
-        Five disjoint token buckets for one completion. `input_tokens` excludes
-        cache reads and writes, while `output_tokens` excludes reasoning tokens
-        when the provider reports them separately.
+        lithos `TokenCounts`: five disjoint token buckets for one completion.
+        `input` excludes cache reads and writes, while `output` excludes
+        reasoning tokens when the provider reports them separately.
       type: object
-      required:
-        - input_tokens
-        - output_tokens
-        - reasoning_tokens
-        - cache_read_tokens
-        - cache_write_tokens
       properties:
-        input_tokens:
+        input:
           type: integer
           format: int64
-          description: Number of uncached input tokens consumed.
-        output_tokens:
+          default: 0
+          description: Uncached prompt tokens.
+        output:
           type: integer
           format: int64
-          description: Number of non-reasoning output tokens generated.
-        reasoning_tokens:
+          default: 0
+          description: Non-reasoning completion tokens.
+        reasoning:
           type: integer
           format: int64
-          description: Number of separately reported reasoning tokens.
-        cache_read_tokens:
+          default: 0
+          description: Separately reported reasoning tokens.
+        cache_read:
           type: integer
           format: int64
-          description: Number of input tokens served from a provider cache.
-        cache_write_tokens:
+          default: 0
+          description: Prompt tokens served from a provider cache.
+        cache_write:
           type: integer
           format: int64
-          description: Number of input tokens written to a provider cache.
+          default: 0
+          description: Prompt tokens written to a provider cache.
 
-    CompletionResponse:
+    ModelHandle:
+      description: A resolved provider and model identity.
       type: object
-      required: [id, model, provider, message, stop_reason, usage]
+      required: [provider, model]
       properties:
-        id:
-          type: string
-        model:
-          type: string
-          description: Canonical model ID selected for the request.
         provider:
           $ref: "#/components/schemas/ProviderId"
-        message:
-          $ref: "#/components/schemas/CompletionMessage"
-        stop_reason:
+        model:
           type: string
-          description: Why generation stopped (end_turn, max_tokens, tool_calls).
+          description: Canonical model id within the provider.
+
+    CompletionCost:
+      description: "lithos `Cost`: a USD amount in micros and where it came from."
+      type: object
+      required: [usd_micros, source]
+      properties:
+        usd_micros:
+          type: integer
+          format: int64
+          minimum: 0
+        source:
+          $ref: "#/components/schemas/CostSource"
+
+    CompletionResponse:
+      description: >-
+        A lithos `Response`, returned verbatim. The server is the billing
+        authority: `cost` is the catalog estimate or the provider's own
+        figure. When the request carried `schema`, `output` holds the parsed
+        object.
+      type: object
+      required: [model, content, finish_reason, usage]
+      properties:
+        output:
+          description: Parsed structured output when `schema` was provided.
+        id:
+          type: ["string", "null"]
+        model:
+          $ref: "#/components/schemas/ModelHandle"
+        content:
+          type: array
+          items:
+            $ref: "#/components/schemas/CompletionContentPart"
+        suppressed_tool_calls:
+          type: array
+          description: Tool calls withheld because the turn ended early.
+          items:
+            type: object
+            additionalProperties: true
+        finish_reason:
+          type: string
+          description: "Why generation stopped: stop, length, tool_call, content_filter, error, incomplete, or a provider-specific reason."
         usage:
           $ref: "#/components/schemas/CompletionUsage"
-        output:
-          description: Parsed structured output when schema was provided.
-        cost_usd:
-          type: number
-          format: double
-          description: >
-            USD cost of the completion when known: estimated from catalog
-            prices unless the provider returned authoritative billing data.
-        cost_source:
-          $ref: "#/components/schemas/CostSource"
+        cost:
+          $ref: "#/components/schemas/CompletionCost"
+        rate_limits:
+          type: object
+          additionalProperties: true
+        warnings:
+          type: array
+          items:
+            type: object
+            required: [code, message]
+            properties:
+              code:
+                type: string
+              message:
+                type: string
+        raw:
+          description: The provider's success payload, when available.
 
     CostSource:
       type: string
       description: >
-        Whether `cost_usd` came from provider billing data (authoritative)
-        or catalog price estimation (estimated).
-      enum: [authoritative, estimated]
-
-    # ── Playground ────────────────────────────────────────────────────────
-
-    CreatePlaygroundChatRequest:
-      description: >
-        Body of POST /api/v1/playground/chat. The server is stateless across
-        turns: the browser owns the draft and submits it as the literal
-        `workflow.fabro` contents with every turn. The server embeds the
-        file in the model's system prompt and exposes a single
-        `write_workflow_file` tool that emits the full new contents of
-        `workflow.fabro`; the browser parses, diffs, and animates the
-        result.
-      type: object
-      required: [messages, workflow_fabro]
-      properties:
-        messages:
-          type: array
-          description: assistant-ui-style message history for the turn.
-          items:
-            $ref: "#/components/schemas/CompletionMessage"
-        workflow_fabro:
-          type: string
-          description: >
-            Full current `workflow.fabro` (Graphviz DOT) contents as
-            rendered by the client — a complete `digraph <name> { ... }`
-            block including the `start` / `exit` terminals. This is the
-            same format the model writes back via `write_workflow_file`.
-        model:
-          type: string
-          description: Model ID or alias. Server picks a ready-provider default if omitted.
-        provider:
-          $ref: "#/components/schemas/ProviderId"
-          description: Optional provider pin.
+        Where a cost came from: `catalog` (estimated from catalog prices),
+        `provider` (the provider's own billing data), or `application`.
+      enum: [catalog, provider, application]
 
     PaginatedSavedQueryList:
       description: Paginated list of saved queries.
@@ -12672,11 +12674,12 @@ components:
             - type: "null"
 
     BillingSpeed:
-      description: Optional provider-specific model speed tier used for cost estimates.
+      description: "lithos `Speed`: the requested latency or cost tier."
       type: string
       enum:
-        - standard
         - fast
+        - balanced
+        - economical
 
     CodeLocation:
       description: A file and line location in the codebase.
@@ -13088,6 +13091,7 @@ components:
         - local
         - docker
         - daytona
+        - kubernetes
 
     RunSandboxKind:
       description: Lifecycle state for a run sandbox request.
@@ -14589,13 +14593,15 @@ components:
 
     ServerSandboxProvidersSettings:
       type: object
-      required: [local, docker, daytona]
+      required: [local, docker, daytona, kubernetes]
       properties:
         local:
           $ref: "#/components/schemas/ServerSandboxProviderSettings"
         docker:
           $ref: "#/components/schemas/ServerSandboxProviderSettings"
         daytona:
+          $ref: "#/components/schemas/ServerSandboxProviderSettings"
+        kubernetes:
           $ref: "#/components/schemas/ServerSandboxProviderSettings"
 
     ServerSandboxProviderSettings:
@@ -15208,7 +15214,7 @@ components:
     EnvironmentProvider:
       description: Desired environment provider.
       type: string
-      enum: [local, docker, daytona]
+      enum: [local, docker, daytona, kubernetes]
 
     EnvironmentImageSettings:
       type: object

@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use fabro_llm::token_count;
+use fabro_llm::estimate;
 use fabro_types::run_event::MAX_RUN_EVENT_BODY_BYTES;
 use serde::Serialize;
 
@@ -181,8 +181,8 @@ fn render_truncated_segments(
     stats: OutputCaptureStats,
     line_count_omitted: Option<usize>,
 ) -> String {
-    let original_tokens = token_count::estimate_byte_tokens(stats.observed_bytes);
-    let omitted_tokens = token_count::estimate_byte_tokens(stats.omitted_bytes);
+    let original_tokens = estimate::byte_tokens(stats.observed_bytes);
+    let omitted_tokens = estimate::byte_tokens(stats.omitted_bytes);
     let middle_marker = line_count_omitted.map_or_else(
         || format!("... approximately {omitted_tokens} tokens truncated ..."),
         |lines| {

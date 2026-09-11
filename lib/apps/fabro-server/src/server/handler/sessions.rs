@@ -20,8 +20,8 @@ use fabro_agent::{
 use fabro_api::types::{
     CreateRunSessionRequest, PaginatedEventList, PaginationMeta, SubmitTurnRequest,
 };
-use fabro_llm::types::ToolDefinition;
-use fabro_model::{AgentProfileKind, Catalog, ModelSelectionError, ProviderId, catalog};
+use fabro_llm::lithos_catalog::Catalog;
+use fabro_llm::{FabroClient, ModelSelectionError, catalog, selection};
 use fabro_sandbox::reconnect::reconnect_for_run;
 use fabro_static::EnvVars;
 use fabro_store::{
@@ -35,9 +35,13 @@ use fabro_types::run_event::{
     RunSessionTurnSucceededProps, RunSessionUserMessageProps,
 };
 use fabro_types::settings::ModelRef as SettingsModelRef;
-use fabro_types::{EventBody, EventEnvelope, RunEvent, RunId, SessionDetail, SessionId, TurnId};
+use fabro_types::{
+    AgentProfileKind, EventBody, EventEnvelope, RunEvent, RunId, SessionDetail, SessionId, TurnId,
+};
 use fabro_workflow::handler::llm::api::register_named_fabro_run_tools;
 use fabro_workflow::services::FabroRunToolServices;
+use lithos_llm::catalog::ProviderId;
+use lithos_llm::types::ToolDefinition;
 use serde_json::Value;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
@@ -52,7 +56,6 @@ use super::super::{
 };
 use crate::error::ApiError;
 use crate::principal_middleware::RequiredUser;
-use crate::server_secrets::LlmClientResult;
 use crate::worker_token::issue_worker_token;
 
 const SESSION_SSE_BUFFER_CAPACITY: usize = 1024;
@@ -685,12 +688,12 @@ async fn build_agent_session(
     for (provider, issue) in &llm_result.auth_issues {
         warn!(provider = %provider, error = %issue, "LLM provider unavailable due to auth issue");
     }
-    for issue in &llm_result.registration_issues {
-        warn!(provider = %issue.provider, error = %issue.error, "LLM provider unavailable due to registration issue");
+    for issue in &llm_result.build_issues {
+        warn!(provider = %issue.provider, error = %issue.cause, "LLM provider unavailable due to build issue");
     }
     let (provider_id, model, profile_kind) =
         selected_session_model(&catalog, &llm_result, session)?;
-    if !llm_result.client.has_provider(provider_id.as_str()) {
+    if !llm_result.has_provider(&provider_id) {
         let message = format!("LLM credentials not configured for provider '{provider_id}'");
         return if session.record.model.is_some() {
             Err(AskFabroBuildError::ModelUnavailable(message))
@@ -784,7 +787,7 @@ async fn build_agent_session(
 
 fn selected_session_model(
     catalog: &Catalog,
-    llm_result: &LlmClientResult,
+    llm_result: &FabroClient,
     session: &ProjectedRunSession,
 ) -> Result<(ProviderId, String, AgentProfileKind), AskFabroBuildError> {
     let eligible = llm_result
@@ -792,23 +795,25 @@ fn selected_session_model(
         .into_iter()
         .collect::<std::collections::HashSet<_>>();
     let record = &session.record;
-    let selected = catalog
-        .resolve_selection(record.model.as_deref(), record.provider.as_ref(), &eligible)
-        .map_err(|error| {
-            // A missing default with no provider pin means no LLM is
-            // configured at all; every other failure is about the requested
-            // model/provider.
-            if record.provider.is_none()
-                && matches!(error, ModelSelectionError::NoDefaultModel { .. })
-            {
-                AskFabroBuildError::LlmUnconfigured(error.to_string())
-            } else {
-                AskFabroBuildError::ModelUnavailable(error.to_string())
-            }
-        })?;
+    let selected = selection::resolve_selection(
+        catalog,
+        record.model.as_deref(),
+        record.provider.as_ref(),
+        &eligible,
+    )
+    .map_err(|error| {
+        // A missing default with no provider pin means no LLM is
+        // configured at all; every other failure is about the requested
+        // model/provider.
+        if record.provider.is_none() && matches!(error, ModelSelectionError::NoDefaultModel { .. })
+        {
+            AskFabroBuildError::LlmUnconfigured(error.to_string())
+        } else {
+            AskFabroBuildError::ModelUnavailable(error.to_string())
+        }
+    })?;
     let (provider_id, model) = (selected.provider, selected.model);
-    let profile_kind = catalog
-        .effective_agent_profile(&provider_id, Some(&model))
+    let profile_kind = catalog::agent_profile(catalog, provider_id.as_str(), Some(&model))
         .ok_or_else(|| {
             AskFabroBuildError::ModelUnavailable(format!(
                 "provider '{provider_id}' is not configured"
@@ -825,31 +830,32 @@ fn canonical_session_model(
 ) -> Result<(ProviderId, String), ApiError> {
     let explicit_provider = explicit_provider
         .map(|provider| {
-            catalog
-                .provider(provider)
-                .map(|provider| provider.id.clone())
-                .ok_or_else(|| {
-                    session_selection_error(&ModelSelectionError::UnknownProvider {
-                        provider: provider.clone(),
-                    })
+            enabled_provider_id(catalog, provider.as_str()).ok_or_else(|| {
+                session_selection_error(&ModelSelectionError::UnknownProvider {
+                    provider: provider.to_string(),
                 })
+            })
         })
         .transpose()?;
     let Some(requested) = requested else {
-        let selected = catalog
-            .resolve_selection(None, explicit_provider.as_ref(), eligible)
-            .map_err(|error| session_selection_error(&error))?;
+        let selected =
+            selection::resolve_selection(catalog, None, explicit_provider.as_ref(), eligible)
+                .map_err(|error| session_selection_error(&error))?;
         return Ok((selected.provider, selected.model));
     };
     let requested = requested.trim();
     if requested.is_empty() {
         return Err(ApiError::bad_request("Session model must not be empty."));
     }
-    if catalog::legacy_builtin_model(requested).is_some() {
-        let selected = catalog
-            .resolve_selection(Some(requested), explicit_provider.as_ref(), eligible)
-            .map_err(|error| session_selection_error(&error))?;
-        return Ok((selected.provider, selected.model));
+    // An aggregator's wire id (`openai/gpt-5.6-sol` on OpenRouter) is matched
+    // whole on a pinned provider before its prefix is read as a provider.
+    if let Some(explicit) = explicit_provider.as_ref().filter(|p| eligible.contains(*p)) {
+        if let Some(entry) = catalog
+            .enabled_provider(explicit.as_str())
+            .and_then(|provider| provider.offering(requested))
+        {
+            return Ok((explicit.clone(), entry.model.id().to_string()));
+        }
     }
     let model_ref = requested
         .parse::<SettingsModelRef>()
@@ -857,15 +863,16 @@ fn canonical_session_model(
         .qualify(catalog);
     let (qualified_provider, selector) = match model_ref {
         SettingsModelRef::Qualified { provider, selector } => {
-            let requested_provider = ProviderId::new(provider);
-            let provider = catalog
-                .provider(&requested_provider)
-                .map(|provider| provider.id.clone())
-                .ok_or_else(|| {
-                    session_selection_error(&ModelSelectionError::UnknownProvider {
-                        provider: requested_provider,
-                    })
-                })?;
+            let provider = enabled_provider_id(catalog, &provider).ok_or_else(|| {
+                session_selection_error(&ModelSelectionError::UnknownProvider { provider })
+            })?;
+            // When the prefixed provider is not ready, the whole string may
+            // still be an eligible aggregator's wire id for the same model.
+            if explicit_provider.is_none() && !eligible.contains(&provider) {
+                if let Some(found) = api_model_on_eligible(catalog, requested, eligible) {
+                    return Ok(found);
+                }
+            }
             if let Some(explicit) = explicit_provider.as_ref() {
                 if explicit != &provider {
                     return Err(ApiError::bad_request(format!(
@@ -877,9 +884,7 @@ fn canonical_session_model(
             (Some(provider), selector)
         }
         SettingsModelRef::Bare(selector) => {
-            if explicit_provider.is_none()
-                && catalog.provider(&ProviderId::new(&selector)).is_some()
-            {
+            if explicit_provider.is_none() && catalog.enabled_provider(&selector).is_some() {
                 let detail = if catalog.is_model_selector(&selector) {
                     format!(
                         "Session model reference '{selector}' is ambiguous between a provider and \
@@ -896,10 +901,34 @@ fn canonical_session_model(
         }
     };
     let provider = qualified_provider.as_ref().or(explicit_provider.as_ref());
-    let selected = catalog
-        .resolve_selection(Some(&selector), provider, eligible)
+    let selected = selection::resolve_selection(catalog, Some(&selector), provider, eligible)
         .map_err(|error| session_selection_error(&error))?;
     Ok((selected.provider, selected.model))
+}
+
+/// The highest-priority eligible provider offering `api_model` as a wire id.
+fn api_model_on_eligible(
+    catalog: &Catalog,
+    api_model: &str,
+    eligible: &std::collections::HashSet<ProviderId>,
+) -> Option<(ProviderId, String)> {
+    catalog
+        .enabled_providers()
+        .into_iter()
+        .filter(|provider| eligible.contains(provider.id()))
+        .find_map(|provider| {
+            provider
+                .offerings()
+                .find(|model| model.model.api_model() == api_model)
+                .map(|model| (provider.id().clone(), model.model.id().to_string()))
+        })
+}
+
+/// The catalog id of an enabled provider named by id or alias.
+fn enabled_provider_id(catalog: &Catalog, selector: &str) -> Option<ProviderId> {
+    catalog
+        .enabled_provider(selector)
+        .map(|provider| provider.id().clone())
 }
 
 fn session_selection_error(error: &ModelSelectionError) -> ApiError {
@@ -1100,7 +1129,7 @@ impl AgentProfile for AskFabroProfile {
         self.inner.model()
     }
 
-    fn catalog(&self) -> Option<&Catalog> {
+    fn catalog(&self) -> Option<&Arc<Catalog>> {
         self.inner.catalog()
     }
 
@@ -1486,19 +1515,18 @@ mod tests {
 
     use fabro_agent::config::ToolAccess;
     use fabro_agent::tool_registry::{RegisteredTool, ToolContext, ToolRegistry, ToolSource};
-    use fabro_llm::types::{ToolCall, ToolDefinition};
-    use fabro_model::catalog::LlmCatalogSettings;
     use fabro_types::test_support;
+    use lithos_llm::types::{ToolCall, ToolDefinition};
 
     use super::*;
 
     fn stub_tool(name: &str) -> RegisteredTool {
         RegisteredTool {
-            definition: ToolDefinition {
-                name:        name.to_string(),
-                description: format!("{name} test tool"),
-                parameters:  serde_json::json!({"type": "object"}),
-            },
+            definition: ToolDefinition::function(
+                name.to_string(),
+                format!("{name} test tool"),
+                serde_json::json!({"type": "object"}),
+            ),
             executor:   Arc::new(|_args, _ctx: ToolContext| {
                 Box::pin(async { Ok("ok".to_string()) })
             }),
@@ -1528,59 +1556,27 @@ mod tests {
         registry
     }
 
+    /// OpenAI and OpenRouter both offer `gpt-5.6-sol` under the `gpt-56-sol`
+    /// alias; OpenRouter ships disabled, so enable it the way an operator
+    /// would.
     fn portable_session_catalog() -> Catalog {
-        let settings: LlmCatalogSettings = toml::from_str(
+        fabro_llm::test_support::test_catalog_with_overlay(
             r#"
 [providers.openai]
-display_name = "OpenAI"
-adapter = "openai"
-agent_profile = "openai"
-priority = 90
-
-[providers.openai.models."gpt-5.6-sol"]
-display_name = "GPT-5.6 Sol"
-family = "gpt-5"
-aliases = ["gpt-56-sol"]
-default = true
-
-[providers.openai.models."gpt-5.6-sol".limits]
-context_window = 1000
-
-[providers.openai.models."gpt-5.6-sol".features]
-tools = true
-vision = false
-reasoning = false
+default_model = "gpt-5.6-sol"
 
 [providers.openrouter]
-display_name = "OpenRouter"
-adapter = "openai_compatible"
-agent_profile = "openai"
-priority = 25
+default_model = "gpt-5.6-sol"
+enabled = true
 
-[providers.openrouter.models."gpt-5.6-sol"]
-api_id = "openai/gpt-5.6-sol"
-display_name = "GPT-5.6 Sol (via OpenRouter)"
-family = "gpt-5"
-aliases = ["gpt-56-sol"]
-default = true
-
-[providers.openrouter.models."gpt-5.6-sol".limits]
-context_window = 1000
-
-[providers.openrouter.models."gpt-5.6-sol".features]
-tools = true
-vision = false
-reasoning = false
 "#,
         )
-        .unwrap();
-        Catalog::from_settings(&settings).unwrap()
     }
 
     #[test]
     fn canonical_session_model_uses_readiness_priority_and_explicit_pins() {
         let catalog = portable_session_catalog();
-        let openai = ProviderId::openai();
+        let openai = lithos_llm::catalog::builtin::openai();
         let openrouter = ProviderId::new("openrouter");
 
         assert_eq!(
@@ -1627,7 +1623,7 @@ reasoning = false
     #[test]
     fn canonical_session_model_preserves_unknown_passthrough_on_selected_provider() {
         let catalog = portable_session_catalog();
-        let openai = ProviderId::openai();
+        let openai = lithos_llm::catalog::builtin::openai();
         let openrouter = ProviderId::new("openrouter");
         let both = std::collections::HashSet::from([openai.clone(), openrouter.clone()]);
 
@@ -1647,7 +1643,7 @@ reasoning = false
     #[test]
     fn canonical_session_model_passes_through_colon_bearing_model_ids() {
         let catalog = portable_session_catalog();
-        let openai = ProviderId::openai();
+        let openai = lithos_llm::catalog::builtin::openai();
         let openrouter = ProviderId::new("openrouter");
         let both = std::collections::HashSet::from([openai.clone(), openrouter.clone()]);
 
@@ -1672,7 +1668,7 @@ reasoning = false
         let catalog = portable_session_catalog();
         let error = canonical_session_model(
             &catalog,
-            &std::collections::HashSet::from([ProviderId::openai()]),
+            &std::collections::HashSet::from([lithos_llm::catalog::builtin::openai()]),
             Some("gpt-56-sol"),
             Some(&ProviderId::new("openrouter")),
         )
@@ -1684,7 +1680,7 @@ reasoning = false
     #[test]
     fn canonical_session_model_normalizes_legacy_builtin_selector_before_qualification() {
         let catalog = portable_session_catalog();
-        let openai = ProviderId::openai();
+        let openai = lithos_llm::catalog::builtin::openai();
         let openrouter = ProviderId::new("openrouter");
         let both = std::collections::HashSet::from([openai.clone(), openrouter.clone()]);
 
@@ -1722,7 +1718,7 @@ reasoning = false
         assert_eq!(
             canonical_session_model(
                 &catalog,
-                &catalog.all_provider_ids(),
+                &catalog.enabled_provider_ids().into_iter().collect(),
                 Some("openrouter:gpt-56-sol"),
                 None,
             )
@@ -1736,9 +1732,9 @@ reasoning = false
         let catalog = portable_session_catalog();
         let error = canonical_session_model(
             &catalog,
-            &catalog.all_provider_ids(),
+            &catalog.enabled_provider_ids().into_iter().collect(),
             Some("openrouter:gpt-56-sol"),
-            Some(&ProviderId::openai()),
+            Some(&lithos_llm::catalog::builtin::openai()),
         )
         .unwrap_err();
 
@@ -2010,11 +2006,11 @@ reasoning = false
         for tool_name in denied_tools {
             let executions = Arc::clone(&executions);
             registry.register(RegisteredTool {
-                definition: ToolDefinition {
-                    name:        tool_name.to_string(),
-                    description: format!("{tool_name} test tool"),
-                    parameters:  serde_json::json!({"type": "object"}),
-                },
+                definition: ToolDefinition::function(
+                    tool_name.to_string(),
+                    format!("{tool_name} test tool"),
+                    serde_json::json!({"type": "object"}),
+                ),
                 executor:   Arc::new(move |_args, _ctx: ToolContext| {
                     let executions = Arc::clone(&executions);
                     Box::pin(async move {
@@ -2036,7 +2032,7 @@ reasoning = false
 
         for tool_name in denied_tools {
             let result = fabro_agent::tool_execution::execute_and_emit_one_tool(
-                &ToolCall::new("call_1", tool_name, serde_json::json!({})),
+                &ToolCall::function("call_1", tool_name, serde_json::json!({})),
                 &registry,
                 Arc::clone(&sandbox),
                 None,
@@ -2050,12 +2046,13 @@ reasoning = false
             .await;
 
             assert!(result.is_error, "{tool_name} should be blocked");
+            let output = fabro_types::tool_result_to_json(&result);
             assert!(
-                result
-                    .content
+                output
                     .as_str()
                     .unwrap_or_default()
-                    .contains("denied by tool access policy")
+                    .contains("denied by tool access policy"),
+                "{output}"
             );
         }
         assert_eq!(executions.load(Ordering::SeqCst), 0);

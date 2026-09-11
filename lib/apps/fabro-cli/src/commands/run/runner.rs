@@ -8,14 +8,13 @@ use async_trait::async_trait;
 use fabro_api::types::RunManifest;
 use fabro_client::ServerTarget;
 use fabro_config::user::active_settings_path;
-use fabro_config::{ServerSettingsBuilder, Storage, load_llm_catalog_settings};
+use fabro_config::{ServerSettingsBuilder, Storage};
 use fabro_interview::{
     AnswerSubmission, ControlInterviewer, WORKER_CONTROL_INVALID_CURSOR_REASON,
     WORKER_CONTROL_PONG_TIMEOUT_REASON, WORKER_CONTROL_WS_LIVENESS_TIMEOUT,
     WORKER_CONTROL_WS_PING_INTERVAL, WorkerControlDeliveryFrame, WorkerControlEnvelope,
     WorkerControlMessage,
 };
-use fabro_model::Catalog;
 use fabro_server::run_tool_manifest;
 use fabro_store::{EventEnvelope, RunProjection, RunProjectionReducer};
 use fabro_tool::fabro_client::ClientBackend;
@@ -51,9 +50,9 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungsten
 use tokio_util::sync::CancellationToken;
 
 use crate::args::RunWorkerMode;
-use crate::server_client;
 use crate::shared::forgejo as shared_forgejo;
 use crate::shared::github::build_github_credentials;
+use crate::{command_context, server_client};
 
 const RUN_STORE_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(50),
@@ -93,11 +92,8 @@ pub(crate) async fn execute(
         .await
         .with_context(|| format!("failed to load run state for {run_id}"))?;
     let run_spec = &run_state.spec;
-    let llm_catalog_settings =
-        load_llm_catalog_settings(None).context("failed to load worker LLM catalog settings")?;
     let catalog = Arc::new(
-        Catalog::from_builtin_with_overrides(&llm_catalog_settings)
-            .context("failed to build worker LLM catalog")?,
+        command_context::load_cli_catalog().context("failed to build worker LLM catalog")?,
     );
     let artifact_sink = Some(ArtifactSink::Uploader(build_artifact_uploader(
         run_id,

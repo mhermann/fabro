@@ -1,4 +1,4 @@
-use fabro_model::ReasoningEffort;
+use lithos_llm::types::ReasoningEffort;
 use serde::{Deserialize, Serialize};
 
 use super::ExecOutputTail;

@@ -5,13 +5,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fabro_agent::Sandbox;
-use fabro_auth::{CredentialSource, test_support as auth_test_support};
+use fabro_auth::test_support as auth_test_support;
 use fabro_graphviz::graph::Graph as GvGraph;
 use fabro_interview::AutoApproveInterviewer;
-use fabro_model::Catalog;
-#[cfg(feature = "test-support")]
-use fabro_model::ProviderId;
+use fabro_llm::credentials::CredentialProvider;
+use fabro_llm::lithos_catalog::Catalog;
+use fabro_llm::test_support::test_catalog;
 use fabro_store::{ArtifactStore, RunProjection, test_support as store_test_support};
+use fabro_types::ModelRef;
+#[cfg(feature = "test-support")]
+use lithos_llm::catalog::ProviderId;
+use lithos_llm::catalog::{ModelId, builtin};
+use lithos_llm::types::TokenCounts;
 use object_store::local::LocalFileSystem;
 
 use crate::artifact_upload::ArtifactSink;
@@ -36,7 +41,7 @@ pub(crate) fn test_configured_provider_ids(
     assume_ready: bool,
 ) -> Vec<ProviderId> {
     if assume_ready {
-        catalog.all_provider_ids().into_iter().collect()
+        catalog.enabled_provider_ids().into_iter().collect()
     } else {
         configured_provider_ids
     }
@@ -82,26 +87,20 @@ async fn execute_and_emit_terminal(initialized: InitializedState) -> Executed {
 #[must_use]
 pub fn test_usage(
     model_id: &str,
-    input_tokens: i64,
-    output_tokens: i64,
+    input_tokens: u64,
+    output_tokens: u64,
 ) -> fabro_types::BilledModelUsage {
-    serde_json::from_value(serde_json::json!({
-        "input": {
-            "usage": {
-                "model": {
-                    "provider": "openai",
-                    "model_id": model_id
-                },
-                "tokens": {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens
-                }
-            },
-            "facts": { "algorithm": "openai" }
+    let mut usage = fabro_types::BilledModelUsage::new(
+        ModelRef::new(builtin::openai(), ModelId::new(model_id)),
+        TokenCounts {
+            input: input_tokens,
+            output: output_tokens,
+            ..TokenCounts::default()
         },
-        "total_usd_micros": input_tokens + output_tokens
-    }))
-    .expect("test_usage JSON must deserialise")
+        None,
+    );
+    usage.total_usd_micros = Some(i64::try_from(input_tokens + output_tokens).unwrap_or(i64::MAX));
+    usage
 }
 
 /// Append the `RunStartRequested → RunRunnable → RunStarting → RunRunning`
@@ -148,7 +147,7 @@ struct InitializedOptions {
     hook_runner: Option<Arc<fabro_hooks::HookRunner>>,
     env:         HashMap<String, String>,
     checkpoint:  Option<Checkpoint>,
-    llm_source:  Option<Arc<dyn CredentialSource>>,
+    llm_source:  Option<Arc<dyn CredentialProvider>>,
 }
 
 struct InitializedState {
@@ -272,12 +271,12 @@ async fn initialized(
                     options.hook_runner,
                     locations,
                     run_options.cancel_token.clone(),
-                    fabro_model::ProviderId::anthropic(),
+                    builtin::anthropic(),
                     "claude-sonnet-4-6".to_string(),
                     options
                         .llm_source
                         .unwrap_or_else(auth_test_support::vault_only_credential_source),
-                    Arc::new(Catalog::from_builtin().expect("default catalog should build")),
+                    Arc::new(test_catalog()),
                     Arc::new(SandboxGitRuntime::new()),
                     Arc::new(RunMetadataRuntime::new()),
                     None,
@@ -485,7 +484,7 @@ pub async fn run_graph_with_state_and_llm_source(
     sandbox: Arc<dyn Sandbox>,
     graph: &GvGraph,
     run_options: &RunOptions,
-    llm_source: Arc<dyn CredentialSource>,
+    llm_source: Arc<dyn CredentialProvider>,
 ) -> Result<(Outcome, RunProjection)> {
     let initialized = initialized(
         registry,
@@ -580,7 +579,7 @@ impl WorkflowRunner {
         &self,
         graph: &GvGraph,
         run_options: &RunOptions,
-        llm_source: Arc<dyn CredentialSource>,
+        llm_source: Arc<dyn CredentialProvider>,
     ) -> Result<(Outcome, RunProjection)> {
         let registry = self
             .registry

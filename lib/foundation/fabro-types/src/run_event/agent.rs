@@ -1,13 +1,15 @@
-use fabro_model::{CostSource, ReasoningEffort, Speed};
+use lithos_llm::types::{
+    CostSource, ReasoningEffort, ReasoningOutput, Speed, ToolCall, ToolResult,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use strum::{Display, EnumString, IntoStaticStr};
 
 use super::{BilledTokenCounts, ExecOutputTail};
-use crate::transcript::{ToolCall, ToolResult, TranscriptMessage};
+use crate::transcript::TranscriptMessage;
 use crate::{
     CommandTermination, MessageId, ModelRef, PairId, PairMessageId, PairSystemMessageKind,
-    PermissionLevel, ReasoningOutput, StageContextWindowProjection, TurnId,
+    PermissionLevel, StageContextWindowProjection, TurnId,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -149,7 +151,7 @@ pub struct AgentToolStartedProps {
     pub tool_call_id:      String,
     pub arguments:         Value,
     pub visit:             u32,
-    /// Canonical tool call payload. Carries `tool_type`, `raw_arguments`, and
+    /// Canonical tool call payload. Carries the typed input and
     /// `provider_metadata` (e.g. Gemini `thought_signature`) so tool actions
     /// can be replayed against the originating provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -523,17 +525,15 @@ pub struct AgentSkillActivatedProps {
 
 #[cfg(test)]
 mod tests {
+    use lithos_llm::catalog::builtin;
+    use lithos_llm::types::ContentPart;
     use serde_json::json;
 
     use super::*;
-    use crate::transcript::{ContentPart, MessageKind, MessageSource, TranscriptMessage};
+    use crate::transcript::{MessageKind, MessageSource, TranscriptMessage, tool_result_from_json};
 
     fn sample_model_ref() -> ModelRef {
-        ModelRef {
-            provider: fabro_model::ProviderId::openai(),
-            model_id: "gpt-5".into(),
-            speed:    None,
-        }
+        ModelRef::new(builtin::openai(), "gpt-5".into())
     }
 
     #[test]
@@ -587,7 +587,9 @@ mod tests {
     #[test]
     fn agent_message_props_carries_canonical_transcript_message() {
         let msg = TranscriptMessage::new(MessageKind::Agent, MessageSource::ProviderAnswer, vec![
-            ContentPart::text("ok"),
+            ContentPart::Text {
+                text: "ok".to_string(),
+            },
         ]);
         let props = AgentMessageProps {
             text:            "ok".to_string(),
@@ -624,8 +626,9 @@ mod tests {
 
     #[test]
     fn agent_tool_started_props_carries_canonical_tool_call_and_linkage() {
-        let mut tc = ToolCall::new("call_1", "Bash", json!({"cmd": "ls"}));
-        tc.provider_metadata = Some(json!({"thought_signature": "sig"}));
+        let mut tc = ToolCall::function("call_1", "Bash", json!({"cmd": "ls"}));
+        tc.provider_metadata
+            .insert("gemini".to_string(), json!({"thought_signature": "sig"}));
         let parent = MessageId::new();
         let turn = TurnId::new();
         let props = AgentToolStartedProps {
@@ -639,7 +642,7 @@ mod tests {
         };
         let v = serde_json::to_value(&props).unwrap();
         assert_eq!(
-            v["tool_call"]["provider_metadata"]["thought_signature"],
+            v["tool_call"]["provider_metadata"]["gemini"]["thought_signature"],
             "sig"
         );
         assert_eq!(v["turn_id"], turn.to_string());
@@ -667,7 +670,7 @@ mod tests {
 
     #[test]
     fn agent_tool_completed_props_carries_canonical_tool_result() {
-        let tr = ToolResult::success("call_1", json!({"stdout": "ok"}));
+        let tr = tool_result_from_json("call_1", json!({"stdout": "ok"}), false);
         let turn = TurnId::new();
         let props = AgentToolCompletedProps {
             tool_name:             "Bash".to_string(),
@@ -682,7 +685,7 @@ mod tests {
             turn_id:               Some(turn),
         };
         let v = serde_json::to_value(&props).unwrap();
-        assert_eq!(v["tool_result"]["content"]["stdout"], "ok");
+        assert_eq!(v["tool_result"]["content"][0]["value"]["stdout"], "ok");
         assert_eq!(v["output_bytes_observed"], 120);
         assert_eq!(v["output_bytes_retained"], 100);
         assert_eq!(v["output_bytes_omitted"], 20);

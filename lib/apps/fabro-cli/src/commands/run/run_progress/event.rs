@@ -1,5 +1,3 @@
-use std::convert::TryFrom;
-
 use chrono::{DateTime, Utc};
 use fabro_agent::Error as AgentError;
 use fabro_types::{BilledModelUsage, EventBody, LlmOutputKind, RunEvent};
@@ -15,13 +13,13 @@ pub(super) struct ProgressUsage {
 }
 
 impl ProgressUsage {
-    pub(super) fn from_stage_usage(usage: &BilledModelUsage) -> Option<Self> {
+    pub(super) fn from_stage_usage(usage: &BilledModelUsage) -> Self {
         let tokens = usage.tokens();
-        Some(Self {
-            input_tokens:  u64::try_from(tokens.input_tokens).ok()?,
-            output_tokens: u64::try_from(tokens.billable_output_tokens()).ok()?,
+        Self {
+            input_tokens:  tokens.input,
+            output_tokens: tokens.billable_output(),
             cost:          usage.total_usd_micros.map(|cost| cost as f64 / 1_000_000.0),
-        })
+        }
     }
 
     pub(super) fn total_tokens(&self) -> u64 {
@@ -313,10 +311,7 @@ pub(super) fn from_run_event(stored: &RunEvent) -> Option<ProgressEvent> {
             name: node_label,
             timing: props.timing,
             status: props.status.to_string(),
-            usage: props
-                .billing
-                .as_ref()
-                .and_then(ProgressUsage::from_stage_usage),
+            usage: props.billing.as_ref().map(ProgressUsage::from_stage_usage),
         }),
         EventBody::StageFailed(props) => Some(ProgressEvent::StageFailed {
             node_id,

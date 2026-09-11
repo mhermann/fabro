@@ -214,6 +214,7 @@ methods = ["dev-token"]
     assert!(sandbox.providers.local.enabled);
     assert!(sandbox.providers.docker.enabled);
     assert!(sandbox.providers.daytona.enabled);
+    assert!(sandbox.providers.kubernetes.enabled);
 }
 
 #[test]
@@ -227,6 +228,9 @@ methods = ["dev-token"]
 
 [server.sandbox.providers.daytona]
 enabled = false
+
+[server.sandbox.providers.kubernetes]
+enabled = false
 "#,
     )
     .expect("server settings should resolve");
@@ -235,6 +239,7 @@ enabled = false
     assert!(sandbox.providers.local.enabled);
     assert!(sandbox.providers.docker.enabled);
     assert!(!sandbox.providers.daytona.enabled);
+    assert!(!sandbox.providers.kubernetes.enabled);
 }
 
 #[test]

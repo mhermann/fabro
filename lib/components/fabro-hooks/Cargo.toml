@@ -16,9 +16,9 @@ workspace = true
 fabro-agent = { path = "../fabro-agent" }
 fabro-auth = { path = "../../foundation/fabro-auth" }
 fabro-llm = { path = "../fabro-llm" }
-fabro-model = { path = "../../foundation/fabro-model" }
 fabro-redact.workspace = true
 fabro-types = { path = "../../foundation/fabro-types" }
+lithos-llm = { workspace = true, features = ["runtime"] }
 fabro-util = { path = "../../foundation/fabro-util" }
 fabro-http.workspace = true
 serde.workspace = true

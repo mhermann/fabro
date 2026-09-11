@@ -28,52 +28,46 @@ pub use fabro_api::types::{
     BatchDeleteRunsResultOutcome, BatchDeleteRunsSummary, BatchRunLifecycleRequest,
     BatchRunLifecycleResponse, BatchRunLifecycleResult, BatchRunLifecycleResultOutcome,
     BatchRunLifecycleSummary, BillingByModel, BillingStageRef, CloseRunPullRequestResponse,
-    CompletionResponse, CompletionToolChoiceMode, CompletionUsage, CreateCompletionRequest,
-    CreatePlaygroundChatRequest, CreateRunPullRequestRequest, CreateSecretRequest,
-    CreateVariableRequest, DeleteRunResponse, DeleteRunSandbox, DeleteSecretRequest,
-    DenyRunRequest, DiskUsageResponse, DiskUsageRunRow, DiskUsageSummaryRow, ErrorResponseEntry,
-    ForkRequest, ForkResponse, IntegrationConnectionKind, IntegrationConnectionState,
-    IntegrationConnectionStatus, IntegrationProvider, IntegrationStatus, LinkRunPullRequestRequest,
-    MergeRunPullRequestRequest, MergeRunPullRequestResponse, ModelReference, PaginatedEventList,
-    PaginatedRunList, PaginationMeta, PreflightResponse, PreviewUrlRequest, PreviewUrlResponse,
-    Provider, ProviderCredentialTestRequest, ProviderCredentialTestResponse, ProviderList,
-    PruneRunEntry, PruneRunsRequest, PruneRunsResponse, RenderWorkflowGraphDirection,
-    RenderWorkflowGraphRequest, RewindRequest, RewindResponse, Run, RunArtifactEntry,
-    RunArtifactListResponse, RunBilling, RunBillingStage, RunBillingTotals, RunError, RunManifest,
-    RunStage, SandboxDetails, SandboxFileEntry, SandboxFileListResponse, SandboxService,
-    SandboxServiceListResponse, SshAccessRequest, SshAccessResponse, StageHandler, StageState,
-    StartRunRequest, SubmitAnswerRequest, SystemCpuResourceScope, SystemCpuResources,
-    SystemDiskResourceScope, SystemDiskResources, SystemInfoResponse, SystemIntegrationStatus,
-    SystemIntegrationsResponse, SystemMemoryResourceScope, SystemMemoryResources,
-    SystemRepairRunIssue, SystemRepairRunsResponse, SystemResourcesResponse, SystemRunCounts,
-    TimelineEntryResponse, UpdateVariableRequest, VariableListResponse, VncPreviewResponse,
-    WriteBlobResponse,
+    CompletionResponse, CompletionUsage, CreateCompletionRequest, CreateRunPullRequestRequest,
+    CreateSecretRequest, CreateVariableRequest, DeleteRunResponse, DeleteRunSandbox,
+    DeleteSecretRequest, DenyRunRequest, DiskUsageResponse, DiskUsageRunRow, DiskUsageSummaryRow,
+    ErrorResponseEntry, ForkRequest, ForkResponse, IntegrationConnectionKind,
+    IntegrationConnectionState, IntegrationConnectionStatus, IntegrationProvider,
+    IntegrationStatus, LinkRunPullRequestRequest, MergeRunPullRequestRequest,
+    MergeRunPullRequestResponse, ModelReference, PaginatedEventList, PaginatedRunList,
+    PaginationMeta, PreflightResponse, PreviewUrlRequest, PreviewUrlResponse, Provider,
+    ProviderCredentialTestRequest, ProviderCredentialTestResponse, ProviderList, PruneRunEntry,
+    PruneRunsRequest, PruneRunsResponse, RenderWorkflowGraphDirection, RenderWorkflowGraphRequest,
+    RewindRequest, RewindResponse, Run, RunArtifactEntry, RunArtifactListResponse, RunBilling,
+    RunBillingStage, RunBillingTotals, RunError, RunManifest, RunStage, SandboxDetails,
+    SandboxFileEntry, SandboxFileListResponse, SandboxService, SandboxServiceListResponse,
+    SshAccessRequest, SshAccessResponse, StageHandler, StageState, StartRunRequest,
+    SubmitAnswerRequest, SystemCpuResourceScope, SystemCpuResources, SystemDiskResourceScope,
+    SystemDiskResources, SystemInfoResponse, SystemIntegrationStatus, SystemIntegrationsResponse,
+    SystemMemoryResourceScope, SystemMemoryResources, SystemRepairRunIssue,
+    SystemRepairRunsResponse, SystemResourcesResponse, SystemRunCounts, TimelineEntryResponse,
+    UpdateVariableRequest, VariableListResponse, VncPreviewResponse, WriteBlobResponse,
 };
-use fabro_auth::{CredentialSource, SqlVaultCredentialSource, auth_issue_message};
+use fabro_auth::SqlVaultCredentialSource;
 use fabro_automation::{self, AutomationStore};
 use fabro_config::daemon::ServerDaemon;
-use fabro_config::{RunLayer, Storage, WorkflowSettingsBuilder};
+use fabro_config::{LlmLayer, RunLayer, Storage, WorkflowSettingsBuilder};
 use fabro_db::DbPool;
 use fabro_environment::EnvironmentStore;
 use fabro_interview::{
     Answer, AnswerSubmission, ControlInterviewer, Interviewer, Question, WorkerControlEnvelope,
 };
-use fabro_llm::client::Client as LlmClient;
-use fabro_llm::generate::{GenerateParams, generate_object};
-use fabro_llm::model_test::run_model_test;
-use fabro_llm::types::{
-    FinishReason, Message as LlmMessage, Request as LlmRequest, ToolChoice, ToolDefinition,
-};
+use fabro_llm::credentials::CredentialProvider;
+use fabro_llm::lithos_catalog::Catalog;
+use fabro_llm::{ClientOptions, FabroClient};
 use fabro_mcp_store::McpServerStore;
-use fabro_model::catalog::LlmCatalogSettings;
-use fabro_model::{BilledTokenCounts, Catalog, ModelRef, ModelTestMode, ProviderId};
 use fabro_redact::redact_jsonl_line;
 use fabro_sandbox::daytona::{self, DaytonaSandbox};
 use fabro_sandbox::details::sandbox_details;
 use fabro_sandbox::reconnect::reconnect_for_run;
 use fabro_sandbox::{
-    DaytonaSandboxProvider, DockerSandboxProvider, LocalSandboxProvider, Sandbox, SandboxProvider,
-    SandboxProviderRegistry,
+    DaytonaSandboxProvider, DockerSandboxProvider, KubernetesSandboxProvider, LocalSandboxProvider,
+    Sandbox, SandboxProvider, SandboxProviderRegistry,
 };
 use fabro_slack::client::{PostedMessage as SlackPostedMessage, SlackClient};
 use fabro_slack::config::{
@@ -98,10 +92,10 @@ use fabro_types::settings::server::{
     LogDestination,
 };
 use fabro_types::{
-    AgentBackend, AskFabro, AskFabroUnavailableReason, BlobHash, EventBody,
-    InterviewQuestionRecord, PairId, PairMessageId, PairTarget, PendingReason, Principal,
-    PullRequestLink, QuestionType, RunControlAction, RunEvent, RunId, RunRunnableSource,
-    RunStatusKind, SandboxProviderKind, ServerSettings, SessionCapability,
+    AgentBackend, AskFabro, AskFabroUnavailableReason, BilledTokenCounts, BlobHash, EventBody,
+    InterviewQuestionRecord, ModelRef, ModelTestMode, PairId, PairMessageId, PairTarget,
+    PendingReason, Principal, PullRequestLink, QuestionType, RunControlAction, RunEvent, RunId,
+    RunRunnableSource, RunStatusKind, SandboxProviderKind, ServerSettings, SessionCapability,
 };
 use fabro_util::error::{
     SharedError, collect_causes, render_compact_with_causes, render_with_causes,
@@ -122,6 +116,7 @@ use fabro_workflow::run_lookup::{
 use fabro_workflow::run_status::{FailureReason, RunStatus, SuccessReason};
 use fabro_workflow::{Error as WorkflowError, operations, pull_request};
 use futures_util::future::join_all;
+use lithos_llm::catalog::ProviderId;
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 use tokio::fs;
@@ -141,7 +136,6 @@ use tower::{ServiceExt, service_fn};
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::compression::{CompressionLayer, CompressionLevel};
 use tracing::{Instrument, debug, error, info, warn};
-use ulid::Ulid;
 
 use crate::auth::{self, GithubEndpoints, auth_translation_middleware, demo_routing_middleware};
 use crate::automation_materializer::{
@@ -163,7 +157,7 @@ use crate::principal_middleware::{
 };
 use crate::request_id::{self, RequestId};
 use crate::run_files::{FilesInFlight, new_files_in_flight};
-use crate::server_secrets::{LlmClientResult, ServerSecrets};
+use crate::server_secrets::ServerSecrets;
 use crate::spawn_env::apply_render_graph_env;
 use crate::worker_control::{LocalWorkerControlBus, WorkerControlBus, WorkerControlBusError};
 use crate::worker_runtime::{
@@ -1135,7 +1129,7 @@ pub struct AppState {
     parent_link_lock: AsyncMutex<()>,
 
     pub(super) server_secrets: ServerSecrets,
-    pub(crate) llm_source: Arc<dyn CredentialSource>,
+    pub(crate) llm_source: Arc<dyn CredentialProvider>,
     manifest_run_defaults: RwLock<Arc<RunLayer>>,
     manifest_run_settings: RwLock<std::result::Result<RunNamespace, SharedError>>,
     pub(crate) server_settings: RwLock<Arc<ServerSettings>>,
@@ -1305,7 +1299,7 @@ pub(crate) struct AppStateConfig {
 pub(crate) struct ResolvedAppStateSettings {
     pub(crate) server_settings:       ServerSettings,
     pub(crate) manifest_run_defaults: RunLayer,
-    pub(crate) llm_catalog_settings:  LlmCatalogSettings,
+    pub(crate) llm_overlay:           LlmLayer,
 }
 
 fn accumulate_billing_rollup(
@@ -1402,13 +1396,18 @@ impl AppState {
         Some(format!("{}/runs/{run_id}", base.trim_end_matches('/')))
     }
 
-    pub(crate) async fn resolve_llm_client(&self) -> anyhow::Result<LlmClientResult> {
-        resolve_llm_client_from_source(self.llm_source.as_ref(), self.catalog()).await
+    pub(crate) async fn resolve_llm_client(&self) -> anyhow::Result<FabroClient> {
+        resolve_llm_client_from_source(
+            Arc::clone(&self.llm_source),
+            self.catalog(),
+            self.http_client.clone(),
+        )
+        .await
     }
 
     pub(crate) async fn configured_llm_provider_ids(&self) -> Vec<ProviderId> {
         let catalog = self.catalog();
-        self.llm_source.configured_providers(catalog.as_ref()).await
+        fabro_llm::configured_providers(catalog.as_ref(), self.llm_source.as_ref()).await
     }
 
     /// Resolve the LLM client once and derive the ready provider IDs from it,
@@ -1417,14 +1416,14 @@ impl AppState {
     /// resolved twice.
     pub(crate) async fn resolve_llm_client_with_ready_ids(
         &self,
-    ) -> (anyhow::Result<LlmClientResult>, Vec<ProviderId>) {
+    ) -> (anyhow::Result<FabroClient>, Vec<ProviderId>) {
         let llm_result = self.resolve_llm_client().await;
         if let Err(err) = &llm_result {
             warn!(error = ?err, "Failed to resolve LLM client while checking ready providers");
         }
         let ready_provider_ids = llm_result
             .as_ref()
-            .map(LlmClientResult::provider_ids)
+            .map(FabroClient::provider_ids)
             .unwrap_or_default();
         (llm_result, ready_provider_ids)
     }
@@ -1452,12 +1451,9 @@ impl AppState {
         let default_model = if provider_ids.is_empty() {
             None
         } else {
-            Some(
-                self.catalog()
-                    .default_for_configured_ids(&provider_ids)
-                    .id
-                    .to_string(),
-            )
+            self.catalog()
+                .default_offering_for(&provider_ids)
+                .map(|entry| entry.model.id().to_string())
         };
         AskFabroReadiness { default_model }
     }
@@ -1684,7 +1680,7 @@ impl AppState {
         let ResolvedAppStateSettings {
             server_settings,
             manifest_run_defaults,
-            llm_catalog_settings,
+            llm_overlay,
         } = resolved_settings;
         let server_settings = Arc::new(server_settings);
         let manifest_run_defaults = Arc::new(manifest_run_defaults);
@@ -1696,7 +1692,7 @@ impl AppState {
             &self.stores.mcp_servers,
         );
         let catalog = Arc::new(
-            Catalog::from_builtin_with_overrides(&llm_catalog_settings)
+            fabro_llm::build_catalog(&llm_overlay, &|name| (self.env_lookup)(name))
                 .context("building LLM model catalog")?,
         );
         canonical_origin_from_effective_web_url(&effective_web_url).map_err(anyhow::Error::msg)?;
@@ -1722,21 +1718,18 @@ impl AppState {
     }
 }
 
+/// Builds the server's LLM client: retries and attachment inlining on, the
+/// server's HTTP client for provider requests when one is configured.
 async fn resolve_llm_client_from_source(
-    source: &dyn CredentialSource,
+    source: Arc<dyn CredentialProvider>,
     catalog: Arc<Catalog>,
-) -> anyhow::Result<LlmClientResult> {
-    let resolved = source
-        .resolve(catalog.as_ref())
+    http_client: Option<fabro_http::HttpClient>,
+) -> anyhow::Result<FabroClient> {
+    let mut options = ClientOptions::standard();
+    options.http = http_client;
+    fabro_llm::build_client(Catalog::clone(&catalog), source, options)
         .await
-        .context("resolving LLM credentials")?;
-    let report = LlmClient::from_credentials_report(resolved.credentials, catalog).await;
-
-    Ok(LlmClientResult {
-        client:              report.client,
-        auth_issues:         resolved.auth_issues,
-        registration_issues: report.registration_issues,
-    })
+        .context("building the LLM client")
 }
 
 fn decode_secret_pem(name: &str, raw: &str) -> Result<String, String> {
@@ -2403,6 +2396,14 @@ fn build_sandbox_provider_registry(
         )));
     }
 
+    // The Kubernetes provider owns no credential plumbing: connection is
+    // inferred (in-cluster ServiceAccount, KUBECONFIG, ~/.kube/config), and an
+    // unresolvable cluster surfaces as a fail-soft provider error in the
+    // inventory meta rather than a registry gap.
+    if provider_settings.kubernetes.enabled {
+        providers.push(Arc::new(KubernetesSandboxProvider::new()));
+    }
+
     SandboxProviderRegistry::new(providers)
 }
 
@@ -2517,7 +2518,7 @@ pub(crate) fn build_app_state(config: AppStateConfig) -> anyhow::Result<Arc<AppS
             .forgejo,
         &vault,
     );
-    let llm_source: Arc<dyn CredentialSource> = Arc::new(SqlVaultCredentialSource::vault_only(
+    let llm_source: Arc<dyn CredentialProvider> = Arc::new(SqlVaultCredentialSource::vault_only(
         Arc::clone(&secret_store),
     ));
     let (global_event_tx, _) = broadcast::channel(4096);
@@ -2531,7 +2532,7 @@ pub(crate) fn build_app_state(config: AppStateConfig) -> anyhow::Result<Arc<AppS
         &mcp_server_store,
     );
     let current_catalog = Arc::new(
-        Catalog::from_builtin_with_overrides(&resolved_settings.llm_catalog_settings)
+        fabro_llm::build_catalog(&resolved_settings.llm_overlay, &|name| env_lookup(name))
             .context("building LLM model catalog")?,
     );
     let sandbox_provider_registry = sandbox_provider_registry.unwrap_or_else(|| {
@@ -3181,6 +3182,7 @@ pub(crate) async fn reconcile_incomplete_runs_on_startup(
     state: &Arc<AppState>,
 ) -> anyhow::Result<usize> {
     const RECONCILABLE_STATUSES: &[RunStatusKind] = &[
+        RunStatusKind::Runnable,
         RunStatusKind::Starting,
         RunStatusKind::Running,
         RunStatusKind::Blocked,
@@ -4311,7 +4313,7 @@ async fn execute_run_in_process(state: Arc<AppState>, run_id: RunId) {
                 .expect("aggregate_billing lock poisoned");
             accumulate_billing_rollup(
                 &mut agg,
-                &fabro_workflow::billing_rollup_from_projection(projection, None),
+                &fabro_workflow::billing_rollup_from_projection(projection),
             );
         }
     }
@@ -4556,7 +4558,7 @@ async fn execute_run_subprocess(state: Arc<AppState>, run_id: RunId) {
             .expect("aggregate_billing lock poisoned");
         accumulate_billing_rollup(
             &mut agg,
-            &fabro_workflow::billing_rollup_from_projection(&final_state, None),
+            &fabro_workflow::billing_rollup_from_projection(&final_state),
         );
     }
 

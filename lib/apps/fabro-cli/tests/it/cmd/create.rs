@@ -156,6 +156,64 @@ fn create_uses_explicit_server_target_and_prints_remote_run_id() {
 }
 
 #[test]
+fn create_reports_available_environments_when_default_is_missing() {
+    let context = test_context!();
+    let server = MockServer::start();
+    let default_mock = server.mock(|when, then| {
+        when.method("GET").path("/api/v1/environments/default");
+        then.status(404)
+            .header("content-type", "application/json")
+            .json_body(json!({
+                "errors": [{
+                    "status": "404",
+                    "title": "Not Found",
+                    "detail": "environment `default` not found",
+                    "code": "environment_not_found"
+                }]
+            }));
+    });
+    let list_mock = server.mock(|when, then| {
+        when.method("GET").path("/api/v1/environments");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({
+                "data": [
+                    environment_json("production", "docker"),
+                    environment_json("staging", "daytona"),
+                ],
+                "meta": { "total": 2 }
+            }));
+    });
+    let create_mock = server.mock(|when, then| {
+        when.method("POST").path("/api/v1/runs");
+        then.status(500);
+    });
+
+    let output = context
+        .create_cmd()
+        .args([
+            "--server",
+            &format!("{}/api/v1", server.base_url()),
+            "--dry-run",
+            fixture("simple.fabro").to_str().unwrap(),
+        ])
+        .output()
+        .expect("command should execute");
+
+    assert!(!output.status.success(), "command should fail");
+    default_mock.assert();
+    list_mock.assert();
+    create_mock.assert_calls(0);
+    let stderr = output_stderr(&output);
+    assert!(
+        stderr.contains(
+            "environment `default` not found on the server; pass `--environment <id>` or create an environment named `default`. Available environments: `production`, `staging`."
+        ),
+        "unexpected stderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn create_defers_provider_validation_to_the_server() {
     let context = test_context!();
     let server = MockServer::start();

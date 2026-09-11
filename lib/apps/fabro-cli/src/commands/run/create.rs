@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context as _, anyhow, bail};
 use fabro_config::project;
-use fabro_environment::DEFAULT_ENVIRONMENT_ID;
+use fabro_environment::{DEFAULT_ENVIRONMENT_ID, Environment};
 use fabro_types::settings::run::EnvironmentProvider;
 use fabro_types::{DirtyStatus, RunId, RunIntent, RunTarget};
 use fabro_util::terminal::Styles;
@@ -61,10 +61,6 @@ pub(crate) async fn create_run(
     }
 
     let client = ctx.server().await?;
-    let environment_id = args
-        .environment
-        .as_deref()
-        .unwrap_or(DEFAULT_ENVIRONMENT_ID);
     let (parent_id, environment) = tokio::try_join!(
         async {
             match args.parent.as_deref() {
@@ -74,12 +70,7 @@ pub(crate) async fn create_run(
                 None => Ok(None),
             }
         },
-        async {
-            client
-                .retrieve_environment(environment_id)
-                .await
-                .with_context(|| format!("could not retrieve environment `{environment_id}`"))
-        },
+        resolve_run_environment(client.as_ref(), args.environment.as_deref()),
     )?;
     let (target, dirty_worktree) =
         run_target_for_environment(environment.settings.provider, &canonical_cwd)?;
@@ -116,6 +107,43 @@ pub(crate) async fn create_run(
     Ok(CreatedRun {
         run_id: created_run_id,
     })
+}
+
+/// Retrieves the run environment, defaulting to `default` when `--environment`
+/// is omitted. A missing `default` is reported with the catalog so the user
+/// can pick an explicit environment or create the missing one.
+async fn resolve_run_environment(
+    client: &fabro_client::Client,
+    explicit_id: Option<&str>,
+) -> anyhow::Result<Environment> {
+    let id = explicit_id.unwrap_or(DEFAULT_ENVIRONMENT_ID);
+    match client.retrieve_environment(id).await {
+        Ok(environment) => Ok(environment),
+        Err(error) if explicit_id.is_none() && fabro_client::is_not_found_error(&error) => {
+            Err(missing_default_environment_error(client).await)
+        }
+        Err(error) => Err(error).with_context(|| format!("could not retrieve environment `{id}`")),
+    }
+}
+
+async fn missing_default_environment_error(client: &fabro_client::Client) -> anyhow::Error {
+    let catalog_hint = match client.list_environments().await {
+        Ok(environments) if environments.is_empty() => {
+            " The server has no environments configured.".to_string()
+        }
+        Ok(environments) => {
+            let ids = environments
+                .iter()
+                .map(|environment| format!("`{}`", environment.id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" Available environments: {ids}.")
+        }
+        Err(_) => String::new(),
+    };
+    anyhow!(
+        "environment `{DEFAULT_ENVIRONMENT_ID}` not found on the server; pass `--environment <id>` or create an environment named `{DEFAULT_ENVIRONMENT_ID}`.{catalog_hint}"
+    )
 }
 
 fn warn_untransmitted_settings(

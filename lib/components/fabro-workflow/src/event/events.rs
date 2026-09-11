@@ -10,7 +10,7 @@ use ::fabro_types::{
     WorkflowVersionId, run_event as fabro_types,
 };
 use fabro_agent::{AgentEvent, SandboxEvent};
-use fabro_model::{ReasoningEffort, Speed};
+use lithos_llm::types::{ReasoningEffort, Speed};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, run_failure_from_error};

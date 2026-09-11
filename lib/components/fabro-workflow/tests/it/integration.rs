@@ -30,8 +30,7 @@ use fabro_interview::{
     Answer, AnswerValue, AutoApproveInterviewer, CallbackInterviewer, Interviewer,
     QueueInterviewer, RecordingInterviewer,
 };
-use fabro_model::catalog::{LlmCatalogSettings, ProviderCatalogSettings};
-use fabro_model::{Catalog, ProviderId};
+use fabro_llm::lithos_catalog::Catalog;
 use fabro_store::{ArtifactKey, ArtifactStore};
 use fabro_types::{EventBody, RunEvent, RunId, StageId, WorkflowSettings, parse_blob_ref};
 use fabro_validate::{Severity, validate, validate_or_raise};
@@ -61,26 +60,17 @@ use fabro_workflow::test_support::{
 };
 use fabro_workflow::transforms::stylesheet::{apply_stylesheet, parse_stylesheet};
 use fabro_workflow::transforms::{StylesheetApplicationTransform, TemplateTransform, Transform};
+use lithos_llm::catalog::ProviderId;
 use object_store::local::LocalFileSystem;
 use tokio_util::sync::CancellationToken;
 use ulid::Ulid;
 
 fn default_catalog() -> Arc<Catalog> {
-    Arc::new(Catalog::from_builtin().expect("default catalog should build"))
+    Arc::new(fabro_llm::test_support::test_catalog())
 }
 
 fn catalog_with_provider_base_url(provider: &str, base_url: &str) -> Arc<Catalog> {
-    let mut settings = LlmCatalogSettings::default();
-    settings
-        .providers
-        .insert(provider.to_string(), ProviderCatalogSettings {
-            base_url: Some(base_url.to_string()),
-            ..ProviderCatalogSettings::default()
-        });
-    Arc::new(
-        Catalog::from_builtin_with_overrides(&settings)
-            .expect("catalog with custom base_url should build"),
-    )
+    Arc::new(fabro_llm::test_support::test_catalog_with_provider_base_url(provider, base_url))
 }
 
 fn local_env() -> Arc<dyn fabro_agent::Sandbox> {
@@ -2594,7 +2584,7 @@ async fn shared_thread_compaction_before_routing_audit_succeeds() {
             "model": "compact-model",
             "choices": [{
                 "delta": {"content": text},
-                "finish_reason": null
+                "finish_reason": "stop"
             }]
         });
         let usage_chunk = serde_json::json!({
@@ -2640,7 +2630,7 @@ async fn shared_thread_compaction_before_routing_audit_succeeds() {
         server
             .mock_async(move |when, then| {
                 when.method(POST)
-                    .path("/chat/completions")
+                    .path("/v1/chat/completions")
                     .body_includes(r#""stream":true"#)
                     .body_includes(prompt)
                     .body_excludes(next_prompt);
@@ -2659,7 +2649,7 @@ async fn shared_thread_compaction_before_routing_audit_succeeds() {
     let audit_mock = server
         .mock_async(|when, then| {
             when.method(POST)
-                .path("/chat/completions")
+                .path("/v1/chat/completions")
                 .body_includes(r#""stream":true"#)
                 .body_includes("Audit shared-thread work");
             then.status(200)
@@ -2671,7 +2661,7 @@ async fn shared_thread_compaction_before_routing_audit_succeeds() {
     let compaction_mock = server
         .mock_async(|when, then| {
             when.method(POST)
-                .path("/chat/completions")
+                .path("/v1/chat/completions")
                 .body_excludes(r#""stream":true"#);
             then.status(200)
                 .header("content-type", "application/json")
@@ -2681,41 +2671,35 @@ async fn shared_thread_compaction_before_routing_audit_succeeds() {
         })
         .await;
 
-    let settings: LlmCatalogSettings = toml::from_str(&format!(
-        r#"
+    let catalog = Arc::new(fabro_llm::test_support::test_catalog_with_overlay(
+        &format!(
+            r#"
 [providers.compact]
-adapter = "openai_compatible"
-agent_profile = "openai"
-base_url = "{}"
+display_name = "Compact"
+adapter = "openai-compatible"
+codec = "openai-chat"
+base_url = {base_url}
+auth = {{ type = "bearer" }}
+default_model = "compact-model"
 
-[providers.compact.auth]
-credentials = ["env:COMPACT_API_KEY"]
+[providers.compact.metadata.agent]
+profile = "openai"
 
-[models.compact-model]
-provider = "compact"
+[providers.compact.models.compact-model]
 display_name = "Compact Model"
-family = "mock"
-default = true
-
-[models.compact-model.limits]
-context_window = 100000
-max_output = 1024
-
-[models.compact-model.features]
-tools = true
-vision = false
-reasoning = false
+api_model = "compact-model"
+limits = {{ context_tokens = 100000, max_output_tokens = 1024 }}
+capabilities = {{ text = true, tools = true, response_format = {{ json_object = true, json_schema = true }} }}
 "#,
-        server.base_url()
-    ))
-    .expect("test catalog should parse");
-    let catalog = Arc::new(Catalog::from_builtin_with_overrides(&settings).unwrap());
+            base_url = toml::Value::String(server.base_url()),
+        ),
+    ));
     let source = auth_test_support::env_credential_source(|name| {
         (name == "COMPACT_API_KEY").then(|| "sk-test".to_string())
     });
     let backend = AgentApiBackend::new_with_catalog(
         "compact-model".to_string(),
-        ProviderId::from("compact"),
+        ProviderId::new("compact"),
         ModelFallbackPolicy::default(),
         source,
         Arc::new(SteeringHub::new(Arc::new(Emitter::default()))),
@@ -2829,7 +2813,7 @@ async fn workflow_persists_authoritative_openrouter_cost_for_agent_stage() {
         "model": "openai/gpt-5.4",
         "choices": [{
             "delta": {"content": "done"},
-            "finish_reason": null
+            "finish_reason": "stop"
         }]
     });
     let usage_chunk = serde_json::json!({
@@ -2847,7 +2831,7 @@ async fn workflow_persists_authoritative_openrouter_cost_for_agent_stage() {
     let completion_mock = server
         .mock_async(|when, then| {
             when.method(POST)
-                .path("/chat/completions")
+                .path("/v1/chat/completions")
                 .body_includes(r#""stream":true"#)
                 .body_includes("Report completion");
             then.status(200)
@@ -2856,22 +2840,21 @@ async fn workflow_persists_authoritative_openrouter_cost_for_agent_stage() {
         })
         .await;
 
-    let settings: LlmCatalogSettings = toml::from_str(&format!(
-        r#"
-[providers.openrouter]
+    let catalog = Arc::new(fabro_llm::test_support::test_catalog_with_overlay(
+        &format!(
+            "[providers.openrouter]
+base_url = {}
 enabled = true
-base_url = "{}"
-"#,
-        server.base_url()
-    ))
-    .expect("test catalog should parse");
-    let catalog = Arc::new(Catalog::from_builtin_with_overrides(&settings).unwrap());
+",
+            toml::Value::String(server.base_url()),
+        ),
+    ));
     let source = auth_test_support::env_credential_source(|name| {
         (name == "OPENROUTER_API_KEY").then(|| "sk-test".to_string())
     });
     let backend = AgentApiBackend::new_with_catalog(
         "openai/gpt-5.4".to_string(),
-        ProviderId::from("openrouter"),
+        ProviderId::new("openrouter"),
         ModelFallbackPolicy::default(),
         source,
         Arc::new(SteeringHub::new(Arc::new(Emitter::default()))),
@@ -5306,12 +5289,7 @@ async fn import_e2e_through_engine() {
     use fabro_workflow::transforms::ModelResolutionTransform;
 
     let dir = tempfile::tempdir().unwrap();
-    let catalog = std::sync::Arc::new(
-        fabro_model::Catalog::from_builtin_with_overrides(
-            &fabro_model::catalog::LlmCatalogSettings::default(),
-        )
-        .unwrap(),
-    );
+    let catalog = std::sync::Arc::new(fabro_llm::test_support::test_catalog());
     std::fs::write(
         dir.path().join("val.fabro"),
         r#"digraph validate {
@@ -7392,11 +7370,9 @@ mod real_llm {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use fabro_auth::EnvCredentialSource;
+    use fabro_auth::VaultCredentialSource;
     use fabro_graphviz::graph::Node;
-    use fabro_llm::client::Client;
-    use fabro_llm::providers::OpenAiAdapter;
-    use fabro_llm::types::{Message, Request};
+    use fabro_llm::{Client, ClientOptions, Request};
     use fabro_types::WorkflowSettings;
     use fabro_workflow::error::Error;
     use fabro_workflow::handler::agent::{
@@ -7423,25 +7399,16 @@ mod real_llm {
 
     impl LlmCodergenBackend {
         async fn complete(&self, prompt: &str) -> Result<CodergenResult, Error> {
-            let request = Request {
-                model:            self.model.clone(),
-                messages:         vec![Message::user(prompt)],
-                provider:         Some(self.provider.clone()),
-                tools:            None,
-                tool_choice:      None,
-                response_format:  None,
-                temperature:      Some(0.0),
-                top_p:            None,
-                max_tokens:       Some(200),
-                stop_sequences:   None,
-                reasoning_effort: None,
-                speed:            None,
-                metadata:         None,
-                provider_options: None,
-            };
+            let request = Request::builder()
+                .model(format!("{}/{}", self.provider, self.model))
+                .user(prompt)
+                .temperature(0.0)
+                .max_output_tokens(200)
+                .build()
+                .map_err(|e| Error::handler(e.to_string()))?;
             let response = self
                 .client
-                .complete(&request)
+                .complete(request)
                 .await
                 .map_err(|e| Error::handler(e.to_string()))?;
             Ok(CodergenResult::Text {
@@ -7470,27 +7437,45 @@ mod real_llm {
         }
     }
 
+    /// A client whose `openai` provider is the twin at `base_url`,
+    /// authenticated with `api_key`.
+    async fn twin_openai_client(base_url: String, api_key: String) -> Arc<Client> {
+        let catalog = fabro_llm::build_catalog(&fabro_config::LlmLayer::default(), &move |name| {
+            (name == fabro_static::EnvVars::OPENAI_BASE_URL).then(|| base_url.clone())
+        })
+        .expect("twin catalog should build");
+        Arc::new(
+            fabro_llm::test_support::client_from_env(
+                catalog,
+                move |name| {
+                    (name == fabro_static::EnvVars::OPENAI_API_KEY).then(|| api_key.clone())
+                },
+                ClientOptions::standard(),
+            )
+            .await,
+        )
+    }
+
     async fn make_llm_client() -> Option<Arc<Client>> {
+        use fabro_llm::lithos_catalog::Catalog;
+
         if fabro_test::TestMode::from_env().is_twin() {
             let (base_url, api_key) = fabro_test::e2e_openai!();
-            let adapter: Arc<dyn fabro_llm::provider::ProviderAdapter> =
-                Arc::new(OpenAiAdapter::new(api_key).with_base_url(base_url));
-            let mut providers: HashMap<String, Arc<dyn fabro_llm::provider::ProviderAdapter>> =
-                HashMap::new();
-            providers.insert("openai".to_string(), adapter);
-            return Some(Arc::new(Client::new(
-                providers,
-                Some("openai".to_string()),
-                Vec::new(),
-            )));
+            return Some(twin_openai_client(base_url, api_key).await);
         }
 
         fabro_test::require_env("ANTHROPIC_API_KEY")?;
-        let source = EnvCredentialSource::new();
+        let source: Arc<dyn fabro_llm::credentials::CredentialProvider> =
+            Arc::new(VaultCredentialSource::environment_only());
         Some(Arc::new(
-            Client::from_source(&source, super::default_catalog())
-                .await
-                .expect("unified-llm client should initialize from env source"),
+            fabro_llm::build_client(
+                Catalog::clone(&super::default_catalog()),
+                source,
+                ClientOptions::standard(),
+            )
+            .await
+            .expect("LLM client should initialize from env source")
+            .client,
         ))
     }
 
@@ -7655,14 +7640,7 @@ mod real_llm {
             .load(twin)
             .await;
 
-        let adapter: Arc<dyn fabro_llm::provider::ProviderAdapter> =
-            Arc::new(OpenAiAdapter::new(namespace.clone()).with_base_url(twin.base_url.clone()));
-        let providers = HashMap::from([("openai".to_string(), adapter)]);
-        let client = Arc::new(Client::new(
-            providers,
-            Some("openai".to_string()),
-            Vec::new(),
-        ));
+        let client = twin_openai_client(twin.base_url.clone(), namespace.clone()).await;
 
         let mut graph = Graph::new("ForEachSecurityReview");
         graph.attrs.insert(
@@ -8178,7 +8156,8 @@ fn openai_responses_payload(text: &str) -> serde_json::Value {
 #[tokio::test]
 async fn workflow_run_with_vault_only_openai_codex_builds_pr_body() {
     use chrono::Utc;
-    use fabro_auth::{CredentialSource, VaultCredentialSource};
+    use fabro_auth::VaultCredentialSource;
+    use fabro_llm::credentials::CredentialProvider;
     use fabro_types::Conclusion;
     use fabro_vault::{SecretType, Vault};
     use httpmock::Method::POST;
@@ -8235,7 +8214,7 @@ async fn workflow_run_with_vault_only_openai_codex_builds_pr_body() {
             None,
         )
         .unwrap();
-    let llm_source: Arc<dyn CredentialSource> = Arc::new(VaultCredentialSource::new(Arc::new(
+    let llm_source: Arc<dyn CredentialProvider> = Arc::new(VaultCredentialSource::new(Arc::new(
         AsyncRwLock::new(vault),
     )));
     // Use catalog settings to override base_url instead of env var
@@ -8284,8 +8263,8 @@ async fn workflow_run_with_vault_only_openai_codex_builds_pr_body() {
         "Implement feature",
         "gpt-5.4",
         &run_store_handle,
-        llm_source.as_ref(),
-        catalog,
+        Arc::clone(&llm_source),
+        Arc::clone(&catalog),
         Some(&Conclusion {
             timestamp:            Utc::now(),
             status:               StageOutcome::Succeeded,

@@ -2,26 +2,26 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use fabro_auth::CredentialSource;
-use fabro_llm::client::Client;
-use fabro_llm::error::ProviderErrorKind;
-use fabro_llm::generate::StreamAccumulator;
-use fabro_llm::provider::StreamEventStream;
-use fabro_llm::types::{
-    ContentPart, Message as LlmMessage, ReasoningEffort, Request, RetryPolicy, StreamEvent,
-    TokenCounts, ToolChoice,
+use fabro_llm::types::ContentBlockKind;
+use fabro_llm::{
+    CallContext, Client, ErrorData, FinishReason, Request, Response, RetryClassification,
+    RetryListener, RetryStage, StreamEvent,
 };
-use fabro_llm::{Error as LlmError, retry};
 use fabro_mcp::config::{McpServerSettings, McpTransport};
 use fabro_mcp::connection_manager::McpConnectionManager;
 use fabro_mcp::http_transport;
-use fabro_model::{AgentProfileKind, Catalog, ModelId, ModelRef, Speed, UsdMicros};
 use fabro_types::{
-    AgentToolSummary, LlmOutputKind, LlmRetryPhase, PermissionLevel, Principal, SessionMessage,
-    SessionRecord, StageContextWindowProjection, SteeringMessage,
+    AgentProfileKind, AgentToolSummary, LlmOutputKind, LlmRetryPhase, ModelRef, PermissionLevel,
+    Principal, SessionMessage, SessionRecord, StageContextWindowProjection, SteeringMessage,
+    UsdMicros, billing,
 };
 use fabro_util::shell;
 use futures::StreamExt;
+use lithos_llm::catalog::{ModelId, ProviderId};
+use lithos_llm::types::{
+    ContentPart, Message as LlmMessage, ReasoningEffort, Role, Speed, TokenCounts, ToolCall,
+    ToolChoice,
+};
 use tokio::sync::{Notify, broadcast};
 use tokio::time;
 use tokio_util::sync::CancellationToken;
@@ -104,15 +104,67 @@ fn record_elapsed(start: &mut Option<Instant>, total: &mut Duration) {
 /// events below identify the first observed content kind.
 fn first_output_kind(event: &StreamEvent) -> Option<LlmOutputKind> {
     match event {
-        StreamEvent::ReasoningStart | StreamEvent::ReasoningDelta { .. } => {
-            Some(LlmOutputKind::Reasoning)
-        }
-        StreamEvent::TextStart { .. } | StreamEvent::TextDelta { .. } => Some(LlmOutputKind::Text),
-        StreamEvent::ToolCallStart { .. }
-        | StreamEvent::ToolCallDelta { .. }
-        | StreamEvent::ToolCallEnd { .. } => Some(LlmOutputKind::ToolCall),
+        StreamEvent::ContentBlockStart { kind, .. } => match kind {
+            ContentBlockKind::Text => Some(LlmOutputKind::Text),
+            ContentBlockKind::Reasoning => Some(LlmOutputKind::Reasoning),
+            ContentBlockKind::ToolCall { .. } => Some(LlmOutputKind::ToolCall),
+            _ => None,
+        },
+        StreamEvent::ReasoningDelta { .. } => Some(LlmOutputKind::Reasoning),
+        StreamEvent::TextDelta { .. } => Some(LlmOutputKind::Text),
+        StreamEvent::ToolCallDelta { .. } => Some(LlmOutputKind::ToolCall),
+        StreamEvent::ContentBlockEnd { part, .. } => match part {
+            ContentPart::Text { .. } => Some(LlmOutputKind::Text),
+            ContentPart::Reasoning(_) => Some(LlmOutputKind::Reasoning),
+            ContentPart::ToolCall(_) => Some(LlmOutputKind::ToolCall),
+            _ => None,
+        },
         _ => None,
     }
+}
+
+/// A stream ended with a response the agent cannot act on: the provider
+/// stopped at its output limit or before the response was complete. Replayed
+/// like a transient failure so provisional tool calls never run.
+fn incomplete_response_error(response: &Response) -> fabro_llm::Error {
+    let (code, message) = match response.finish_reason {
+        FinishReason::Length => (
+            "length",
+            "the provider stopped at its output limit before completing the response",
+        ),
+        _ => (
+            "incomplete_response",
+            "the provider ended without a complete response",
+        ),
+    };
+    fabro_llm::Error::new(fabro_llm::ErrorKind::StreamDecode, message)
+        .with_provider(response.model.provider().clone())
+        .with_provider_code(code)
+        .with_retry(RetryClassification::Safe)
+}
+
+/// How one inference turn ended.
+enum TurnOutcome {
+    Completed(Box<Response>),
+    /// A steer interrupt cancelled the round; the caller re-iterates.
+    Interrupted,
+    /// The session was cancelled.
+    Cancelled,
+    Failed(fabro_llm::Error),
+}
+
+/// How one stream attempt within a turn ended.
+enum AttemptOutcome {
+    Completed(Box<Response>),
+    Interrupted,
+    Cancelled,
+    Failed(fabro_llm::Error),
+}
+
+struct StreamAttempt {
+    /// Whether this attempt delivered text or reasoning to the user.
+    visible_output: bool,
+    outcome:        AttemptOutcome,
 }
 
 impl SteeringItem {
@@ -457,34 +509,6 @@ impl Session {
         }
     }
 
-    /// Build a session from a credential source and catalog. Resolves the LLM
-    /// client once at construction and caches it for the session's lifetime.
-    /// Sessions are bounded (≤ 1 hour); cached client is fine within that
-    /// window. For longer-lived contexts (workflow runs) hold a source and
-    /// catalog, not a session.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `Client::from_source` fails (e.g. vault unreachable,
-    /// OAuth refresh failed).
-    pub async fn from_source(
-        source: &dyn CredentialSource,
-        catalog: Arc<Catalog>,
-        provider_profile: Arc<dyn AgentProfile>,
-        sandbox: Arc<dyn Sandbox>,
-        config: SessionOptions,
-        subagent_supervisor: Option<SubAgentSupervisor>,
-    ) -> Result<Self, LlmError> {
-        let client = Client::from_source(source, catalog).await?;
-        Ok(Self::new(
-            client,
-            provider_profile,
-            sandbox,
-            config,
-            subagent_supervisor,
-        ))
-    }
-
     pub fn from_record(
         record: &SessionRecord,
         runtime_context: &[SessionMessage],
@@ -545,7 +569,7 @@ impl Session {
     }
 
     #[must_use]
-    pub fn provider_id(&self) -> fabro_model::ProviderId {
+    pub fn provider_id(&self) -> ProviderId {
         self.provider_profile.provider_id()
     }
 
@@ -1117,33 +1141,15 @@ impl Session {
         Error::Interrupted(reason)
     }
 
-    fn emit_llm_error(&mut self, err: LlmError) -> Error {
+    fn emit_llm_error(&mut self, err: fabro_llm::Error) -> Error {
+        let err = ErrorData::from(err);
         self.event_emitter.emit(self.id.clone(), AgentEvent::Error {
-            error: Error::Llm(err.clone()),
+            error: Error::from(err.clone()),
         });
-        if is_auth_error(&err) {
+        if err.is_auth_error() {
             self.transition(SessionState::Closed);
         }
-        Error::Llm(err)
-    }
-
-    async fn open_stream_with_retry(
-        &mut self,
-        client: &Client,
-        request: &Request,
-        retry_policy: &RetryPolicy,
-    ) -> Result<StreamEventStream, Error> {
-        let stream_result = retry::retry(retry_policy, || {
-            let client = client.clone();
-            let request = request.clone();
-            async move { client.stream(&request).await }
-        })
-        .await;
-
-        match stream_result {
-            Ok(stream) => Ok(stream),
-            Err(err) => Err(self.emit_llm_error(err)),
-        }
+        Error::from(err)
     }
 
     #[must_use]
@@ -1275,8 +1281,8 @@ impl Session {
     }
 
     #[must_use]
-    pub fn last_input_usage(&self) -> TokenCounts {
-        self.last_input_usage.clone()
+    pub const fn last_input_usage(&self) -> TokenCounts {
+        self.last_input_usage
     }
 
     #[must_use]
@@ -1423,8 +1429,6 @@ impl Session {
         usage_accumulator: &mut TokenCounts,
         cost_accumulator: &mut Option<UsdMicros>,
     ) -> Result<Option<String>, Error> {
-        const STREAM_CONSUME_RETRIES: usize = 3;
-
         if self.state == SessionState::Closed {
             return Err(Error::SessionClosed);
         }
@@ -1538,15 +1542,15 @@ impl Session {
             let pending_task_reminder = self.task_reminder_if_needed();
 
             // Build request
-            let built_request = self.build_request(pending_task_reminder.as_ref());
+            let built_request = self.build_request(pending_task_reminder.as_ref())?;
             let local_context_window = built_request.context_window.clone();
             let request = built_request.request;
 
-            let requested_model = ModelRef {
-                provider: self.provider_profile.provider_id(),
-                model_id: ModelId::new(self.provider_profile.model()),
-                speed:    self.config.speed,
-            };
+            let requested_model = ModelRef::new(
+                self.provider_profile.provider_id(),
+                ModelId::new(self.provider_profile.model()),
+            )
+            .with_speed(self.config.speed);
 
             // Open the inference bracket for this round. The request is built
             // and compaction has run, so this is the last point before the
@@ -1557,338 +1561,51 @@ impl Session {
                     requested_model: requested_model.clone(),
                 });
 
-            // Call LLM (streaming) with retry for transient errors
-            let retry_emitter = self.event_emitter.clone();
-            let retry_session_id = self.id.clone();
-            let retry_provider = requested_model.provider.to_string();
-            let retry_model = requested_model.model_id.to_string();
-            let retry_policy = RetryPolicy {
-                max_retries: 3,
-                on_retry: Some(std::sync::Arc::new(move |err, attempt, delay| {
-                    retry_emitter.emit(retry_session_id.clone(), AgentEvent::LlmRetry {
-                        provider:   retry_provider.clone(),
-                        model:      retry_model.clone(),
-                        attempt:    attempt as usize,
-                        delay_secs: delay.as_secs_f64(),
-                        error:      err.clone(),
-                        phase:      LlmRetryPhase::Open,
-                    });
-                })),
-                ..Default::default()
-            };
-            let client = self.llm_client.clone();
-            let cancel_token_for_select = self.cancel_token.clone();
             let mut inference_start = Some(Instant::now());
-            let stream_outcome: Option<Result<StreamEventStream, Error>> = tokio::select! {
-                biased;
-                () = round_token.cancelled() => None,
-                () = cancel_token_for_select.cancelled() => None,
-                stream = self.open_stream_with_retry(&client, &request, &retry_policy) => Some(stream),
-            };
-            let mut event_stream = if let Some(stream) = stream_outcome {
-                match stream {
-                    Ok(stream) => stream,
-                    Err(err) => {
-                        record_elapsed(&mut inference_start, &mut timing.inference);
-                        return Err(err);
-                    }
-                }
-            } else {
-                record_elapsed(&mut inference_start, &mut timing.inference);
-                if self.cancel_token.is_cancelled() {
-                    self.shutdown(SessionShutdownReason::Cancelled).await;
-                    return Err(self.interrupted_error());
-                }
-                // Round-only cancel before stream opened — re-iterate to
-                // pick up the steer.
-                continue;
-            };
-
-            // Consume the stream, retrying up to 3 times if the provider
-            // closes the stream without sending a Finish event. If visible
-            // output was already emitted, clear it before replaying the turn.
-            let mut response = None;
-            // Set true if a steer-interrupt cancelled the round mid-stream so
-            // we can clear partial output and `continue` after the loop.
-            let mut steer_interrupted = false;
-            let mut visible_output_present = false;
-
-            'streamattempts: for stream_attempt in 0..=STREAM_CONSUME_RETRIES {
-                let mut accumulator = StreamAccumulator::new();
-                let mut attempt_emitted_output = false;
-                let mut stream_error = None;
-                // Re-armed per attempt: a replayed turn discards everything
-                // the previous attempt produced, so its first output is a new
-                // observation rather than a continuation.
-                let mut first_output_emitted = false;
-
-                loop {
-                    let chunk = tokio::select! {
-                        biased;
-                        () = round_token.cancelled() => None,
-                        () = self.cancel_token.cancelled() => None,
-                        next = event_stream.next() => Some(next),
-                    };
-                    let Some(event_opt) = chunk else {
-                        // One of the cancellation tokens fired.
-                        break;
-                    };
-                    let Some(event_result) = event_opt else {
-                        // Stream ended normally.
-                        break;
-                    };
-                    match event_result {
-                        Ok(event) => {
-                            if !first_output_emitted {
-                                if let Some(kind) = first_output_kind(&event) {
-                                    first_output_emitted = true;
-                                    self.event_emitter
-                                        .emit(self.id.clone(), AgentEvent::LlmFirstOutput { kind });
-                                }
-                            }
-                            match &event {
-                                StreamEvent::TextDelta { ref delta, .. } => {
-                                    attempt_emitted_output = true;
-                                    visible_output_present = true;
-                                    self.event_emitter.emit(
-                                        self.id.clone(),
-                                        AgentEvent::TextDelta {
-                                            delta: delta.clone(),
-                                        },
-                                    );
-                                }
-                                StreamEvent::ReasoningDelta { ref delta } => {
-                                    attempt_emitted_output = true;
-                                    visible_output_present = true;
-                                    self.event_emitter.emit(
-                                        self.id.clone(),
-                                        AgentEvent::ReasoningDelta {
-                                            delta: delta.clone(),
-                                        },
-                                    );
-                                }
-                                _ => {}
-                            }
-                            accumulator.process(&event);
-                        }
-                        Err(err) => {
-                            stream_error = Some(err);
-                            break;
-                        }
-                    }
-                }
-
-                // If terminal cancel fired, drop the stream and bail out.
-                if self.cancel_token.is_cancelled() {
-                    drop(event_stream);
-                    record_elapsed(&mut inference_start, &mut timing.inference);
-                    self.shutdown(SessionShutdownReason::Cancelled).await;
-                    return Err(self.interrupted_error());
-                }
-
-                // If only the round token fired (steer interrupt), drop the
-                // stream now; we'll clear partial output and continue below.
-                if round_token.is_cancelled() {
-                    drop(event_stream);
-                    steer_interrupted = true;
-                    break 'streamattempts;
-                }
-
-                if let Some(resp) = accumulator.response().cloned() {
-                    response = Some(resp);
-                    break;
-                }
-
-                if let Some(err) = stream_error {
-                    let can_retry = err.retryable() && stream_attempt < STREAM_CONSUME_RETRIES;
-                    let retry_attempt = u32::try_from(stream_attempt).unwrap_or(u32::MAX);
-                    let retry_delay = can_retry
-                        .then(|| retry::retry_delay(&retry_policy, &err, retry_attempt))
-                        .flatten();
-
-                    if let Some(delay) = retry_delay {
-                        tracing::warn!(
-                            attempt = stream_attempt + 1,
-                            max = STREAM_CONSUME_RETRIES,
-                            error = %err,
-                            delay_secs = delay.as_secs_f64(),
-                            "LLM stream failed mid-turn, retrying turn"
-                        );
-                        if attempt_emitted_output {
-                            self.event_emitter.emit(
-                                self.id.clone(),
-                                AgentEvent::AssistantOutputReplace {
-                                    text:      String::new(),
-                                    reasoning: None,
-                                },
-                            );
-                            visible_output_present = false;
-                        }
-                        // Emitted directly rather than through
-                        // `retry_policy.on_retry` so the event can name the
-                        // consume loop as the source of `attempt`; the policy
-                        // callback only ever runs for stream-open failures.
-                        self.event_emitter
-                            .emit(self.id.clone(), AgentEvent::LlmRetry {
-                                provider:   requested_model.provider.to_string(),
-                                model:      requested_model.model_id.to_string(),
-                                attempt:    stream_attempt,
-                                delay_secs: delay.as_secs_f64(),
-                                error:      err,
-                                phase:      LlmRetryPhase::Consume,
-                            });
-
-                        let delay_outcome = tokio::select! {
-                            biased;
-                            () = round_token.cancelled() => None,
-                            () = self.cancel_token.cancelled() => None,
-                            () = time::sleep(delay) => Some(()),
-                        };
-                        if delay_outcome.is_none() {
-                            steer_interrupted =
-                                round_token.is_cancelled() && !self.cancel_token.is_cancelled();
-                            break 'streamattempts;
-                        }
-
-                        let cancel_token_for_select = self.cancel_token.clone();
-                        let retry_outcome: Option<Result<StreamEventStream, Error>> = tokio::select! {
-                            biased;
-                            () = round_token.cancelled() => None,
-                            () = cancel_token_for_select.cancelled() => None,
-                            stream = self.open_stream_with_retry(&client, &request, &retry_policy) => Some(stream),
-                        };
-                        event_stream = if let Some(stream) = retry_outcome {
-                            match stream {
-                                Ok(stream) => stream,
-                                Err(err) => {
-                                    record_elapsed(&mut inference_start, &mut timing.inference);
-                                    return Err(err);
-                                }
-                            }
-                        } else {
-                            steer_interrupted =
-                                round_token.is_cancelled() && !self.cancel_token.is_cancelled();
-                            break 'streamattempts;
-                        };
-                        continue 'streamattempts;
-                    }
-
-                    if visible_output_present {
-                        self.event_emitter.emit(
-                            self.id.clone(),
-                            AgentEvent::AssistantOutputReplace {
-                                text:      String::new(),
-                                reasoning: None,
-                            },
-                        );
-                    }
-                    record_elapsed(&mut inference_start, &mut timing.inference);
-                    return Err(self.emit_llm_error(err));
-                }
-
-                // No Finish event — retry if we have attempts left
-                if stream_attempt < STREAM_CONSUME_RETRIES {
-                    tracing::warn!(
-                        attempt = stream_attempt + 1,
-                        max = STREAM_CONSUME_RETRIES,
-                        "Stream ended without Finish event, retrying turn"
-                    );
-                    if attempt_emitted_output {
-                        self.event_emitter.emit(
-                            self.id.clone(),
-                            AgentEvent::AssistantOutputReplace {
-                                text:      String::new(),
-                                reasoning: None,
-                            },
-                        );
-                        visible_output_present = false;
-                    }
-                    // The only mid-turn restart that reaches no error handler:
-                    // without this the round replays and discards its output
-                    // with nothing on the durable stream to show for it.
-                    self.event_emitter
-                        .emit(self.id.clone(), AgentEvent::LlmRetry {
-                            provider:   requested_model.provider.to_string(),
-                            model:      requested_model.model_id.to_string(),
-                            attempt:    stream_attempt,
-                            delay_secs: 0.0,
-                            error:      LlmError::Stream {
-                                message: "Stream ended without a finish event".to_string(),
-                                source:  None,
-                            },
-                            phase:      LlmRetryPhase::Consume,
-                        });
-                    let cancel_token_for_select = self.cancel_token.clone();
-                    let retry_outcome: Option<Result<StreamEventStream, Error>> = tokio::select! {
-                        biased;
-                        () = round_token.cancelled() => None,
-                        () = cancel_token_for_select.cancelled() => None,
-                        stream = self.open_stream_with_retry(&client, &request, &retry_policy) => Some(stream),
-                    };
-                    event_stream = if let Some(stream) = retry_outcome {
-                        match stream {
-                            Ok(stream) => stream,
-                            Err(err) => {
-                                record_elapsed(&mut inference_start, &mut timing.inference);
-                                return Err(err);
-                            }
-                        }
-                    } else {
-                        steer_interrupted =
-                            round_token.is_cancelled() && !self.cancel_token.is_cancelled();
-                        break 'streamattempts;
-                    };
-                }
-            }
+            let turn = self
+                .run_inference_turn(&request, &requested_model, &round_token)
+                .await;
             record_elapsed(&mut inference_start, &mut timing.inference);
 
-            // Mid-LLM steer interrupt: drop the unrecorded turn, clear any
-            // partial visible output, and re-iterate. The next turn's
-            // top-of-loop drain delivers the steer as the next user message.
-            if steer_interrupted {
-                if visible_output_present {
-                    self.event_emitter
-                        .emit(self.id.clone(), AgentEvent::AssistantOutputReplace {
-                            text:      String::new(),
-                            reasoning: None,
-                        });
+            let response = match turn {
+                TurnOutcome::Completed(response) => *response,
+                TurnOutcome::Interrupted => {
+                    // Mid-LLM steer interrupt: the unrecorded turn is dropped
+                    // and any partial visible output has been cleared. The
+                    // next turn's top-of-loop drain delivers the steer as the
+                    // next user message.
+                    continue;
                 }
-                continue;
-            }
-
-            let Some(response) = response else {
-                if visible_output_present {
-                    self.event_emitter
-                        .emit(self.id.clone(), AgentEvent::AssistantOutputReplace {
-                            text:      String::new(),
-                            reasoning: None,
-                        });
+                TurnOutcome::Cancelled => {
+                    self.shutdown(SessionShutdownReason::Cancelled).await;
+                    return Err(self.interrupted_error());
                 }
-                return Err(self.emit_llm_error(LlmError::Stream {
-                    message: "Stream ended without a Finish event (after retries)".into(),
-                    source:  None,
-                }));
+                TurnOutcome::Failed(error) => {
+                    return Err(self.emit_llm_error(error));
+                }
             };
 
             // Record assistant turn
             let text = response.text();
-            let tool_calls = response.tool_calls();
+            let tool_calls: Vec<ToolCall> = response.tool_calls().cloned().collect();
             // Normalize before the response's content moves into history.
-            let reasoning = response.reasoning_output();
+            let reasoning = response.reasoning();
             let provider_parts: Vec<_> = response
-                .message
                 .content
                 .iter()
-                .filter(|p| matches!(p, ContentPart::Other { .. } | ContentPart::Thinking(_)))
+                .filter(|part| part.is_replay_material())
                 .cloned()
                 .collect();
-            let usage = response.usage.clone();
+            let usage = response.usage;
             let context_window = Some(context_window_from_response_usage(
                 &local_context_window,
                 &usage,
             ));
-            *usage_accumulator += usage.clone();
-            UsdMicros::accumulate(cost_accumulator, response.cost_usd.map(UsdMicros::from_usd));
+            billing::add_usage(usage_accumulator, usage);
+            UsdMicros::accumulate(
+                cost_accumulator,
+                response.cost.as_ref().map(UsdMicros::from_cost),
+            );
 
             if let Some(reminder) = pending_task_reminder {
                 self.history.push(reminder);
@@ -1897,28 +1614,21 @@ impl Session {
                 content: text.clone(),
                 tool_calls: tool_calls.clone(),
                 provider_parts,
-                usage: Box::new(usage),
-                response_id: response.id.clone(),
+                usage,
+                response_id: response.id.clone().unwrap_or_default(),
                 timestamp: SystemTime::now(),
             });
 
-            // Emit AssistantMessage with enriched data from the response
-            let model = ModelRef {
-                provider: self.provider_profile.provider_id(),
-                model_id: if response.model.is_empty() {
-                    self.provider_profile.model().into()
-                } else {
-                    response.model.clone().into()
-                },
-                speed:    self.config.speed,
-            };
+            // Emit AssistantMessage with enriched data from the response. The
+            // response names the route that actually answered, which failover
+            // or a stand-in provider can make differ from the request.
+            let model = ModelRef::from_handle(&response.model, self.config.speed);
             self.event_emitter
                 .emit(self.id.clone(), AgentEvent::AssistantMessage {
                     text: text.clone(),
                     model,
-                    usage: response.usage.clone(),
-                    cost_usd: response.cost_usd,
-                    cost_source: response.cost_source,
+                    usage,
+                    cost: response.cost,
                     tool_call_count: tool_calls.len(),
                     context_window,
                     reasoning,
@@ -2029,6 +1739,284 @@ impl Session {
         }
     }
 
+    /// Run one inference turn to a final response, replaying the turn when a
+    /// stream fails after it already produced visible output.
+    ///
+    /// Failures before visible output are the client's to retry: the lithos
+    /// retry middleware reconnects them and reports each attempt through the
+    /// call's [`RetryListener`], which this method turns into `LlmRetry`
+    /// events. Once text or reasoning has reached the user no middleware can
+    /// replay the turn without duplicating output, so the agent does it here:
+    /// it clears the shown output with `AssistantOutputReplace`, waits the
+    /// delay the same policy computes, and streams the turn again. A stream
+    /// whose final response ends `Length` or `Incomplete` is not a completed
+    /// turn: it is replayed like a failure, and its provisional tool calls
+    /// are never executed.
+    async fn run_inference_turn(
+        &mut self,
+        request: &Request,
+        requested_model: &ModelRef,
+        round_token: &CancellationToken,
+    ) -> TurnOutcome {
+        let policy = self.config.replay_retry_policy;
+        let mut replay_attempt: u32 = 1;
+        // Whether text or reasoning from an earlier attempt is still shown.
+        let mut visible_output_present = false;
+
+        loop {
+            let attempt = self
+                .stream_attempt(request, requested_model, round_token)
+                .await;
+            let visible_this_attempt = attempt.visible_output;
+            visible_output_present |= visible_this_attempt;
+
+            let error = match attempt.outcome {
+                AttemptOutcome::Completed(response) => return TurnOutcome::Completed(response),
+                AttemptOutcome::Cancelled => {
+                    if visible_output_present {
+                        self.clear_visible_output();
+                    }
+                    return TurnOutcome::Cancelled;
+                }
+                AttemptOutcome::Interrupted => {
+                    if visible_output_present {
+                        self.clear_visible_output();
+                    }
+                    return TurnOutcome::Interrupted;
+                }
+                AttemptOutcome::Failed(error) => error,
+            };
+
+            // A failure before any visible output already went through the
+            // client's retry middleware; replaying it here would multiply the
+            // attempts. Only a turn the user has seen part of is replayed.
+            let delay = if visible_this_attempt {
+                policy.next_delay(replay_attempt, &error)
+            } else {
+                None
+            };
+            let Some(delay) = delay else {
+                if visible_output_present {
+                    self.clear_visible_output();
+                }
+                return TurnOutcome::Failed(error);
+            };
+
+            tracing::warn!(
+                attempt = replay_attempt,
+                error = %error,
+                delay_secs = delay.as_secs_f64(),
+                "LLM stream failed after visible output, replaying turn"
+            );
+            if visible_output_present {
+                self.clear_visible_output();
+                visible_output_present = false;
+            }
+            self.event_emitter
+                .emit(self.id.clone(), AgentEvent::LlmRetry {
+                    provider:   requested_model.provider.to_string(),
+                    model:      requested_model.model_id.to_string(),
+                    attempt:    usize::try_from(replay_attempt).unwrap_or(usize::MAX),
+                    delay_secs: delay.as_secs_f64(),
+                    error:      ErrorData::from(&error),
+                    phase:      LlmRetryPhase::Consume,
+                });
+
+            let delay_outcome = tokio::select! {
+                biased;
+                () = round_token.cancelled() => None,
+                () = self.cancel_token.cancelled() => None,
+                () = time::sleep(delay) => Some(()),
+            };
+            if delay_outcome.is_none() {
+                return if self.cancel_token.is_cancelled() {
+                    TurnOutcome::Cancelled
+                } else {
+                    TurnOutcome::Interrupted
+                };
+            }
+            replay_attempt = replay_attempt.saturating_add(1);
+        }
+    }
+
+    /// Open one stream and consume it to its final response.
+    async fn stream_attempt(
+        &mut self,
+        request: &Request,
+        requested_model: &ModelRef,
+        round_token: &CancellationToken,
+    ) -> StreamAttempt {
+        let mut attempt = StreamAttempt {
+            visible_output: false,
+            outcome:        AttemptOutcome::Cancelled,
+        };
+
+        // Bind the lithos call to the agent's cancellation so the client
+        // releases the provider connection when the round or session ends.
+        let mut context = CallContext::new();
+        let call_cancellation = context.cancellation().clone();
+        context
+            .extensions_mut()
+            .insert(self.retry_listener(requested_model));
+        let cancel_watcher = {
+            let round_token = round_token.clone();
+            let cancel_token = self.cancel_token.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    () = round_token.cancelled() => {}
+                    () = cancel_token.cancelled() => {}
+                }
+                call_cancellation.cancel();
+            })
+        };
+
+        let client = self.llm_client.clone();
+        let stream_outcome = tokio::select! {
+            biased;
+            () = round_token.cancelled() => None,
+            () = self.cancel_token.cancelled() => None,
+            stream = client.stream_with_context(request.clone(), context) => Some(stream),
+        };
+        let mut event_stream = match stream_outcome {
+            Some(Ok(stream)) => stream,
+            Some(Err(error)) => {
+                cancel_watcher.abort();
+                attempt.outcome = self.classify_stream_end(Err(error), round_token);
+                return attempt;
+            }
+            None => {
+                cancel_watcher.abort();
+                attempt.outcome = self.cancellation_outcome(round_token);
+                return attempt;
+            }
+        };
+
+        // Re-armed per attempt: a replayed turn discards everything the
+        // previous attempt produced, so its first output is a new observation
+        // rather than a continuation.
+        let mut first_output_emitted = false;
+        let outcome = loop {
+            let chunk = tokio::select! {
+                biased;
+                () = round_token.cancelled() => None,
+                () = self.cancel_token.cancelled() => None,
+                next = event_stream.next() => Some(next),
+            };
+            let Some(item) = chunk else {
+                break self.cancellation_outcome(round_token);
+            };
+            let Some(item) = item else {
+                // `ResponseStream` turns a stream that ends without `Ended`
+                // into an error item, so a bare end follows a terminal item
+                // that was already handled.
+                break self.cancellation_outcome(round_token);
+            };
+            let event = match item {
+                Ok(event) => event,
+                Err(error) => break self.classify_stream_end(Err(error), round_token),
+            };
+            if !first_output_emitted {
+                if let Some(kind) = first_output_kind(&event) {
+                    first_output_emitted = true;
+                    self.event_emitter
+                        .emit(self.id.clone(), AgentEvent::LlmFirstOutput { kind });
+                }
+            }
+            match event {
+                StreamEvent::TextDelta { text, .. } => {
+                    attempt.visible_output = true;
+                    self.event_emitter
+                        .emit(self.id.clone(), AgentEvent::TextDelta { delta: text });
+                }
+                StreamEvent::ReasoningDelta { text, .. } => {
+                    attempt.visible_output = true;
+                    self.event_emitter
+                        .emit(self.id.clone(), AgentEvent::ReasoningDelta { delta: text });
+                }
+                StreamEvent::Ended { response } => {
+                    break self.classify_stream_end(Ok(*response), round_token);
+                }
+                _ => {}
+            }
+        };
+        drop(event_stream);
+        cancel_watcher.abort();
+        attempt.outcome = outcome;
+        attempt
+    }
+
+    /// Classify how a stream ended, preferring the agent's own cancellation
+    /// signals over whatever error the cancelled call reported.
+    fn classify_stream_end(
+        &self,
+        end: Result<Response, fabro_llm::Error>,
+        round_token: &CancellationToken,
+    ) -> AttemptOutcome {
+        if self.cancel_token.is_cancelled() || round_token.is_cancelled() {
+            return self.cancellation_outcome(round_token);
+        }
+        match end {
+            Ok(response) => match response.finish_reason {
+                FinishReason::Length | FinishReason::Incomplete => {
+                    AttemptOutcome::Failed(incomplete_response_error(&response))
+                }
+                _ => AttemptOutcome::Completed(Box::new(response)),
+            },
+            Err(error) => AttemptOutcome::Failed(error),
+        }
+    }
+
+    fn cancellation_outcome(&self, round_token: &CancellationToken) -> AttemptOutcome {
+        if self.cancel_token.is_cancelled() {
+            AttemptOutcome::Cancelled
+        } else if round_token.is_cancelled() {
+            AttemptOutcome::Interrupted
+        } else {
+            // Neither token fired, so the stream itself ended. `ResponseStream`
+            // reports a completion-less end as an error item, so reaching
+            // here means the terminal item was consumed already.
+            AttemptOutcome::Failed(
+                fabro_llm::Error::new(
+                    fabro_llm::ErrorKind::StreamDecode,
+                    "the response stream ended without completion",
+                )
+                .with_retry(RetryClassification::Safe),
+            )
+        }
+    }
+
+    /// Emit the event that clears partial assistant output shown to the user.
+    fn clear_visible_output(&self) {
+        self.event_emitter
+            .emit(self.id.clone(), AgentEvent::AssistantOutputReplace {
+                text:      String::new(),
+                reasoning: None,
+            });
+    }
+
+    /// The listener that records the client's own retries, which happen
+    /// before any visible output, as `LlmRetry` events.
+    fn retry_listener(&self, requested_model: &ModelRef) -> RetryListener {
+        let emitter = self.event_emitter.clone();
+        let session_id = self.id.clone();
+        let provider = requested_model.provider.to_string();
+        let model = requested_model.model_id.to_string();
+        RetryListener::new(move |notice| {
+            let phase = match notice.stage {
+                RetryStage::Stream => LlmRetryPhase::Consume,
+                _ => LlmRetryPhase::Open,
+            };
+            emitter.emit(session_id.clone(), AgentEvent::LlmRetry {
+                provider: provider.clone(),
+                model: model.clone(),
+                attempt: usize::try_from(notice.attempt).unwrap_or(usize::MAX),
+                delay_secs: notice.delay.as_secs_f64(),
+                error: notice.error,
+                phase,
+            });
+        })
+    }
+
     /// Attempt context compaction when the configured threshold is exceeded.
     ///
     /// Returns `true` when an attempted compaction failed so the current input
@@ -2129,10 +2117,13 @@ impl Session {
         }
     }
 
-    fn build_request(&self, pending_task_reminder: Option<&Message>) -> BuiltRequest {
+    fn build_request(
+        &self,
+        pending_task_reminder: Option<&Message>,
+    ) -> Result<BuiltRequest, Error> {
         let mut messages = Vec::new();
         if !self.system_prompt.trim().is_empty() {
-            messages.push(LlmMessage::system(self.system_prompt.clone()));
+            messages.push(LlmMessage::text(Role::System, self.system_prompt.clone()));
         }
         messages.extend(self.history.convert_to_messages());
         if let Some(reminder) = pending_task_reminder {
@@ -2140,37 +2131,36 @@ impl Session {
         }
 
         let tools_with_source = self.effective_tools();
-        let tools: Vec<_> = tools_with_source
-            .iter()
-            .map(|tool| tool.definition.clone())
-            .collect();
-        let has_tools = !tools.is_empty();
+        let has_tools = !tools_with_source.is_empty();
 
-        let request = Request {
-            model: self.provider_profile.model().to_string(),
-            messages,
-            provider: Some(self.provider_profile.provider_id().to_string()),
-            tools: if has_tools { Some(tools) } else { None },
-            tool_choice: if has_tools {
-                Some(ToolChoice::Auto)
-            } else {
-                None
-            },
-            response_format: None,
-            temperature: None,
-            top_p: None,
-            max_tokens: self
-                .config
-                .max_tokens
-                .or_else(|| self.provider_profile.max_output_tokens()),
-            stop_sequences: None,
-            reasoning_effort: self.config.reasoning_effort,
-            speed: self.config.speed,
-            metadata: None,
-            provider_options: None,
-        };
         let provider = self.provider_profile.provider_id().to_string();
         let model = self.provider_profile.model().to_string();
+        let mut builder = Request::builder().model(format!("{provider}/{model}"));
+        for message in messages {
+            builder = builder.message(message);
+        }
+        for tool in &tools_with_source {
+            builder = builder.tool(tool.definition.clone());
+        }
+        if has_tools {
+            builder = builder.tool_choice(ToolChoice::Auto);
+        }
+        if let Some(max_tokens) = self
+            .config
+            .max_tokens
+            .or_else(|| self.provider_profile.max_output_tokens())
+        {
+            builder = builder.max_output_tokens(max_tokens);
+        }
+        if let Some(effort) = self.config.reasoning_effort {
+            builder = builder.reasoning_effort(effort);
+        }
+        if let Some(speed) = self.config.speed {
+            builder = builder.speed(speed);
+        }
+        let request = builder
+            .build()
+            .map_err(|err| Error::InvalidState(format!("invalid LLM request: {err}")))?;
         let context_window = build_local_snapshot(ContextWindowInput {
             request: &request,
             tools: &tools_with_source,
@@ -2183,10 +2173,10 @@ impl Session {
             model: &model,
             context_window_tokens: self.provider_profile.context_window_size(),
         });
-        BuiltRequest {
+        Ok(BuiltRequest {
             request,
             context_window,
-        }
+        })
     }
 
     fn task_reminder_if_needed(&self) -> Option<Message> {
@@ -2200,13 +2190,6 @@ impl Session {
             timestamp: SystemTime::now(),
         })
     }
-}
-
-const fn is_auth_error(err: &LlmError) -> bool {
-    matches!(
-        err.provider_kind(),
-        Some(ProviderErrorKind::Authentication | ProviderErrorKind::AccessDenied)
-    )
 }
 
 /// Build the script that launches a sandbox MCP server detached and echoes its
@@ -2262,14 +2245,17 @@ mod tests {
     use std::time::Duration;
 
     use anyhow::Context as _;
-    use fabro_llm::error::{ProviderErrorDetail, ProviderErrorKind};
-    use fabro_llm::provider::{ProviderAdapter, StreamEventStream};
+    use fabro_llm::adapter::{ProviderAdapter, ResolvedCall};
+    use fabro_llm::lithos_catalog::AdapterId;
+    use fabro_llm::test_support::response_to_stream;
     use fabro_llm::types::{
-        ContentPart, ReasoningEffort, Request, Response, Role, StreamEvent, TokenCounts, ToolCall,
-        ToolDefinition,
+        ContentBlockId, ContentBlockKind, OPENAI_COMPAT_REASONING_DETAILS_KIND, ToolCallKind,
     };
-    use fabro_types::{ReasoningOutput, StageContextWindowCountMethod};
+    use fabro_llm::{ErrorKind, ResponseStream, RetryPolicy};
+    use fabro_types::{StageContextWindowCountMethod, text_of, tool_result_to_json};
     use futures::stream;
+    use lithos_llm::catalog::builtin;
+    use lithos_llm::types::{ContentPart, Cost, CostSource, ReasoningOutput, ToolDefinition};
     use tokio::time::{sleep, timeout};
 
     use super::*;
@@ -2381,29 +2367,114 @@ mod tests {
 
     fn make_named_noop_tool(name: &str) -> RegisteredTool {
         RegisteredTool {
-            definition: ToolDefinition {
-                name:        name.to_string(),
-                description: format!("Tool {name}"),
-                parameters:  serde_json::json!({"type": "object"}),
-            },
+            definition: ToolDefinition::function(
+                name.to_string(),
+                format!("Tool {name}"),
+                serde_json::json!({"type": "object"}),
+            ),
             executor:   Arc::new(|_args, _ctx| Box::pin(async { Ok("ok".to_string()) })),
             source:     ToolSource::Native,
+        }
+    }
+
+    /// A cloneable recipe for a lithos error, since the live error itself
+    /// carries a source chain and cannot be cloned.
+    #[derive(Clone)]
+    struct ScriptedError {
+        kind:    ErrorKind,
+        message: String,
+        retry:   RetryClassification,
+    }
+
+    impl ScriptedError {
+        fn build(&self) -> fabro_llm::Error {
+            fabro_llm::Error::new(self.kind.clone(), self.message.clone())
+                .with_provider(builtin::anthropic())
+                .with_retry(self.retry)
+        }
+    }
+
+    /// A transient stream failure the provider may be asked to repeat.
+    fn stream_error(message: &str) -> ScriptedError {
+        ScriptedError {
+            kind:    ErrorKind::StreamDecode,
+            message: message.to_string(),
+            retry:   RetryClassification::Safe,
+        }
+    }
+
+    /// A deterministic provider failure that repeating cannot fix.
+    fn provider_error(kind: ErrorKind, message: &str) -> ScriptedError {
+        ScriptedError {
+            kind,
+            message: message.to_string(),
+            retry: RetryClassification::Never,
+        }
+    }
+
+    fn block(index: usize) -> ContentBlockId {
+        ContentBlockId::new(format!("block_{index}"))
+    }
+
+    fn text_delta(text: &str) -> StreamEvent {
+        StreamEvent::TextDelta {
+            id:   block(0),
+            text: text.to_string(),
+        }
+    }
+
+    fn reasoning_delta(text: &str) -> StreamEvent {
+        StreamEvent::ReasoningDelta {
+            id:   block(0),
+            text: text.to_string(),
+        }
+    }
+
+    fn tool_call_start(tool_call: &ToolCall) -> StreamEvent {
+        StreamEvent::ContentBlockStart {
+            id:   block(1),
+            kind: ContentBlockKind::ToolCall {
+                id:   tool_call.id.clone(),
+                name: Some(tool_call.name.clone()),
+                kind: ToolCallKind::Function,
+            },
+        }
+    }
+
+    fn tool_call_delta(arguments: &str) -> StreamEvent {
+        StreamEvent::ToolCallDelta {
+            id:        block(1),
+            arguments: arguments.to_string(),
+        }
+    }
+
+    fn tool_call_end(tool_call: &ToolCall) -> StreamEvent {
+        StreamEvent::ContentBlockEnd {
+            id:   block(1),
+            part: ContentPart::ToolCall(tool_call.clone()),
+        }
+    }
+
+    fn finish(response: Response) -> StreamEvent {
+        StreamEvent::Ended {
+            response: Box::new(response),
         }
     }
 
     #[derive(Clone)]
     enum ScriptedStreamCall {
         Response(Box<Response>),
-        Events(Vec<Result<StreamEvent, LlmError>>),
+        Events(Vec<Result<StreamEvent, ScriptedError>>),
         /// Emit the events, then hang until the round is cancelled.
-        EventsThenPending(Vec<Result<StreamEvent, LlmError>>),
-        Error(LlmError),
+        EventsThenPending(Vec<Result<StreamEvent, ScriptedError>>),
+        Error(ScriptedError),
     }
 
     struct ScriptedStreamProvider {
         calls:      Vec<ScriptedStreamCall>,
         requests:   Mutex<Vec<Request>>,
         call_index: AtomicUsize,
+        id:         AdapterId,
     }
 
     impl ScriptedStreamProvider {
@@ -2416,67 +2487,50 @@ mod tests {
                 calls,
                 requests: Mutex::new(Vec::new()),
                 call_index: AtomicUsize::new(0),
+                id: AdapterId::new("mock"),
             }
         }
 
-        fn events_for_response(response: Response) -> Vec<Result<StreamEvent, LlmError>> {
-            let mut events = Vec::new();
-            let text = response.text();
-            if !text.is_empty() {
-                events.push(Ok(StreamEvent::text_delta(text, None)));
-            }
-
-            for part in &response.message.content {
-                if let ContentPart::ToolCall(tool_call) = part {
-                    events.push(Ok(StreamEvent::ToolCallEnd {
-                        tool_call: tool_call.clone(),
-                    }));
-                }
-            }
-
-            events.push(Ok(StreamEvent::finish(
-                response.finish_reason.clone(),
-                response.usage.clone(),
-                response,
-            )));
-            events
+        fn events(
+            scripted: Vec<Result<StreamEvent, ScriptedError>>,
+        ) -> Vec<Result<StreamEvent, fabro_llm::Error>> {
+            scripted
+                .into_iter()
+                .map(|item| item.map_err(|error| error.build()))
+                .collect()
         }
     }
 
     #[async_trait::async_trait]
     impl ProviderAdapter for ScriptedStreamProvider {
-        fn name(&self) -> &'static str {
-            "mock"
+        fn id(&self) -> &AdapterId {
+            &self.id
         }
 
-        async fn complete(&self, _request: &Request) -> Result<Response, LlmError> {
-            Err(LlmError::Configuration {
-                message: "ScriptedStreamProvider does not implement complete()".into(),
-                source:  None,
-            })
+        async fn complete(&self, _call: &ResolvedCall) -> Result<Response, fabro_llm::Error> {
+            Err(fabro_llm::Error::new(
+                ErrorKind::Configuration,
+                "ScriptedStreamProvider does not implement complete()",
+            ))
         }
 
-        async fn stream(&self, request: &Request) -> Result<StreamEventStream, LlmError> {
+        async fn stream(&self, call: &ResolvedCall) -> Result<ResponseStream, fabro_llm::Error> {
             self.requests
                 .lock()
                 .expect("request capture lock poisoned")
-                .push(request.clone());
+                .push(call.request().clone());
             let idx = self.call_index.fetch_add(1, Ordering::SeqCst);
-            let scripted = if idx < self.calls.len() {
-                self.calls[idx].clone()
-            } else {
-                self.calls[self.calls.len() - 1].clone()
-            };
+            let scripted = self.calls[idx.min(self.calls.len() - 1)].clone();
 
             match scripted {
-                ScriptedStreamCall::Response(response) => {
-                    Ok(Box::pin(stream::iter(Self::events_for_response(*response))))
+                ScriptedStreamCall::Response(response) => Ok(response_to_stream(*response)),
+                ScriptedStreamCall::Events(events) => {
+                    Ok(ResponseStream::new(stream::iter(Self::events(events))))
                 }
-                ScriptedStreamCall::Events(events) => Ok(Box::pin(stream::iter(events))),
-                ScriptedStreamCall::EventsThenPending(events) => {
-                    Ok(Box::pin(stream::iter(events).chain(stream::pending())))
-                }
-                ScriptedStreamCall::Error(err) => Err(err),
+                ScriptedStreamCall::EventsThenPending(events) => Ok(ResponseStream::new(
+                    stream::iter(Self::events(events)).chain(stream::pending()),
+                )),
+                ScriptedStreamCall::Error(err) => Err(err.build()),
             }
         }
     }
@@ -2485,6 +2539,7 @@ mod tests {
         responses:  Vec<Response>,
         delay:      Duration,
         call_index: AtomicUsize,
+        id:         AdapterId,
     }
 
     impl DelayedStreamProvider {
@@ -2493,31 +2548,28 @@ mod tests {
                 responses,
                 delay,
                 call_index: AtomicUsize::new(0),
+                id: AdapterId::new("mock"),
             }
         }
     }
 
     #[async_trait::async_trait]
     impl ProviderAdapter for DelayedStreamProvider {
-        fn name(&self) -> &'static str {
-            "mock"
+        fn id(&self) -> &AdapterId {
+            &self.id
         }
 
-        async fn complete(&self, _request: &Request) -> Result<Response, LlmError> {
-            Err(LlmError::Configuration {
-                message: "DelayedStreamProvider does not implement complete()".into(),
-                source:  None,
-            })
+        async fn complete(&self, _call: &ResolvedCall) -> Result<Response, fabro_llm::Error> {
+            Err(fabro_llm::Error::new(
+                ErrorKind::Configuration,
+                "DelayedStreamProvider does not implement complete()",
+            ))
         }
 
-        async fn stream(&self, _request: &Request) -> Result<StreamEventStream, LlmError> {
+        async fn stream(&self, _call: &ResolvedCall) -> Result<ResponseStream, fabro_llm::Error> {
             sleep(self.delay).await;
             let idx = self.call_index.fetch_add(1, Ordering::SeqCst);
-            let response = if idx < self.responses.len() {
-                self.responses[idx].clone()
-            } else {
-                self.responses[self.responses.len() - 1].clone()
-            };
+            let response = self.responses[idx.min(self.responses.len() - 1)].clone();
             Ok(response_to_stream(response))
         }
     }
@@ -2526,6 +2578,7 @@ mod tests {
         first_started: Arc<Notify>,
         response:      Response,
         call_index:    AtomicUsize,
+        id:            AdapterId,
     }
 
     impl BlockingFirstStreamProvider {
@@ -2534,24 +2587,25 @@ mod tests {
                 first_started: Arc::new(Notify::new()),
                 response,
                 call_index: AtomicUsize::new(0),
+                id: AdapterId::new("mock"),
             }
         }
     }
 
     #[async_trait::async_trait]
     impl ProviderAdapter for BlockingFirstStreamProvider {
-        fn name(&self) -> &'static str {
-            "mock"
+        fn id(&self) -> &AdapterId {
+            &self.id
         }
 
-        async fn complete(&self, _request: &Request) -> Result<Response, LlmError> {
-            Err(LlmError::Configuration {
-                message: "BlockingFirstStreamProvider does not implement complete()".into(),
-                source:  None,
-            })
+        async fn complete(&self, _call: &ResolvedCall) -> Result<Response, fabro_llm::Error> {
+            Err(fabro_llm::Error::new(
+                ErrorKind::Configuration,
+                "BlockingFirstStreamProvider does not implement complete()",
+            ))
         }
 
-        async fn stream(&self, _request: &Request) -> Result<StreamEventStream, LlmError> {
+        async fn stream(&self, _call: &ResolvedCall) -> Result<ResponseStream, fabro_llm::Error> {
             if self.call_index.fetch_add(1, Ordering::SeqCst) == 0 {
                 self.first_started.notify_one();
                 return std::future::pending().await;
@@ -2658,11 +2712,11 @@ mod tests {
     async fn last_input_timing_reports_inference_and_tool_per_call() {
         let mut registry = ToolRegistry::new();
         registry.register(RegisteredTool {
-            definition: ToolDefinition {
-                name:        "slow_tool".into(),
-                description: "Sleeps before returning".into(),
-                parameters:  serde_json::json!({"type": "object"}),
-            },
+            definition: ToolDefinition::function(
+                "slow_tool",
+                "Sleeps before returning",
+                serde_json::json!({"type": "object"}),
+            ),
             executor:   Arc::new(|_args, _ctx| {
                 Box::pin(async move {
                     sleep(Duration::from_millis(30)).await;
@@ -2730,11 +2784,11 @@ mod tests {
         let seen_tokens = Arc::new(Mutex::new(Vec::new()));
         let seen_tokens_for_tool = Arc::clone(&seen_tokens);
         let record_env_tool = RegisteredTool {
-            definition: ToolDefinition {
-                name:        "record_env".into(),
-                description: "Records resolved env".into(),
-                parameters:  serde_json::json!({"type": "object"}),
-            },
+            definition: ToolDefinition::function(
+                "record_env",
+                "Records resolved env",
+                serde_json::json!({"type": "object"}),
+            ),
             executor:   Arc::new(move |_args, ctx| {
                 let seen_tokens = Arc::clone(&seen_tokens_for_tool);
                 Box::pin(async move {
@@ -2941,14 +2995,19 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_round_does_not_commit_task_reminder() {
+        // The block start alone is protocol bookkeeping the client holds back
+        // until the stream shows something; the argument delta is what makes
+        // the tool call observable mid-flight.
+        let pending_call = ToolCall::function(
+            "call_1",
+            "TaskUpdate",
+            serde_json::json!({"taskId": "1", "status": "completed"}),
+        );
         let provider = Arc::new(ScriptedStreamProvider::new(vec![
-            ScriptedStreamCall::EventsThenPending(vec![Ok(StreamEvent::ToolCallStart {
-                tool_call: ToolCall::new(
-                    "call_1",
-                    "TaskUpdate",
-                    serde_json::json!({"taskId": "1", "status": "completed"}),
-                ),
-            })]),
+            ScriptedStreamCall::EventsThenPending(vec![
+                Ok(tool_call_start(&pending_call)),
+                Ok(tool_call_delta("{\"taskId\": \"1\"")),
+            ]),
             ScriptedStreamCall::Response(Box::new(text_response("resumed"))),
         ]));
         let mut registry = ToolRegistry::new();
@@ -2964,7 +3023,7 @@ mod tests {
                 content:        "done".into(),
                 tool_calls:     Vec::new(),
                 provider_parts: Vec::new(),
-                usage:          Box::<TokenCounts>::default(),
+                usage:          TokenCounts::default(),
                 response_id:    format!("response_{index}"),
                 timestamp:      SystemTime::now(),
             });
@@ -3002,25 +3061,28 @@ mod tests {
             .first()
             .expect("the interrupted request should be captured");
         let staged = interrupted
-            .messages
+            .messages()
             .last()
             .expect("the interrupted request should not be empty");
-        assert_eq!(staged.role, Role::System);
-        assert_eq!(staged.text(), task_reminder::TASK_REMINDER_TEXT);
+        assert_eq!(staged.role(), Role::System);
+        assert_eq!(text_of(staged.content()), task_reminder::TASK_REMINDER_TEXT);
 
         let resumed = requests
             .get(1)
             .expect("steering should trigger a second provider request");
-        let [.., steering, reminder] = resumed.messages.as_slice() else {
+        let [.., steering, reminder] = resumed.messages() else {
             panic!(
                 "the resumed request should end with steering and a restaged reminder: {:?}",
-                resumed.messages
+                resumed.messages()
             );
         };
-        assert_eq!(steering.role, Role::User);
-        assert_eq!(steering.text(), "wrap up now");
-        assert_eq!(reminder.role, Role::System);
-        assert_eq!(reminder.text(), task_reminder::TASK_REMINDER_TEXT);
+        assert_eq!(steering.role(), Role::User);
+        assert_eq!(text_of(steering.content()), "wrap up now");
+        assert_eq!(reminder.role(), Role::System);
+        assert_eq!(
+            text_of(reminder.content()),
+            task_reminder::TASK_REMINDER_TEXT
+        );
 
         let [
             ..,
@@ -3042,11 +3104,11 @@ mod tests {
     #[tokio::test]
     async fn interrupt_during_tool_settles_once_after_balancing_tool_result() {
         let blocking_tool = RegisteredTool {
-            definition: ToolDefinition {
-                name:        "block".into(),
-                description: "Blocks until interrupted".into(),
-                parameters:  serde_json::json!({"type": "object"}),
-            },
+            definition: ToolDefinition::function(
+                "block",
+                "Blocks until interrupted",
+                serde_json::json!({"type": "object"}),
+            ),
             executor:   Arc::new(|_args, ctx| {
                 Box::pin(async move {
                     ctx.cancel.cancelled().await;
@@ -3430,7 +3492,7 @@ mod tests {
         if let Message::ToolResults { results, .. } = &turns[2] {
             assert!(results[0].is_error);
             assert_eq!(
-                results[0].content,
+                tool_result_to_json(&results[0]),
                 serde_json::json!("Unknown tool: nonexistent_tool")
             );
         } else {
@@ -3455,7 +3517,7 @@ mod tests {
         if let Message::ToolResults { results, .. } = &turns[2] {
             assert!(results[0].is_error);
             assert_eq!(
-                results[0].content,
+                tool_result_to_json(&results[0]),
                 serde_json::json!("tool execution failed")
             );
         } else {
@@ -3540,11 +3602,11 @@ mod tests {
 
         // Tool that cancels the token when executed
         let abort_tool = RegisteredTool {
-            definition: ToolDefinition {
-                name:        "set_abort".into(),
-                description: "Sets interrupt flag".into(),
-                parameters:  serde_json::json!({"type": "object"}),
-            },
+            definition: ToolDefinition::function(
+                "set_abort",
+                "Sets interrupt flag",
+                serde_json::json!({"type": "object"}),
+            ),
             executor:   Arc::new(move |_args, _ctx| {
                 let token = cancel_token_for_tool.clone();
                 Box::pin(async move {
@@ -3595,12 +3657,9 @@ mod tests {
 
     #[tokio::test]
     async fn auth_error_closes_session() {
-        let error_provider = Arc::new(MockErrorProvider {
-            error: LlmError::Provider {
-                kind:   ProviderErrorKind::Authentication,
-                detail: Box::new(ProviderErrorDetail::new("invalid api key", "mock")),
-            },
-        });
+        let error_provider = Arc::new(MockErrorProvider::new(|| {
+            fabro_llm::Error::new(ErrorKind::Authentication, "invalid api key")
+        }));
         let client = make_client(error_provider).await;
         let profile = Arc::new(TestProfile::new());
         let env = Arc::new(MockSandbox::default());
@@ -3784,7 +3843,7 @@ mod tests {
         let request = captured
             .as_ref()
             .expect("request should have been captured");
-        assert_eq!(request.reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(request.reasoning_effort(), Some(ReasoningEffort::High));
     }
 
     #[tokio::test]
@@ -3815,17 +3874,17 @@ mod tests {
     async fn invalid_tool_args_returns_validation_error() {
         let mut registry = ToolRegistry::new();
         registry.register(RegisteredTool {
-            definition: ToolDefinition {
-                name:        "strict_tool".into(),
-                description: "Tool with required params".into(),
-                parameters:  serde_json::json!({
+            definition: ToolDefinition::function(
+                "strict_tool",
+                "Tool with required params",
+                serde_json::json!({
                     "type": "object",
                     "properties": {
                         "text": {"type": "string"}
                     },
                     "required": ["text"]
                 }),
-            },
+            ),
             executor:   Arc::new(|_args, _ctx| {
                 Box::pin(async move { Ok("should not reach".to_string()) })
             }),
@@ -3843,7 +3902,7 @@ mod tests {
         let turns = session.history().turns();
         if let Message::ToolResults { results, .. } = &turns[2] {
             assert!(results[0].is_error);
-            let content_str = results[0].content.to_string();
+            let content_str = tool_result_to_json(&results[0]).to_string();
             assert!(
                 content_str.contains("text") && content_str.contains("required"),
                 "Expected validation error mentioning 'text' and 'required', got: {content_str}"
@@ -3857,17 +3916,17 @@ mod tests {
     async fn valid_tool_args_passes_validation() {
         let mut registry = ToolRegistry::new();
         registry.register(RegisteredTool {
-            definition: ToolDefinition {
-                name:        "strict_tool".into(),
-                description: "Tool with required params".into(),
-                parameters:  serde_json::json!({
+            definition: ToolDefinition::function(
+                "strict_tool",
+                "Tool with required params",
+                serde_json::json!({
                     "type": "object",
                     "properties": {
                         "text": {"type": "string"}
                     },
                     "required": ["text"]
                 }),
-            },
+            ),
             executor:   Arc::new(|_args, _ctx| {
                 Box::pin(async move { Ok("tool executed".to_string()) })
             }),
@@ -3942,8 +4001,8 @@ mod tests {
         let request = captured
             .as_ref()
             .expect("request should have been captured");
-        let system_msg = &request.messages[0];
-        let system_text = system_msg.text();
+        let system_msg = &request.messages()[0];
+        let system_text = text_of(system_msg.content());
         assert!(
             system_text.contains("Always use TDD"),
             "System prompt should contain user instructions"
@@ -3968,13 +4027,13 @@ mod tests {
             .expect("request should have been captured");
         assert!(
             request
-                .messages
+                .messages()
                 .iter()
-                .all(|message| message.role != Role::System),
+                .all(|message| message.role() != Role::System),
             "request should not contain an empty system message"
         );
         assert!(
-            matches!(request.messages.first(), Some(message) if message.role == Role::User),
+            matches!(request.messages().first(), Some(message) if message.role() == Role::User),
             "first request message should be user input"
         );
     }
@@ -3997,7 +4056,8 @@ mod tests {
         let request = captured
             .as_ref()
             .expect("request should have been captured");
-        let tools = request.tools.as_ref().expect("tools should be exposed");
+        let tools = request.tools();
+        assert!(!tools.is_empty(), "tools should be exposed");
         let tool_names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
         assert_eq!(tool_names.len(), 2);
         assert!(tool_names.contains(&"read_file"));
@@ -4026,8 +4086,9 @@ mod tests {
             .as_ref()
             .expect("request should have been captured");
         assert!(
-            request.messages.iter().any(|message| {
-                message.role == Role::System && message.text() == task_reminder::TASK_REMINDER_TEXT
+            request.messages().iter().any(|message| {
+                message.role() == Role::System
+                    && text_of(message.content()) == task_reminder::TASK_REMINDER_TEXT
             }),
             "request should include task reminder system message"
         );
@@ -4059,7 +4120,8 @@ mod tests {
         let request = captured
             .as_ref()
             .expect("request should have been captured");
-        let tools = request.tools.as_ref().expect("tools should be exposed");
+        let tools = request.tools();
+        assert!(!tools.is_empty(), "tools should be exposed");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "read_file");
     }
@@ -4122,7 +4184,8 @@ mod tests {
         let request = captured
             .as_ref()
             .expect("request should have been captured");
-        let tools = request.tools.as_ref().expect("tools should be exposed");
+        let tools = request.tools();
+        assert!(!tools.is_empty(), "tools should be exposed");
         let tool_names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
         assert_eq!(tool_names.len(), 2);
         assert!(tool_names.contains(&"read_file"));
@@ -4156,7 +4219,7 @@ mod tests {
 
         if let Message::ToolResults { results, .. } = &turns[2] {
             assert!(results[0].is_error);
-            let content_str = results[0].content.to_string();
+            let content_str = tool_result_to_json(&results[0]).to_string();
             assert!(
                 content_str.contains("denied by policy"),
                 "Expected denial message in content, got: {content_str}"
@@ -4193,7 +4256,7 @@ mod tests {
         let turns = session.history().turns();
         if let Message::ToolResults { results, .. } = &turns[2] {
             assert!(!results[0].is_error);
-            let content_str = results[0].content.to_string();
+            let content_str = tool_result_to_json(&results[0]).to_string();
             assert!(
                 content_str.contains("echo: hello"),
                 "Expected echo output in content, got: {content_str}"
@@ -4258,7 +4321,7 @@ mod tests {
         let turns = session.history().turns();
         if let Message::ToolResults { results, .. } = &turns[2] {
             assert!(!results[0].is_error);
-            let content_str = results[0].content.to_string();
+            let content_str = tool_result_to_json(&results[0]).to_string();
             assert!(
                 content_str.contains("echo: hello"),
                 "Expected echo output in content, got: {content_str}"
@@ -4331,11 +4394,8 @@ mod tests {
     async fn stream_retries_retryable_mid_stream_error_and_records_recovered_response() {
         let provider = Arc::new(ScriptedStreamProvider::new(vec![
             ScriptedStreamCall::Events(vec![
-                Ok(StreamEvent::text_delta("partial", None)),
-                Err(LlmError::Stream {
-                    message: "connection reset".into(),
-                    source:  None,
-                }),
+                Ok(text_delta("partial")),
+                Err(stream_error("connection reset")),
             ]),
             ScriptedStreamCall::Response(Box::new(text_response("Recovered"))),
         ]));
@@ -4361,7 +4421,7 @@ mod tests {
                 }
                 AgentEvent::LlmRetry { error, .. } => {
                     retry_count += 1;
-                    assert!(error.retryable());
+                    assert!(error.is_retryable());
                 }
                 AgentEvent::AssistantMessage { text, .. } => {
                     observed.push(format!("message:{text}"));
@@ -4383,15 +4443,15 @@ mod tests {
     /// Builds a response whose provider parts carry both reasoning channels.
     fn reasoning_response(text: &str, summary: &str, trace: &str) -> Response {
         let mut response = text_response(text);
-        let mut content = vec![ContentPart::Other {
-            kind: ContentPart::OPENAI_COMPAT_REASONING_DETAILS.to_string(),
-            data: serde_json::json!([
+        let mut content = vec![ContentPart::opaque(
+            OPENAI_COMPAT_REASONING_DETAILS_KIND,
+            serde_json::json!([
                 {"type": "reasoning.summary", "summary": summary},
                 {"type": "reasoning.text", "text": trace},
             ]),
-        }];
-        content.extend(response.message.content);
-        response.message.content = content;
+        )];
+        content.extend(response.content);
+        response.content = content;
         response
     }
 
@@ -4430,12 +4490,12 @@ mod tests {
     async fn tool_call_response_with_no_visible_text_still_carries_reasoning() {
         let mut tool_call = tool_call_response("nonexistent_tool", "call_1", serde_json::json!({}));
         // Drop the visible text so only the tool call and reasoning remain.
-        tool_call.message.content = vec![
-            ContentPart::Other {
-                kind: ContentPart::OPENAI_COMPAT_REASONING_DETAILS.to_string(),
-                data: serde_json::json!([{"type": "reasoning.summary", "summary": "call the tool"}]),
-            },
-            ContentPart::ToolCall(ToolCall::new(
+        tool_call.content = vec![
+            ContentPart::opaque(
+                OPENAI_COMPAT_REASONING_DETAILS_KIND,
+                serde_json::json!([{"type": "reasoning.summary", "summary": "call the tool"}]),
+            ),
+            ContentPart::ToolCall(ToolCall::function(
                 "call_1",
                 "nonexistent_tool",
                 serde_json::json!({}),
@@ -4458,13 +4518,8 @@ mod tests {
     async fn only_the_final_response_contributes_reasoning_after_a_retry() {
         let provider = Arc::new(ScriptedStreamProvider::new(vec![
             ScriptedStreamCall::Events(vec![
-                Ok(StreamEvent::ReasoningDelta {
-                    delta: "discarded thinking".to_string(),
-                }),
-                Err(LlmError::Stream {
-                    message: "connection reset".into(),
-                    source:  None,
-                }),
+                Ok(reasoning_delta("discarded thinking")),
+                Err(stream_error("connection reset")),
             ]),
             ScriptedStreamCall::Response(Box::new(reasoning_response(
                 "Recovered",
@@ -4487,48 +4542,29 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn stream_quota_error_does_not_replay() {
-        let quota_error = LlmError::Provider {
-            kind:   ProviderErrorKind::QuotaExceeded,
-            detail: Box::new(ProviderErrorDetail {
-                error_code: Some("insufficient_quota".into()),
-                ..ProviderErrorDetail::new("You exceeded your current quota", "mock")
-            }),
-        };
+        let quota_error =
+            provider_error(ErrorKind::QuotaExceeded, "You exceeded your current quota");
         let provider = Arc::new(ScriptedStreamProvider::new(vec![
-            ScriptedStreamCall::Events(vec![
-                Ok(StreamEvent::text_delta("partial", None)),
-                Err(quota_error.clone()),
-            ]),
+            ScriptedStreamCall::Events(vec![Ok(text_delta("partial")), Err(quota_error.clone())]),
         ]));
         let mut session = make_session_with_provider(provider.clone()).await;
 
         let result = session.process_input("Hello").await;
 
         assert!(matches!(
-            result,
-            Err(Error::Llm(LlmError::Provider {
-                kind: ProviderErrorKind::QuotaExceeded,
-                ..
-            }))
+        &result,
+        Err(Error::Llm(error)) if error.kind() == ErrorKind::QuotaExceeded
         ));
         assert_eq!(provider.call_index.load(Ordering::SeqCst), 1);
     }
 
-    async fn assert_non_retryable_mid_stream_provider_error_does_not_replay(
-        kind: ProviderErrorKind,
-    ) {
-        let llm_error = LlmError::Provider {
-            kind,
-            detail: Box::new(ProviderErrorDetail::new(
-                format!("deterministic provider error: {kind:?}"),
-                "mock",
-            )),
-        };
+    async fn assert_non_retryable_mid_stream_provider_error_does_not_replay(kind: ErrorKind) {
+        let llm_error = provider_error(
+            kind.clone(),
+            &format!("deterministic provider error: {kind:?}"),
+        );
         let provider = Arc::new(ScriptedStreamProvider::new(vec![
-            ScriptedStreamCall::Events(vec![
-                Ok(StreamEvent::text_delta("partial", None)),
-                Err(llm_error.clone()),
-            ]),
+            ScriptedStreamCall::Events(vec![Ok(text_delta("partial")), Err(llm_error.clone())]),
             ScriptedStreamCall::Response(Box::new(text_response("should not replay"))),
         ]));
         let mut session = make_session_with_provider(provider.clone()).await;
@@ -4537,11 +4573,8 @@ mod tests {
         let result = session.process_input("Hello").await;
 
         assert!(matches!(
-            result,
-            Err(Error::Llm(LlmError::Provider {
-                kind: actual_kind,
-                ..
-            })) if actual_kind == kind
+        &result,
+        Err(Error::Llm(error)) if error.kind() == kind
         ));
         assert_eq!(provider.call_index.load(Ordering::SeqCst), 1);
         assert_eq!(session.history().turns().len(), 1);
@@ -4557,11 +4590,8 @@ mod tests {
                 AgentEvent::LlmRetry { .. } => retry_count += 1,
                 AgentEvent::Error { error } => {
                     assert!(matches!(
-                        error,
-                        Error::Llm(LlmError::Provider {
-                            kind: actual_kind,
-                            ..
-                        }) if actual_kind == kind
+                    &error,
+                    Error::Llm(error) if error.kind() == kind
                     ));
                     observed.push("error".to_string());
                 }
@@ -4580,36 +4610,25 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn stream_non_retryable_mid_stream_errors_do_not_replay() {
-        assert_non_retryable_mid_stream_provider_error_does_not_replay(
-            ProviderErrorKind::Authentication,
-        )
-        .await;
-        assert_non_retryable_mid_stream_provider_error_does_not_replay(
-            ProviderErrorKind::ContextLength,
-        )
-        .await;
-        assert_non_retryable_mid_stream_provider_error_does_not_replay(
-            ProviderErrorKind::QuotaExceeded,
-        )
-        .await;
+        assert_non_retryable_mid_stream_provider_error_does_not_replay(ErrorKind::Authentication)
+            .await;
+        assert_non_retryable_mid_stream_provider_error_does_not_replay(ErrorKind::ContextLength)
+            .await;
+        assert_non_retryable_mid_stream_provider_error_does_not_replay(ErrorKind::QuotaExceeded)
+            .await;
     }
 
     #[tokio::test(start_paused = true)]
     async fn stream_retry_exhaustion_emits_one_error_without_committing_assistant_or_tools() {
-        let retryable_error = LlmError::Stream {
-            message: "connection reset".into(),
-            source:  None,
-        };
+        let retryable_error = stream_error("connection reset");
         let provider = Arc::new(ScriptedStreamProvider::new(vec![
             ScriptedStreamCall::Events(vec![
-                Ok(StreamEvent::text_delta("partial", None)),
-                Ok(StreamEvent::ToolCallEnd {
-                    tool_call: ToolCall::new(
-                        "call_1",
-                        "echo",
-                        serde_json::json!({"text": "should not run"}),
-                    ),
-                }),
+                Ok(text_delta("partial")),
+                Ok(tool_call_end(&ToolCall::function(
+                    "call_1",
+                    "echo",
+                    serde_json::json!({"text": "should not run"}),
+                ))),
                 Err(retryable_error.clone()),
             ]),
         ]));
@@ -4618,8 +4637,13 @@ mod tests {
 
         let result = session.process_input("Hello").await;
 
-        assert!(matches!(result, Err(Error::Llm(LlmError::Stream { .. }))));
-        assert_eq!(provider.call_index.load(Ordering::SeqCst), 4);
+        assert!(matches!(
+            &result,
+            Err(Error::Llm(error)) if error.kind() == ErrorKind::StreamDecode
+        ));
+        // Visible output was shown on every attempt, so only the agent's
+        // bounded replay loop runs: three attempts under the default policy.
+        assert_eq!(provider.call_index.load(Ordering::SeqCst), 3);
         assert_eq!(session.history().turns().len(), 1);
 
         let mut retry_count = 0;
@@ -4632,7 +4656,7 @@ mod tests {
             match event.event {
                 AgentEvent::LlmRetry { error, .. } => {
                     retry_count += 1;
-                    assert!(error.retryable());
+                    assert!(error.is_retryable());
                 }
                 AgentEvent::AssistantOutputReplace { text, reasoning } => {
                     assert_eq!(text, "");
@@ -4640,7 +4664,10 @@ mod tests {
                     replace_count += 1;
                 }
                 AgentEvent::Error { error } => {
-                    assert!(matches!(error, Error::Llm(LlmError::Stream { .. })));
+                    assert!(matches!(
+                        &error,
+                        Error::Llm(error) if error.kind() == ErrorKind::StreamDecode
+                    ));
                     error_count += 1;
                 }
                 AgentEvent::AssistantMessage { .. } => assistant_message_count += 1,
@@ -4650,8 +4677,8 @@ mod tests {
             }
         }
 
-        assert_eq!(retry_count, 3);
-        assert_eq!(replace_count, 4);
+        assert_eq!(retry_count, 2);
+        assert_eq!(replace_count, 3);
         assert_eq!(error_count, 1);
         assert_eq!(assistant_message_count, 0);
         assert_eq!(tool_started_count, 0);
@@ -4706,15 +4733,9 @@ mod tests {
         let response = text_response("Hello");
         let provider = Arc::new(ScriptedStreamProvider::new(vec![
             ScriptedStreamCall::Events(vec![
-                Ok(StreamEvent::ReasoningDelta {
-                    delta: "weighing options".to_string(),
-                }),
-                Ok(StreamEvent::text_delta("Hello", None)),
-                Ok(StreamEvent::finish(
-                    response.finish_reason.clone(),
-                    response.usage.clone(),
-                    response,
-                )),
+                Ok(reasoning_delta("weighing options")),
+                Ok(text_delta("Hello")),
+                Ok(finish(response)),
             ]),
         ]));
         let mut session = make_session_with_provider(provider).await;
@@ -4732,26 +4753,18 @@ mod tests {
 
     #[tokio::test]
     async fn first_output_reports_tool_call_for_a_turn_with_no_text_or_reasoning() {
-        let tool_call = ToolCall::new("call_1", "nonexistent_tool", serde_json::json!({}));
+        let tool_call = ToolCall::function("call_1", "nonexistent_tool", serde_json::json!({}));
         let mut response = tool_call_response("nonexistent_tool", "call_1", serde_json::json!({}));
         // Strip the visible text so the turn produces neither a text nor a
         // reasoning delta — the case a latch keyed on those two would miss
         // entirely, leaving tool-heavy rounds silent.
-        response.message.content = vec![ContentPart::ToolCall(tool_call.clone())];
+        response.content = vec![ContentPart::ToolCall(tool_call.clone())];
 
         let provider = Arc::new(ScriptedStreamProvider::new(vec![
             ScriptedStreamCall::Events(vec![
-                Ok(StreamEvent::ToolCallStart {
-                    tool_call: tool_call.clone(),
-                }),
-                Ok(StreamEvent::ToolCallEnd {
-                    tool_call: tool_call.clone(),
-                }),
-                Ok(StreamEvent::finish(
-                    response.finish_reason.clone(),
-                    response.usage.clone(),
-                    response,
-                )),
+                Ok(tool_call_start(&tool_call.clone())),
+                Ok(tool_call_end(&tool_call.clone())),
+                Ok(finish(response)),
             ]),
             ScriptedStreamCall::Response(Box::new(text_response("Done"))),
         ]));
@@ -4819,15 +4832,16 @@ mod tests {
         assert_eq!(replace_count, 0);
         assert_eq!(deltas, vec!["Recovered".to_string()]);
         assert_eq!(assistant_messages, vec!["Recovered".to_string()]);
-        // The finish-less restart is the one mid-turn path with no error to
-        // report; without this event it would be invisible downstream.
-        assert_eq!(consume_retries, vec![(0, LlmRetryPhase::Consume)]);
+        // A stream that ends before any visible output is reconnected by the
+        // client's retry middleware; the agent records that retry too, so the
+        // restart is not invisible downstream.
+        assert_eq!(consume_retries, vec![(1, LlmRetryPhase::Consume)]);
     }
 
     #[tokio::test]
     async fn stream_retries_with_output_replace_after_partial_text() {
         let provider = Arc::new(ScriptedStreamProvider::new(vec![
-            ScriptedStreamCall::Events(vec![Ok(StreamEvent::text_delta("Hel", None))]),
+            ScriptedStreamCall::Events(vec![Ok(text_delta("Hel"))]),
             ScriptedStreamCall::Response(Box::new(text_response("Hello"))),
         ]));
         let mut session = make_session_with_provider(provider.clone()).await;
@@ -4877,15 +4891,9 @@ mod tests {
 
     #[tokio::test]
     async fn retry_open_auth_error_emits_error_and_closes_session() {
-        let auth_error = LlmError::Provider {
-            kind:   ProviderErrorKind::Authentication,
-            detail: Box::new(ProviderErrorDetail {
-                status_code: Some(401),
-                ..ProviderErrorDetail::new("bad key", "mock")
-            }),
-        };
+        let auth_error = provider_error(ErrorKind::Authentication, "bad key");
         let provider = Arc::new(ScriptedStreamProvider::new(vec![
-            ScriptedStreamCall::Events(vec![Ok(StreamEvent::text_delta("Hel", None))]),
+            ScriptedStreamCall::Events(vec![Ok(text_delta("Hel"))]),
             ScriptedStreamCall::Error(auth_error.clone()),
         ]));
         let mut session = make_session_with_provider(provider.clone()).await;
@@ -4893,11 +4901,8 @@ mod tests {
 
         let result = session.process_input("Hello").await;
         assert!(matches!(
-            result,
-            Err(Error::Llm(LlmError::Provider {
-                kind: ProviderErrorKind::Authentication,
-                ..
-            }))
+        &result,
+        Err(Error::Llm(error)) if error.kind() == ErrorKind::Authentication
         ));
 
         assert_eq!(provider.call_index.load(Ordering::SeqCst), 2);
@@ -4915,11 +4920,8 @@ mod tests {
                 AgentEvent::Error { error } => {
                     observed.push("error".to_string());
                     found_auth_error_event = matches!(
-                        error,
-                        Error::Llm(LlmError::Provider {
-                            kind: ProviderErrorKind::Authentication,
-                            ..
-                        })
+                    &error,
+                    Error::Llm(error) if error.kind() == ErrorKind::Authentication
                     );
                 }
                 AgentEvent::AssistantMessage { .. } => observed.push("message".to_string()),
@@ -4936,20 +4938,207 @@ mod tests {
         assert!(found_auth_error_event, "expected auth error event");
     }
 
+    /// A tool whose executions are counted, for tests that must prove a call
+    /// never ran.
+    fn counting_tool(name: &str, executions: Arc<AtomicUsize>) -> RegisteredTool {
+        RegisteredTool {
+            definition: ToolDefinition::function(
+                name,
+                format!("Counts executions of {name}"),
+                serde_json::json!({"type": "object"}),
+            ),
+            executor:   Arc::new(move |_args, _ctx| {
+                let executions = Arc::clone(&executions);
+                Box::pin(async move {
+                    executions.fetch_add(1, Ordering::SeqCst);
+                    Ok("ran".to_string())
+                })
+            }),
+            source:     ToolSource::Native,
+        }
+    }
+
+    /// A provisional tool call followed by an `Incomplete` end is not a
+    /// completed turn: the tool must never run and the input must not
+    /// complete successfully.
+    #[tokio::test]
+    async fn incomplete_stream_never_executes_provisional_tool_calls() {
+        let executions = Arc::new(AtomicUsize::new(0));
+        let tool_call = ToolCall::function("call_1", "echo", serde_json::json!({}));
+        let mut ended = tool_call_response("echo", "call_1", serde_json::json!({}));
+        ended.content = vec![ContentPart::ToolCall(tool_call.clone())];
+        ended.finish_reason = FinishReason::Incomplete;
+        let provider = Arc::new(ScriptedStreamProvider::new(vec![
+            ScriptedStreamCall::Events(vec![
+                Ok(tool_call_start(&tool_call)),
+                Ok(tool_call_delta("{}")),
+                Ok(tool_call_end(&tool_call)),
+                Ok(finish(ended)),
+            ]),
+        ]));
+        let mut registry = ToolRegistry::new();
+        registry.register(counting_tool("echo", Arc::clone(&executions)));
+        let client = make_client_without_retries(provider.clone() as Arc<dyn ProviderAdapter>);
+        let profile = Arc::new(TestProfile::with_tools(registry));
+        let env = Arc::new(MockSandbox::default());
+        let mut session = Session::new(client, profile, env, SessionOptions::default(), None);
+        let mut rx = session.subscribe();
+
+        let result = session.process_input("Use echo").await;
+
+        assert!(
+            matches!(
+                &result,
+                Err(Error::Llm(error)) if error.kind() == ErrorKind::StreamDecode
+            ),
+            "an incomplete stream must not complete the input: {result:?}"
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        assert_eq!(session.history().turns().len(), 1);
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|event| event.event)
+            .collect();
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            AgentEvent::AssistantMessage { .. } | AgentEvent::ToolCallStarted { .. }
+        )));
+    }
+
+    /// A failure before any visible output is the client's to retry: the
+    /// provider is called once per policy attempt and the agent adds nothing.
+    #[tokio::test]
+    async fn open_failure_is_retried_by_the_client_exactly_per_policy() {
+        let provider = Arc::new(MockErrorProvider::new(|| {
+            stream_error("connection refused").build()
+        }));
+        // `make_client` installs a three-attempt policy with no delay.
+        let client = make_client(provider.clone() as Arc<dyn ProviderAdapter>).await;
+        let profile = Arc::new(TestProfile::new());
+        let env = Arc::new(MockSandbox::default());
+        let mut session = Session::new(client, profile, env, SessionOptions::default(), None);
+        let mut rx = session.subscribe();
+
+        let result = session.process_input("Hello").await;
+
+        assert!(matches!(&result, Err(Error::Llm(_))));
+        assert_eq!(provider.calls(), 3);
+        let mut retries = Vec::new();
+        let mut errors = 0;
+        while let Ok(event) = rx.try_recv() {
+            match event.event {
+                AgentEvent::LlmRetry { attempt, phase, .. } => retries.push((attempt, phase)),
+                AgentEvent::Error { .. } => errors += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(retries, vec![
+            (1, LlmRetryPhase::Open),
+            (2, LlmRetryPhase::Open)
+        ]);
+        assert_eq!(errors, 1);
+    }
+
+    /// A failure after visible output cannot be retried by any middleware, so
+    /// the agent replays the turn itself, bounded by its own policy.
+    #[tokio::test]
+    async fn failure_after_visible_output_is_replayed_by_the_agent_exactly_per_policy() {
+        let provider = Arc::new(ScriptedStreamProvider::new(vec![
+            ScriptedStreamCall::Events(vec![
+                Ok(text_delta("partial")),
+                Err(stream_error("connection reset")),
+            ]),
+        ]));
+        let client = make_client(provider.clone() as Arc<dyn ProviderAdapter>).await;
+        let profile = Arc::new(TestProfile::new());
+        let env = Arc::new(MockSandbox::default());
+        let config = SessionOptions {
+            replay_retry_policy: test_retry_policy(),
+            ..SessionOptions::default()
+        };
+        let mut session = Session::new(client, profile, env, config, None);
+        let mut rx = session.subscribe();
+
+        let result = session.process_input("Hello").await;
+
+        assert!(matches!(&result, Err(Error::Llm(_))));
+        // Every attempt showed output before failing, so the client's retry
+        // layer never fires and only the agent's three replays run.
+        assert_eq!(provider.call_index.load(Ordering::SeqCst), 3);
+        let mut retries = Vec::new();
+        let mut replaces = 0;
+        while let Ok(event) = rx.try_recv() {
+            match event.event {
+                AgentEvent::LlmRetry { attempt, phase, .. } => retries.push((attempt, phase)),
+                AgentEvent::AssistantOutputReplace { .. } => replaces += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(retries, vec![
+            (1, LlmRetryPhase::Consume),
+            (2, LlmRetryPhase::Consume)
+        ]);
+        assert_eq!(replaces, 3);
+    }
+
+    /// Cancelling the session while a replay waits out its backoff stops the
+    /// turn without another provider call.
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_during_replay_backoff_makes_no_further_provider_calls() {
+        let provider = Arc::new(ScriptedStreamProvider::new(vec![
+            ScriptedStreamCall::Events(vec![
+                Ok(text_delta("partial")),
+                Err(stream_error("connection reset")),
+            ]),
+        ]));
+        let client = make_client(provider.clone() as Arc<dyn ProviderAdapter>).await;
+        let profile = Arc::new(TestProfile::new());
+        let env = Arc::new(MockSandbox::default());
+        let config = SessionOptions {
+            replay_retry_policy: RetryPolicy::exponential()
+                .max_attempts(3)
+                .initial_delay(Duration::from_secs(30))
+                .max_delay(Duration::from_secs(30))
+                .jitter(false),
+            ..SessionOptions::default()
+        };
+        let mut session = Session::new(client, profile, env, config, None);
+        let mut events = session.subscribe();
+        let cancel = session.cancel_token();
+        let controller = tokio::spawn(async move {
+            wait_for_agent_event(&mut events, |event| {
+                matches!(event, AgentEvent::LlmRetry { .. })
+            })
+            .await;
+            cancel.cancel();
+        });
+
+        let result = session.process_input("Hello").await;
+        controller.await.unwrap();
+
+        assert!(matches!(
+            result,
+            Err(Error::Interrupted(InterruptReason::Cancelled))
+        ));
+        assert_eq!(provider.call_index.load(Ordering::SeqCst), 1);
+        assert_eq!(session.state(), SessionState::Closed);
+    }
+
     fn response_with_usage(mut response: Response, usage: TokenCounts) -> Response {
         response.usage = usage;
         response
     }
 
     fn response_with_cost(mut response: Response, cost_usd: f64) -> Response {
-        response.cost_usd = Some(cost_usd);
-        response.cost_source = Some(fabro_model::CostSource::Authoritative);
+        response.cost = Some(Cost {
+            usd_micros: u64::try_from(UsdMicros::from_usd(cost_usd).0).unwrap(),
+            source:     CostSource::Provider,
+        });
         response
     }
 
-    fn response_with_input_tokens(response: Response, input_tokens: i64) -> Response {
+    fn response_with_input_tokens(response: Response, input: u64) -> Response {
         response_with_usage(response, TokenCounts {
-            input_tokens,
+            input,
             ..TokenCounts::default()
         })
     }
@@ -5173,48 +5362,27 @@ mod tests {
             responses:      Vec<Response>,
             stream_index:   AtomicUsize,
             complete_calls: AtomicUsize,
+            id:             AdapterId,
         }
 
         #[async_trait::async_trait]
         impl ProviderAdapter for StreamOnlyProvider {
-            fn name(&self) -> &'static str {
-                "mock"
+            fn id(&self) -> &AdapterId {
+                &self.id
             }
 
-            async fn complete(&self, _request: &Request) -> Result<Response, LlmError> {
+            async fn complete(&self, _call: &ResolvedCall) -> Result<Response, fabro_llm::Error> {
                 self.complete_calls.fetch_add(1, Ordering::SeqCst);
-                Err(LlmError::Stream {
-                    message: "summarization failed".into(),
-                    source:  None,
-                })
+                Err(stream_error("summarization failed").build())
             }
 
-            async fn stream(&self, _request: &Request) -> Result<StreamEventStream, LlmError> {
+            async fn stream(
+                &self,
+                _call: &ResolvedCall,
+            ) -> Result<ResponseStream, fabro_llm::Error> {
                 let idx = self.stream_index.fetch_add(1, Ordering::SeqCst);
-                let response = if idx < self.responses.len() {
-                    self.responses[idx].clone()
-                } else {
-                    self.responses[self.responses.len() - 1].clone()
-                };
-                // Reuse response_to_stream helper from test_support
-                let mut events: Vec<Result<StreamEvent, LlmError>> = Vec::new();
-                let text = response.text();
-                if !text.is_empty() {
-                    events.push(Ok(StreamEvent::text_delta(text, None)));
-                }
-                for part in &response.message.content {
-                    if let ContentPart::ToolCall(tc) = part {
-                        events.push(Ok(StreamEvent::ToolCallEnd {
-                            tool_call: tc.clone(),
-                        }));
-                    }
-                }
-                events.push(Ok(StreamEvent::finish(
-                    response.finish_reason.clone(),
-                    response.usage.clone(),
-                    response,
-                )));
-                Ok(Box::pin(stream::iter(events)))
+                let response = self.responses[idx.min(self.responses.len() - 1)].clone();
+                Ok(response_to_stream(response))
             }
         }
 
@@ -5231,8 +5399,11 @@ mod tests {
             responses,
             stream_index: AtomicUsize::new(0),
             complete_calls: AtomicUsize::new(0),
+            id: AdapterId::new("mock"),
         });
-        let client = make_client(provider.clone() as Arc<dyn ProviderAdapter>).await;
+        // The client's own retries would repeat the failed summarization; the
+        // agent-level suppression is what this test observes.
+        let client = make_client_without_retries(provider.clone() as Arc<dyn ProviderAdapter>);
         let registry = ToolRegistry::new();
         let profile = Arc::new(TestProfile::with_context_window(registry, 100));
         let env = Arc::new(MockSandbox::default());
@@ -5271,7 +5442,7 @@ mod tests {
 
     #[tokio::test]
     async fn compaction_includes_structured_prompt_and_file_tracking() {
-        use fabro_llm::types::ToolDefinition;
+        use lithos_llm::types::ToolDefinition;
 
         use crate::tool_registry::{RegisteredTool, ToolSource};
 
@@ -5281,37 +5452,38 @@ mod tests {
             stream_responses:  Vec<Response>,
             stream_index:      AtomicUsize,
             captured_complete: Mutex<Option<Request>>,
+            id:                AdapterId,
         }
 
         #[async_trait::async_trait]
         impl ProviderAdapter for CompactionCapturingProvider {
-            fn name(&self) -> &'static str {
-                "mock"
+            fn id(&self) -> &AdapterId {
+                &self.id
             }
 
-            async fn complete(&self, request: &Request) -> Result<Response, LlmError> {
-                *self.captured_complete.lock().unwrap() = Some(request.clone());
+            async fn complete(&self, call: &ResolvedCall) -> Result<Response, fabro_llm::Error> {
+                *self.captured_complete.lock().unwrap() = Some(call.request().clone());
                 Ok(text_response("## Goal\nSummary goes here."))
             }
 
-            async fn stream(&self, _request: &Request) -> Result<StreamEventStream, LlmError> {
+            async fn stream(
+                &self,
+                _call: &ResolvedCall,
+            ) -> Result<ResponseStream, fabro_llm::Error> {
                 let idx = self.stream_index.fetch_add(1, Ordering::SeqCst);
-                let response = if idx < self.stream_responses.len() {
-                    self.stream_responses[idx].clone()
-                } else {
-                    self.stream_responses[self.stream_responses.len() - 1].clone()
-                };
+                let response =
+                    self.stream_responses[idx.min(self.stream_responses.len() - 1)].clone();
                 Ok(response_to_stream(response))
             }
         }
 
         // read_file tool that always succeeds
         let read_tool = RegisteredTool {
-            definition: ToolDefinition {
-                name:        "read_file".into(),
-                description: "Read a file".into(),
-                parameters:  serde_json::json!({"type": "object", "properties": {"file_path": {"type": "string"}}}),
-            },
+            definition: ToolDefinition::function(
+                "read_file",
+                "Read a file",
+                serde_json::json!({"type": "object", "properties": {"file_path": {"type": "string"}}}),
+            ),
             executor:   Arc::new(|_args, _ctx| {
                 Box::pin(async move { Ok("file contents".to_string()) })
             }),
@@ -5341,6 +5513,7 @@ mod tests {
             stream_responses,
             stream_index: AtomicUsize::new(0),
             captured_complete: Mutex::new(None),
+            id: AdapterId::new("mock"),
         });
 
         let client = make_client(provider.clone() as Arc<dyn ProviderAdapter>).await;
@@ -5375,7 +5548,7 @@ mod tests {
         let request = captured
             .as_ref()
             .expect("compaction request should have been captured");
-        let system_text = request.messages[0].text();
+        let system_text = text_of(request.messages()[0].content());
         assert!(
             system_text.contains("## Goal"),
             "Compaction system prompt should contain structured '## Goal' section"
@@ -5498,8 +5671,8 @@ mod tests {
         if let Message::ToolResults { results, .. } = &turns[2] {
             assert_eq!(results[0].tool_call_id, "mcp_call_1");
             assert!(!results[0].is_error);
-            let output = results[0].content.as_str().unwrap_or("");
-            assert_eq!(output, "hello from llm");
+            let output = tool_result_to_json(&results[0]);
+            assert_eq!(output.as_str().unwrap_or(""), "hello from llm");
         } else {
             panic!("expected ToolResults turn");
         }
@@ -5539,11 +5712,11 @@ mod tests {
     async fn wall_clock_timeout_aborts_session() {
         // Register a tool that loops until the cancel token fires
         let slow_tool = RegisteredTool {
-            definition: ToolDefinition {
-                name:        "slow_tool".into(),
-                description: "Waits until cancelled".into(),
-                parameters:  serde_json::json!({"type": "object"}),
-            },
+            definition: ToolDefinition::function(
+                "slow_tool",
+                "Waits until cancelled",
+                serde_json::json!({"type": "object"}),
+            ),
             executor:   Arc::new(|_args, ctx| {
                 Box::pin(async move {
                     ctx.cancel.cancelled().await;
@@ -5604,11 +5777,11 @@ mod tests {
     async fn make_parent_waiting_on_blocked_subagent()
     -> (Session, SubAgentSupervisor, String, CancellationToken) {
         let block_until_cancelled = RegisteredTool {
-            definition: ToolDefinition {
-                name:        "block_until_cancelled".into(),
-                description: "Waits until cancelled".into(),
-                parameters:  serde_json::json!({"type": "object"}),
-            },
+            definition: ToolDefinition::function(
+                "block_until_cancelled",
+                "Waits until cancelled",
+                serde_json::json!({"type": "object"}),
+            ),
             executor:   Arc::new(|_args, ctx| {
                 Box::pin(async move {
                     ctx.cancel.cancelled().await;

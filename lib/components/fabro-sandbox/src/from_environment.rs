@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "docker")]
+#[cfg(any(feature = "docker", feature = "kubernetes"))]
 use fabro_types::settings::ResolveError;
 #[cfg(feature = "daytona")]
 use fabro_types::settings::run::DockerfileSource as ResolvedDockerfileSource;
@@ -22,6 +22,8 @@ use crate::config::{
 use crate::daytona::DaytonaConfig;
 #[cfg(feature = "docker")]
 use crate::docker::DockerSandboxOptions;
+#[cfg(feature = "kubernetes")]
+use crate::kubernetes::{KubernetesNetworkMode, KubernetesSandboxOptions};
 
 #[cfg(feature = "daytona")]
 #[must_use]
@@ -145,6 +147,81 @@ fn docker_config_from_environment_env(
             .and_then(|depth| usize::try_from(depth).ok()),
         skip_clone: !clone.enabled,
         ..DockerSandboxOptions::default()
+    }
+}
+
+#[cfg(feature = "kubernetes")]
+#[must_use]
+pub fn kubernetes_config_from_environment(
+    settings: &RunEnvironmentSettings,
+    clone: &RunCloneSettings,
+) -> KubernetesSandboxOptions {
+    // fabro-config rejects image.dockerfile for kubernetes environments; if a
+    // value still arrives here the image reference wins, matching how the
+    // Docker provider treats the pair.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "preflight has no vault, so an unresolved secret token is carried in source \
+                  form; the real value is resolved by kubernetes_config_from_environment_with_secrets"
+    )]
+    let env = settings
+        .env
+        .iter()
+        .map(|(key, value)| (key.clone(), value.as_source()))
+        .collect();
+    kubernetes_config_from_environment_env(settings, clone, env)
+}
+
+#[cfg(feature = "kubernetes")]
+pub fn kubernetes_config_from_environment_with_secrets(
+    settings: &RunEnvironmentSettings,
+    clone: &RunCloneSettings,
+    secrets_lookup: impl FnMut(&str) -> Option<String>,
+) -> Result<KubernetesSandboxOptions, ResolveError> {
+    let env = settings.resolve_env(secrets_lookup)?;
+    Ok(kubernetes_config_from_environment_env(settings, clone, env))
+}
+
+#[cfg(feature = "kubernetes")]
+fn kubernetes_config_from_environment_env(
+    settings: &RunEnvironmentSettings,
+    clone: &RunCloneSettings,
+    env: std::collections::HashMap<String, String>,
+) -> KubernetesSandboxOptions {
+    let mut env_vars = env
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>();
+    env_vars.sort();
+
+    KubernetesSandboxOptions {
+        image: settings
+            .image
+            .docker
+            .clone()
+            .unwrap_or_else(|| KubernetesSandboxOptions::default().image),
+        env_vars,
+        memory_limit: settings
+            .resources
+            .memory
+            .and_then(|size| i64::try_from(size.as_bytes()).ok()),
+        cpu: settings.resources.cpu.map(i64::from),
+        ephemeral_storage_limit: settings
+            .resources
+            .disk
+            .and_then(|size| i64::try_from(size.as_bytes()).ok()),
+        network: match settings.network.mode {
+            EnvironmentNetworkMode::AllowAll => KubernetesNetworkMode::AllowAll,
+            EnvironmentNetworkMode::Block => KubernetesNetworkMode::Block,
+            EnvironmentNetworkMode::CidrAllowList => {
+                KubernetesNetworkMode::CidrAllowList(settings.network.allow.clone())
+            }
+        },
+        labels: settings.labels.clone(),
+        clone_depth: clone
+            .depth_limit()
+            .and_then(|depth| usize::try_from(depth).ok()),
+        skip_clone: !clone.enabled,
     }
 }
 

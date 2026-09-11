@@ -22,7 +22,7 @@ use std::fmt::Write as _;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use fabro_llm::types::ToolDefinition;
+use lithos_llm::types::ToolDefinition;
 use serde_json::Value;
 use strum::EnumString;
 
@@ -39,13 +39,9 @@ const MAX_GREP_RESULTS: usize = 2000;
 const MAX_GREP_MATCHES_SCANNED: usize = 20_000;
 
 fn definition(tool: NativeTool, description: &str, parameters: Value) -> ToolDefinition {
-    ToolDefinition {
-        // Supply the canonical identity; registry insertion rewrites the
-        // stored and wire name for the active vocabulary.
-        name: tool.canonical_name().to_string(),
-        description: description.to_string(),
-        parameters,
-    }
+    // Supply the canonical identity; registry insertion rewrites the
+    // stored and wire name for the active vocabulary.
+    ToolDefinition::function(tool.canonical_name(), description, parameters)
 }
 
 /// `Bash`, taking `timeout` in seconds and an optional `cwd`.
@@ -377,7 +373,7 @@ mod tests {
     use super::*;
     use crate::sandbox::{ExecResult, Sandbox};
     use crate::test_support::{MockSandbox, MutableMockSandbox};
-    use crate::tool_registry::ToolContext;
+    use crate::tool_registry::{ToolContext, ToolDefinitionExt};
 
     fn ctx(env: Arc<dyn Sandbox>) -> ToolContext {
         ToolContext {
@@ -523,12 +519,12 @@ mod tests {
 
         assert_eq!(env.read_file_text("/f.txt").await.unwrap(), "after");
         assert!(
-            tool.definition.parameters["properties"]
+            tool.definition.parameters()["properties"]
                 .get("path")
                 .is_some()
         );
         assert!(
-            tool.definition.parameters["properties"]
+            tool.definition.parameters()["properties"]
                 .get("file_path")
                 .is_none()
         );
@@ -645,7 +641,8 @@ mod tests {
 
     #[test]
     fn grep_schema_uses_kimi_code_modes_and_flags() {
-        let parameters = make_kimi_grep_tool().definition.parameters;
+        let tool = make_kimi_grep_tool();
+        let parameters = tool.definition.parameters();
         assert_eq!(
             parameters["properties"]["output_mode"]["enum"],
             json!(["content", "files_with_matches", "count_matches"])
@@ -659,7 +656,7 @@ mod tests {
     #[test]
     fn bash_schema_states_seconds_and_quotes_real_limits() {
         let tool = make_kimi_bash_tool(60_000, 600_000);
-        let params = &tool.definition.parameters;
+        let params = &tool.definition.parameters();
         let timeout = params["properties"]["timeout"]["description"]
             .as_str()
             .unwrap();

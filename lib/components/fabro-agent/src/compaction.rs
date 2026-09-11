@@ -1,7 +1,7 @@
 use std::fmt::Write;
 
-use fabro_llm::client::Client;
-use fabro_llm::types::{Message as LlmMessage, Request};
+use fabro_llm::{Client, Request};
+use fabro_types::{tool_call_arguments, tool_result_to_json};
 use tracing::debug;
 
 use crate::agent_profile::AgentProfile;
@@ -14,13 +14,13 @@ use crate::types::{AgentEvent, Message};
 const APPROX_CHARS_PER_TOKEN: usize = 4;
 
 /// Maximum output budget for the visible summary text itself.
-const SUMMARY_MAX_TOKENS: i64 = 4096;
+const SUMMARY_MAX_TOKENS: u32 = 4096;
 
 /// Extra output budget for models that reason on every request. `max_tokens`
 /// bounds reasoning *plus* visible output, so a reasoning model handed only
 /// `SUMMARY_MAX_TOKENS` can spend the whole budget thinking and return a
 /// successful response with empty content — a silently empty summary.
-const REASONING_HEADROOM_TOKENS: i64 = 16_384;
+const REASONING_HEADROOM_TOKENS: u32 = 16_384;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
@@ -138,32 +138,29 @@ function names, error messages, and exact values. Omit pleasantries and conversa
 {file_ops_section}"
     );
 
-    let summary_request = Request {
-        model:            provider_profile.model().to_string(),
-        messages:         vec![
-            LlmMessage::system(summarization_prompt),
-            LlmMessage::user(format!(
-                "Here is the conversation to summarize:\n\n{rendered}"
-            )),
-        ],
-        provider:         Some(provider_profile.provider_id().to_string()),
-        tools:            None,
-        tool_choice:      None,
-        response_format:  None,
-        temperature:      None,
-        top_p:            None,
-        max_tokens:       Some(max_tokens),
-        stop_sequences:   None,
-        reasoning_effort: None,
-        speed:            None,
-        metadata:         None,
-        provider_options: None,
-    };
+    let summary_request = Request::builder()
+        .model(format!(
+            "{}/{}",
+            provider_profile.provider_id(),
+            provider_profile.model()
+        ))
+        .system(summarization_prompt)
+        .user(format!(
+            "Here is the conversation to summarize:\n\n{rendered}"
+        ))
+        .max_output_tokens(max_tokens)
+        .build()
+        .map_err(|err| {
+            CompactionError::from(fabro_llm::Error::new(
+                fabro_llm::ErrorKind::InvalidRequest,
+                format!("invalid summarization request: {err}"),
+            ))
+        })?;
 
     let response = llm_client
-        .complete(&summary_request)
+        .complete(summary_request)
         .await
-        .map_err(CompactionError::Llm)?;
+        .map_err(CompactionError::from)?;
 
     let response_text = response.text();
     let summary_text = response_text.trim();
@@ -208,7 +205,7 @@ Build on their progress — do not repeat completed steps.\n\n{summary_text}"
 /// as well as the summary. Provider routes that reason by default get headroom
 /// on top of the summary allowance. Every known model budget is capped at its
 /// declared `max_output`.
-fn summary_max_tokens(reasoning_by_default: bool, max_output: Option<i64>) -> i64 {
+fn summary_max_tokens(reasoning_by_default: bool, max_output: Option<u32>) -> u32 {
     let budget = if reasoning_by_default {
         SUMMARY_MAX_TOKENS + REASONING_HEADROOM_TOKENS
     } else {
@@ -264,7 +261,7 @@ pub(crate) fn estimate_active_context_usage(
 fn latest_assistant_usage_baseline(turns: &[Message]) -> Option<(usize, usize)> {
     turns.iter().enumerate().rev().find_map(|(index, turn)| {
         if let Message::Assistant { usage, .. } = turn {
-            let total_tokens = usage.total_tokens();
+            let total_tokens = usage.total();
             if total_tokens > 0 {
                 return Some((index, usize::try_from(total_tokens).unwrap_or(usize::MAX)));
             }
@@ -300,13 +297,14 @@ fn estimate_turn_chars(turn: &Message) -> usize {
             let reasoning_chars = turn.reasoning_text().map_or(0, str::len);
             let tool_call_chars: usize = tool_calls
                 .iter()
-                .map(|tc| tc.name.len() + tc.arguments.to_string().len())
+                .map(|tc| tc.name.len() + tc.input.raw().len())
                 .sum();
             content.len() + reasoning_chars + tool_call_chars
         }
-        Message::ToolResults { results, .. } => {
-            results.iter().map(|r| r.content.to_string().len()).sum()
-        }
+        Message::ToolResults { results, .. } => results
+            .iter()
+            .map(|r| tool_result_to_json(r).to_string().len())
+            .sum(),
     }
 }
 
@@ -328,7 +326,7 @@ pub fn render_turns_for_summary(turns: &[Message]) -> String {
                     let _ = writeln!(out, "Assistant: {content}");
                 }
                 for tc in tool_calls {
-                    let args_str = tc.arguments.to_string();
+                    let args_str = tool_call_arguments(tc).to_string();
                     let truncated = if args_str.len() > 500 {
                         format!("{}...", &args_str[..args_str.floor_char_boundary(500)])
                     } else {
@@ -339,7 +337,7 @@ pub fn render_turns_for_summary(turns: &[Message]) -> String {
             }
             Message::ToolResults { results, .. } => {
                 for r in results {
-                    let content_str = r.content.to_string();
+                    let content_str = tool_result_to_json(r).to_string();
                     let truncated = if content_str.len() > 500 {
                         format!(
                             "{}...",
@@ -367,8 +365,11 @@ mod tests {
     use std::sync::Arc;
     use std::time::SystemTime;
 
-    use fabro_llm::types::{TokenCounts, ToolCall, ToolResult};
-    use fabro_model::{Catalog, Model, ProviderId};
+    use fabro_llm::catalog;
+    use fabro_llm::lithos_catalog::{Catalog, Offering};
+    use fabro_llm::test_support::test_catalog;
+    use fabro_types::tool_result_from_json;
+    use lithos_llm::types::{TokenCounts, ToolCall};
 
     use super::*;
     use crate::event::Emitter;
@@ -377,19 +378,26 @@ mod tests {
     use crate::tool_registry::ToolRegistry;
     use crate::types::Message;
 
-    fn catalog_model(provider: &ProviderId, id: &str) -> &'static Model {
-        Catalog::builtin()
-            .get_on_provider(provider, id)
-            .unwrap_or_else(|| panic!("{provider}/{id} missing from builtin catalog"))
+    fn catalog() -> Catalog {
+        test_catalog()
     }
 
-    fn builtin_summary_max_tokens(provider: &ProviderId, id: &str) -> i64 {
-        let catalog = Catalog::builtin();
-        let model = catalog_model(provider, id);
-        let settings = catalog
-            .settings_for(model)
-            .unwrap_or_else(|| panic!("{provider}/{id} missing catalog settings"));
-        summary_max_tokens(settings.reasoning_by_default, model.max_output())
+    fn model_on_provider<'a>(
+        catalog: &'a Catalog,
+        provider: &str,
+        id: &str,
+    ) -> Option<Offering<'a>> {
+        catalog.enabled_provider(provider)?.offering(id)
+    }
+
+    fn builtin_summary_max_tokens(catalog: &Catalog, provider: &str, id: &str) -> u32 {
+        let entry = model_on_provider(catalog, provider, id)
+            .unwrap_or_else(|| panic!("{provider}/{id} missing from the catalog"));
+        let max_output = entry
+            .model
+            .limits()
+            .map(|limits| u32::try_from(limits.max_output_tokens).unwrap_or(u32::MAX));
+        summary_max_tokens(catalog::reasons_by_default(&entry), max_output)
     }
 
     #[test]
@@ -405,22 +413,23 @@ mod tests {
 
     #[test]
     fn summary_budget_for_non_reasoning_model_is_summary_allowance() {
-        // claude-haiku-4-5: reasoning = false.
+        // claude-haiku-4.5: reasoning = false.
         assert_eq!(
-            builtin_summary_max_tokens(&ProviderId::anthropic(), "claude-haiku-4-5"),
+            builtin_summary_max_tokens(&catalog(), "anthropic", "claude-haiku-4.5"),
             SUMMARY_MAX_TOKENS
         );
     }
 
     #[test]
     fn summary_budget_for_model_without_effort_feature_is_summary_allowance() {
-        // claude-sonnet-4-5 reasons only when a request asks for it, and
-        // compaction never sends a reasoning effort.
-        let model = catalog_model(&ProviderId::anthropic(), "claude-sonnet-4-5");
-        assert!(model.supports_reasoning());
-        assert!(!model.supports_reasoning_effort());
+        // claude-sonnet-4.5 reasons only when a request asks for a thinking
+        // budget, and compaction never sends one.
+        let catalog = catalog();
+        let entry = model_on_provider(&catalog, "anthropic", "claude-sonnet-4.5").unwrap();
+        assert!(entry.model.capabilities().reasoning().is_supported());
+        assert!(!entry.model.protocol_options().reasoning_effort_levels);
         assert_eq!(
-            builtin_summary_max_tokens(&ProviderId::anthropic(), "claude-sonnet-4-5"),
+            builtin_summary_max_tokens(&catalog, "anthropic", "claude-sonnet-4.5"),
             SUMMARY_MAX_TOKENS
         );
     }
@@ -428,7 +437,7 @@ mod tests {
     #[test]
     fn summary_budget_for_always_adaptive_model_adds_reasoning_headroom() {
         assert_eq!(
-            builtin_summary_max_tokens(&ProviderId::anthropic(), "claude-fable-5"),
+            builtin_summary_max_tokens(&catalog(), "anthropic", "claude-fable-5"),
             SUMMARY_MAX_TOKENS + REASONING_HEADROOM_TOKENS
         );
     }
@@ -436,19 +445,20 @@ mod tests {
     #[test]
     fn summary_budget_for_effort_levels_model_adds_reasoning_headroom() {
         assert_eq!(
-            builtin_summary_max_tokens(&ProviderId::anthropic(), "claude-opus-5"),
+            builtin_summary_max_tokens(&catalog(), "anthropic", "claude-opus-5"),
             SUMMARY_MAX_TOKENS + REASONING_HEADROOM_TOKENS
         );
     }
 
     #[test]
     fn summary_budget_for_always_reasoning_route_without_effort_adds_headroom() {
-        let moonshot = ProviderId::new("moonshot");
-        let model = catalog_model(&moonshot, "kimi-k2.5");
-        assert!(model.supports_reasoning());
-        assert!(!model.supports_reasoning_effort());
+        // Kimi K2.5 takes no effort levels but always reasons, which Fabro
+        // policy states outright.
+        let catalog = catalog();
+        let entry = model_on_provider(&catalog, "moonshot", "kimi-k2.5").unwrap();
+        assert!(!entry.model.protocol_options().reasoning_effort_levels);
         assert_eq!(
-            builtin_summary_max_tokens(&moonshot, "kimi-k2.5"),
+            builtin_summary_max_tokens(&catalog, "moonshot", "kimi-k2.5"),
             SUMMARY_MAX_TOKENS + REASONING_HEADROOM_TOKENS
         );
     }
@@ -468,24 +478,22 @@ mod tests {
             },
             Message::Assistant {
                 content:        "Let me check".into(),
-                tool_calls:     vec![ToolCall::new(
+                tool_calls:     vec![ToolCall::function(
                     "c1",
                     "read_file",
                     serde_json::json!({"path": "foo.rs"}),
                 )],
                 provider_parts: vec![],
-                usage:          Box::new(TokenCounts::default()),
+                usage:          TokenCounts::default(),
                 response_id:    "resp_1".into(),
                 timestamp:      SystemTime::now(),
             },
             Message::ToolResults {
-                results:   vec![ToolResult {
-                    tool_call_id:     "c1".into(),
-                    content:          serde_json::json!("file contents here"),
-                    is_error:         false,
-                    image_data:       None,
-                    image_media_type: None,
-                }],
+                results:   vec![tool_result_from_json(
+                    "c1",
+                    serde_json::json!("file contents here"),
+                    false,
+                )],
                 timestamp: SystemTime::now(),
             },
         ];
@@ -502,13 +510,11 @@ mod tests {
     fn render_turns_truncates_long_tool_output() {
         let long_output = "x".repeat(1000);
         let turns = vec![Message::ToolResults {
-            results:   vec![ToolResult {
-                tool_call_id:     "c1".into(),
-                content:          serde_json::json!(long_output),
-                is_error:         false,
-                image_data:       None,
-                image_media_type: None,
-            }],
+            results:   vec![tool_result_from_json(
+                "c1",
+                serde_json::json!(long_output),
+                false,
+            )],
             timestamp: SystemTime::now(),
         }];
         let rendered = render_turns_for_summary(&turns);
@@ -540,19 +546,23 @@ mod tests {
         history.push(Message::Assistant {
             // 18 chars content + tool call name (9) + args (16) = 43 chars => 10 tokens
             content:        "No usage available".into(),
-            tool_calls:     vec![ToolCall::new(
+            tool_calls:     vec![ToolCall::function(
                 "call_1",
                 "read_file",
                 serde_json::json!({"path": "foo.rs"}),
             )],
             provider_parts: vec![],
-            usage:          Box::new(TokenCounts::default()),
+            usage:          TokenCounts::default(),
             response_id:    "resp_1".into(),
             timestamp:      SystemTime::now(),
         });
         history.push(Message::ToolResults {
             // 4 chars => 1 token
-            results:   vec![ToolResult::success("call_1", serde_json::json!(1234))],
+            results:   vec![tool_result_from_json(
+                "call_1",
+                serde_json::json!(1234),
+                false,
+            )],
             timestamp: SystemTime::now(),
         });
 
@@ -588,16 +598,20 @@ mod tests {
             content:        "baseline response".into(),
             tool_calls:     vec![],
             provider_parts: vec![],
-            usage:          Box::new(TokenCounts {
-                input_tokens: 50,
+            usage:          TokenCounts {
+                input: 50,
                 ..TokenCounts::default()
-            }),
+            },
             response_id:    "resp_1".into(),
             timestamp:      SystemTime::now(),
         });
         history.push(Message::ToolResults {
             // JSON number renders as 4 chars => 1 local token.
-            results:   vec![ToolResult::success("call_1", serde_json::json!(1234))],
+            results:   vec![tool_result_from_json(
+                "call_1",
+                serde_json::json!(1234),
+                false,
+            )],
             timestamp: SystemTime::now(),
         });
         history.push(Message::User {
@@ -627,13 +641,13 @@ mod tests {
             content:        "short".into(),
             tool_calls:     vec![],
             provider_parts: vec![],
-            usage:          Box::new(TokenCounts {
-                input_tokens:       10,
-                output_tokens:      20,
-                reasoning_tokens:   30,
-                cache_read_tokens:  40,
-                cache_write_tokens: 50,
-            }),
+            usage:          TokenCounts {
+                input:       10,
+                output:      20,
+                reasoning:   30,
+                cache_read:  40,
+                cache_write: 50,
+            },
             response_id:    "resp_1".into(),
             timestamp:      SystemTime::now(),
         });
@@ -654,10 +668,10 @@ mod tests {
             content:        "older response".into(),
             tool_calls:     vec![],
             provider_parts: vec![],
-            usage:          Box::new(TokenCounts {
-                input_tokens: 1_000,
+            usage:          TokenCounts {
+                input: 1_000,
                 ..TokenCounts::default()
-            }),
+            },
             response_id:    "resp_old".into(),
             timestamp:      SystemTime::now(),
         });
@@ -669,10 +683,10 @@ mod tests {
             content:        "latest response".into(),
             tool_calls:     vec![],
             provider_parts: vec![],
-            usage:          Box::new(TokenCounts {
-                input_tokens: 20,
+            usage:          TokenCounts {
+                input: 20,
                 ..TokenCounts::default()
-            }),
+            },
             response_id:    "resp_new".into(),
             timestamp:      SystemTime::now(),
         });

@@ -1,15 +1,13 @@
 use std::collections::{BTreeMap, HashSet};
 
 use chrono::Utc;
-use fabro_llm::token_count::{
-    estimate_message_tokens, estimate_request_control_tokens, estimate_text_tokens,
-    estimate_tool_definition_tokens, is_local_estimator_warning,
-};
-use fabro_llm::types::{Request, Role, TokenCounts, Warning as LlmWarning};
+use fabro_llm::Request;
+use fabro_llm::estimate::{self, EstimateWarning, TokenEstimate};
 use fabro_types::{
     StageContextWindowBreakdownItem, StageContextWindowCategory, StageContextWindowCountMethod,
-    StageContextWindowProjection, StageContextWindowStaleness, StageContextWindowWarning,
+    StageContextWindowProjection, StageContextWindowStaleness, StageContextWindowWarning, text_of,
 };
+use lithos_llm::types::{Role, TokenCounts};
 
 use crate::memory::MemoryDocument;
 use crate::native_tool::ToolVocabulary;
@@ -126,32 +124,62 @@ pub(crate) fn context_window_from_response_usage(
     usage: &TokenCounts,
 ) -> StageContextWindowProjection {
     let input_tokens = usage
-        .input_tokens
-        .saturating_add(usage.cache_read_tokens)
-        .saturating_add(usage.cache_write_tokens);
-    if input_tokens <= 0 {
+        .input
+        .saturating_add(usage.cache_read)
+        .saturating_add(usage.cache_write);
+    if input_tokens == 0 {
         return local_snapshot.clone();
     }
     scaled_snapshot(
         local_snapshot,
-        u64::try_from(input_tokens).unwrap_or(u64::MAX),
+        input_tokens,
         StageContextWindowCountMethod::ResponseUsageScaledBreakdown,
         local_snapshot.warnings.clone(),
     )
 }
 
+/// Warning code for media parts sized by bytes rather than tokenized.
+pub(crate) const MEDIA_ESTIMATE_WARNING: &str = "media_token_estimate";
+/// Warning code for provider-native opaque parts measured as JSON text.
+pub(crate) const OPAQUE_CONTEXT_ESTIMATE_WARNING: &str = "opaque_context_estimate";
+/// Warning code for provider options measured as JSON text.
+const PROVIDER_OPTIONS_ESTIMATE_WARNING: &str = "provider_options_estimate";
+
+/// Fabro's stable code for a lithos estimator warning.
+fn warning_code(warning: EstimateWarning) -> &'static str {
+    match warning {
+        EstimateWarning::Media => MEDIA_ESTIMATE_WARNING,
+        EstimateWarning::OpaqueContent => OPAQUE_CONTEXT_ESTIMATE_WARNING,
+        EstimateWarning::ProviderOptions => PROVIDER_OPTIONS_ESTIMATE_WARNING,
+        _ => "token_count_warning",
+    }
+}
+
+/// Whether a warning code describes local-estimator imprecision rather than
+/// a fact about the conversation.
+fn is_local_estimator_warning(code: &str) -> bool {
+    matches!(
+        code,
+        MEDIA_ESTIMATE_WARNING
+            | OPAQUE_CONTEXT_ESTIMATE_WARNING
+            | PROVIDER_OPTIONS_ESTIMATE_WARNING
+            | "token_count_warning"
+    )
+}
+
 #[must_use]
-fn warnings_from_llm(warnings: &[LlmWarning]) -> Vec<StageContextWindowWarning> {
-    warnings
-        .iter()
+fn warnings_from_estimate(estimate: &TokenEstimate) -> Vec<StageContextWindowWarning> {
+    estimate
+        .warnings()
         .map(|warning| StageContextWindowWarning {
-            code:    warning
-                .code
-                .clone()
-                .unwrap_or_else(|| "token_count_warning".to_string()),
-            message: warning.message.clone(),
+            code:    warning_code(warning).to_string(),
+            message: warning.to_string(),
         })
         .collect()
+}
+
+fn to_usize(tokens: u64) -> usize {
+    usize::try_from(tokens).unwrap_or(usize::MAX)
 }
 
 fn add_message_breakdown(
@@ -161,34 +189,35 @@ fn add_message_breakdown(
 ) {
     let memory_text = memory_prompt_suffix(input.memory);
     let skills_text = skills_prompt_suffix(input.skills, input.tool_vocabulary);
-    let memory_tokens = estimate_text_tokens(&memory_text);
-    let skills_tokens = estimate_text_tokens(&skills_text);
+    let memory_tokens = to_usize(estimate::text_tokens(&memory_text));
+    let skills_tokens = to_usize(estimate::text_tokens(&skills_text));
     let mut system_parts_seen = false;
 
-    for message in &input.request.messages {
-        let estimate = estimate_message_tokens(message);
-        warnings.extend(warnings_from_llm(&estimate.warnings));
-        if message.role == Role::System
+    for message in input.request.messages() {
+        let estimate = estimate::message_tokens(message);
+        warnings.extend(warnings_from_estimate(&estimate));
+        let tokens = to_usize(estimate.tokens());
+        if message.role() == Role::System
             && !system_parts_seen
-            && message.text() == input.system_prompt
+            && text_of(message.content()) == input.system_prompt
         {
             system_parts_seen = true;
             let attributed_suffix = memory_tokens.saturating_add(skills_tokens);
             builder.add(
                 StageContextWindowCategory::SystemPrompt,
-                estimate.tokens.saturating_sub(attributed_suffix),
+                tokens.saturating_sub(attributed_suffix),
             );
             builder.add(StageContextWindowCategory::Memory, memory_tokens);
             builder.add(StageContextWindowCategory::Skills, skills_tokens);
         } else {
-            builder.add(StageContextWindowCategory::Conversation, estimate.tokens);
+            builder.add(StageContextWindowCategory::Conversation, tokens);
         }
     }
 }
 
 fn add_tool_breakdown(builder: &mut BreakdownBuilder, tools: &[ToolDefinitionWithSource]) {
     for tool in tools {
-        let tokens = estimate_tool_definition_tokens(&tool.definition);
+        let tokens = to_usize(estimate::tool_definition_tokens(&tool.definition));
         match &tool.source {
             ToolSource::Native => builder.add(StageContextWindowCategory::Tools, tokens),
             ToolSource::Mcp { .. } => builder.add(StageContextWindowCategory::McpTools, tokens),
@@ -202,9 +231,12 @@ fn add_request_control_breakdown(
     warnings: &mut Vec<StageContextWindowWarning>,
     request: &Request,
 ) {
-    let estimate = estimate_request_control_tokens(request);
-    warnings.extend(warnings_from_llm(&estimate.warnings));
-    builder.add(StageContextWindowCategory::Other, estimate.tokens);
+    let estimate = estimate::request_control_tokens(request);
+    warnings.extend(warnings_from_estimate(&estimate));
+    builder.add(
+        StageContextWindowCategory::Other,
+        to_usize(estimate.tokens()),
+    );
 }
 
 fn memory_prompt_suffix(memory: &[MemoryDocument]) -> String {
@@ -340,28 +372,24 @@ fn usage_percent(tokens: u64, denominator: u64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use fabro_llm::types::{Message as LlmMessage, Request, ToolChoice, ToolDefinition};
+    use lithos_llm::types::{Message as LlmMessage, ToolChoice, ToolDefinition};
 
     use super::*;
     use crate::tool_registry::ToolDefinitionWithSource;
 
     fn request(messages: Vec<LlmMessage>, tools: Vec<ToolDefinition>) -> Request {
-        Request {
-            model: "model-a".to_string(),
-            messages,
-            provider: Some("test".to_string()),
-            tools: (!tools.is_empty()).then_some(tools),
-            tool_choice: Some(ToolChoice::Auto),
-            response_format: None,
-            temperature: None,
-            top_p: None,
-            max_tokens: None,
-            stop_sequences: None,
-            reasoning_effort: None,
-            speed: None,
-            metadata: None,
-            provider_options: None,
+        let mut builder = Request::builder().model("test/model-a");
+        for message in messages {
+            builder = builder.message(message);
         }
+        let has_tools = !tools.is_empty();
+        for tool in tools {
+            builder = builder.tool(tool);
+        }
+        if has_tools {
+            builder = builder.tool_choice(ToolChoice::Auto);
+        }
+        builder.build().expect("test request should build")
     }
 
     fn tool(name: &str, source: ToolSource) -> ToolDefinitionWithSource {
@@ -404,8 +432,8 @@ mod tests {
         ];
         let req = request(
             vec![
-                LlmMessage::system(system_prompt.clone()),
-                LlmMessage::user("hello"),
+                LlmMessage::text(Role::System, system_prompt.clone()),
+                LlmMessage::text(Role::User, "hello"),
             ],
             tools.iter().map(|tool| tool.definition.clone()).collect(),
         );
@@ -525,7 +553,6 @@ mod tests {
     }
 
     fn warnings_in() -> Vec<StageContextWindowWarning> {
-        use fabro_llm::token_count::{MEDIA_ESTIMATE_WARNING, OPAQUE_CONTEXT_ESTIMATE_WARNING};
         vec![
             StageContextWindowWarning {
                 code:    OPAQUE_CONTEXT_ESTIMATE_WARNING.to_string(),
@@ -593,7 +620,6 @@ mod tests {
 
     #[test]
     fn scaled_snapshot_dedupes_repeated_warning_codes() {
-        use fabro_llm::token_count::OPAQUE_CONTEXT_ESTIMATE_WARNING;
         let local = snapshot_for_warning_test();
         // Simulate the real bug: build_local_snapshot walks N messages and
         // adds the same `opaque_context_estimate` warning once per turn that

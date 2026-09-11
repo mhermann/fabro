@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use fabro_model::ProviderId;
+use lithos_llm::catalog::ProviderId;
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr};
 

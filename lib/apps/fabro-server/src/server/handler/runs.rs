@@ -21,7 +21,7 @@ use fabro_api::types::{
 use fabro_config::{CliLayer, RunLayer, Storage, project};
 use fabro_environment::{DEFAULT_ENVIRONMENT_ID, EnvironmentId};
 use fabro_interview::AnswerSubmission;
-use fabro_llm::client::Client as LlmClient;
+use fabro_llm::Client as LlmClient;
 use fabro_manifest::RunOverrideInput;
 use fabro_static::EnvVars;
 use fabro_store::{
@@ -40,6 +40,7 @@ use fabro_workflow::command_log::{command_log_path, read_json_string_blob, read_
 use fabro_workflow::run_status::RunStatus;
 use fabro_workflow::workflow_bundle::WorkflowBundle;
 use fabro_workflow::{Error as WorkflowError, operations};
+use lithos_llm::catalog::ProviderId;
 use strum::VariantArray as _;
 use tokio::fs;
 use tracing::info;
@@ -953,18 +954,19 @@ async fn finalize_created_run(
             let workflow = run_title_generation::workflow_summary(&run_spec.graph);
             let run_inputs = run_spec.settings.run.inputs.clone();
             let title_catalog = state.catalog();
-            let title_model = title_catalog.small_default_for_configured_ids(&ready_provider_ids);
-            spawn_generated_title_task(GeneratedTitleTask {
-                state: Arc::clone(&state),
-                run_id: created.run_id,
-                deterministic_title,
-                workflow_target: title_generation_target.to_string(),
-                workflow,
-                run_inputs,
-                client: llm_result.client,
-                model_id: title_model.id.to_string(),
-                provider_id: title_model.provider.clone(),
-            });
+            if let Some(title_model) = title_catalog.small_default_for(&ready_provider_ids) {
+                spawn_generated_title_task(GeneratedTitleTask {
+                    state: Arc::clone(&state),
+                    run_id: created.run_id,
+                    deterministic_title,
+                    workflow_target: title_generation_target.to_string(),
+                    workflow,
+                    run_inputs,
+                    client: llm_result.client,
+                    model_id: title_model.model.id().to_string(),
+                    provider_id: title_model.provider.id().clone(),
+                });
+            }
         }
     }
     style.log_created(created.run_id);
@@ -1104,16 +1106,21 @@ async fn validate_intent_environment(
     let image = &settings.run.environment.image;
     let image_incompatible = match effective_provider {
         SandboxProviderKind::Docker => image.docker.is_none() && image.dockerfile.is_some(),
-        SandboxProviderKind::Local | SandboxProviderKind::Daytona => false,
+        // Config resolution rejects image.dockerfile for kubernetes outright,
+        // so any surviving settings are compatible by construction.
+        SandboxProviderKind::Local
+        | SandboxProviderKind::Daytona
+        | SandboxProviderKind::Kubernetes => false,
     };
     let (target_incompatible, detail) = match target {
         RunTarget::Git(_) => (
             configured_provider == SandboxProviderKind::Local || !settings.run.clone.enabled,
-            "Git targets require a compatible clone-enabled Docker or Daytona environment",
+            "Git targets require a compatible clone-enabled Docker, Daytona, or Kubernetes \
+             environment",
         ),
         RunTarget::None {} => (
             configured_provider == SandboxProviderKind::Local,
-            "none targets require a compatible Docker or Daytona environment",
+            "none targets require a compatible Docker, Daytona, or Kubernetes environment",
         ),
         RunTarget::Folder { .. } => (
             configured_provider != SandboxProviderKind::Local,
@@ -1408,7 +1415,7 @@ struct GeneratedTitleTask {
     run_inputs:          std::collections::HashMap<String, toml::Value>,
     client:              LlmClient,
     model_id:            String,
-    provider_id:         fabro_model::ProviderId,
+    provider_id:         ProviderId,
 }
 
 fn spawn_generated_title_task(task: GeneratedTitleTask) {

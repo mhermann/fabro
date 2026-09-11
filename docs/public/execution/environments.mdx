@@ -210,20 +210,20 @@ Install seeds a `default` environment into SQLite. It is a normal persisted envi
 
 ## Provider mappings
 
-| Environment field | Local | Docker | Daytona |
-|---|---|---|---|
-| `image.docker` | Ignored | Docker image | Snapshot base image; Fabro computes the snapshot name |
-| `image.dockerfile` | Ignored | Warning; ignored | Snapshot Dockerfile; Fabro computes the snapshot name |
-| `resources.cpu` | Warning; ignored | `cpu_quota = cpu * 100000` | Snapshot CPU |
-| `resources.memory` | Warning; ignored | Container memory limit | Snapshot memory |
-| `resources.disk` | Warning; ignored | Warning; ignored | Snapshot disk |
-| `network.mode = "allow_all"` | Host network | Docker default bridge | Daytona allow-all |
-| `network.mode = "block"` | Error | Docker `none` network | Daytona block |
-| `network.mode = "cidr_allow_list"` | Error | Error | Daytona CIDR allow-list |
-| `labels` | Warning; ignored | Warning; ignored | Daytona labels |
-| `lifecycle.auto_stop` | Warning; ignored | Warning; ignored | Daytona auto-stop |
-| `env` | Process environment overlay | Container environment | Sandbox environment |
-| `cwd` | Server-side command working directory | Warning; ignored | Warning; ignored |
+| Environment field | Local | Docker | Daytona | Kubernetes |
+|---|---|---|---|---|
+| `image.docker` | Ignored | Docker image | Snapshot base image; Fabro computes the snapshot name | Pod image reference |
+| `image.dockerfile` | Ignored | Warning; ignored | Snapshot Dockerfile; Fabro computes the snapshot name | Error |
+| `resources.cpu` | Warning; ignored | `cpu_quota = cpu * 100000` | Snapshot CPU | Pod CPU request/limit |
+| `resources.memory` | Warning; ignored | Container memory limit | Snapshot memory | Pod memory request/limit |
+| `resources.disk` | Warning; ignored | Warning; ignored | Snapshot disk | Pod `ephemeral-storage` request/limit |
+| `network.mode = "allow_all"` | Host network | Docker default bridge | Daytona allow-all | No NetworkPolicy |
+| `network.mode = "block"` | Error | Docker `none` network | Daytona block | NetworkPolicy with no egress |
+| `network.mode = "cidr_allow_list"` | Error | Error | Daytona CIDR allow-list | NetworkPolicy with CIDR + DNS egress |
+| `labels` | Warning; ignored | Warning; ignored | Daytona labels | Pod labels |
+| `lifecycle.auto_stop` | Warning; ignored | Warning; ignored | Daytona auto-stop | Warning; ignored |
+| `env` | Process environment overlay | Container environment | Sandbox environment | Pod container environment |
+| `cwd` | Server-side command working directory | Warning; ignored | Warning; ignored | Warning; ignored |
 
 ## Local
 
@@ -270,7 +270,7 @@ memory = "4GB"
 mode = "block"
 ```
 
-Docker and Daytona are clone-based providers. When a run has a GitHub origin, Fabro clones it into the provider workspace with a history depth of 100. Set `[run.clone] enabled = false` to start a manifest-backed run with an empty workspace. Set `[run.clone] depth = 0` to clone full history. A version-backed run intent can instead submit the explicit `{ "kind": "none" }` target, which forces an empty provider workspace regardless of the workflow's clone setting. Its Git target may select a branch, an optional bare tag, an optional exact commit SHA, or both tag and SHA. Both providers attach the selected revision to the target's working branch; an exact SHA wins over a tag, and unavailable tags or commits fail without branch fallback. The `none` target is not supported by Local environments, while the Local-only `folder` target is rejected by Docker and Daytona. Docker and Daytona ignore `cwd`; use the provider-owned workspace layout and `run.working_dir` for repository-relative commands.
+Docker, Daytona, and Kubernetes are clone-based providers. When a run has a GitHub origin, Fabro clones it into the provider workspace with a history depth of 100. Set `[run.clone] enabled = false` to start a manifest-backed run with an empty workspace. Set `[run.clone] depth = 0` to clone full history. A version-backed run intent can instead submit the explicit `{ "kind": "none" }` target, which forces an empty provider workspace regardless of the workflow's clone setting. Its Git target may select a branch, an optional bare tag, an optional exact commit SHA, or both tag and SHA. Both providers attach the selected revision to the target's working branch; an exact SHA wins over a tag, and unavailable tags or commits fail without branch fallback. The `none` target is not supported by Local environments, while the Local-only `folder` target is rejected by Docker and Daytona. Clone-based providers ignore `cwd`; use the provider-owned workspace layout and `run.working_dir` for repository-relative commands.
 
 The image must provide `/bin/bash`; Fabro evaluates every sandbox command with it and has no `sh` fallback. Commands run in a **non-login** shell, so login profiles (`/etc/profile.d/*.sh`, `~/.bash_profile`, and `nvm`/`rbenv`/`sdkman` initializers) are not sourced — put anything they set into the Dockerfile's `ENV` instead. Fabro verifies Bash during initialization and again on resume, and fails with remediation rather than reporting the sandbox ready.
 
@@ -297,3 +297,27 @@ auto_stop = "30m"
 mode = "cidr_allow_list"
 allow = ["208.80.154.232/32", "10.0.0.0/8"]
 ```
+
+## Kubernetes
+
+Kubernetes runs tools in a pod on a cluster you operate: one pod per run, created in the server's inferred namespace and driven through the Kubernetes exec API. Connection follows kube-standard inference — the in-cluster ServiceAccount when Fabro itself runs in the cluster, then `KUBECONFIG`, then `~/.kube/config`. There are no Fabro-specific Kubernetes settings beyond `server.sandbox.providers.kubernetes.enabled`.
+
+```toml title="workflow.toml"
+[environments.kube]
+provider = "kubernetes"
+
+[environments.kube.image]
+docker = "buildpack-deps:noble"
+
+[environments.kube.resources]
+cpu = 2
+memory = "4GB"
+disk = "20GB"
+
+[environments.kube.network]
+mode = "block"
+```
+
+Kubernetes is clone-based with the same contract as Docker and Daytona. The image must provide `/bin/bash` (the built-in default is `buildpack-deps:noble`); `image.dockerfile` is rejected — the provider runs prebuilt image references only, so pull secrets come from the namespace's ServiceAccount `imagePullSecrets`. `resources.disk` maps to the pod's `ephemeral-storage` request/limit, and user `labels` are applied to the pod alongside Fabro's managed labels. `lifecycle.auto_stop` is ignored, and `stop` deletes the pod: a resumed run recreates it from the checkpoint.
+
+`allow_all` creates no network policy, `block` creates a per-pod NetworkPolicy with no egress, and `cidr_allow_list` allows the listed CIDRs plus cluster DNS (port 53). Policy enforcement requires a CNI that supports `NetworkPolicy`. Kubernetes environments do not offer embedded terminals, preview URLs, or an install-wizard flow.

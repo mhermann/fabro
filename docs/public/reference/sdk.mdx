@@ -19,30 +19,42 @@ The `fabro-agent` crate provides a session-based AI agent that runs an LLM with 
 fabro-auth = { git = "https://github.com/fabro-sh/fabro" }
 fabro-agent = { git = "https://github.com/fabro-sh/fabro" }
 fabro-llm = { git = "https://github.com/fabro-sh/fabro" }
-fabro-model = { git = "https://github.com/fabro-sh/fabro" }
+fabro-types = { git = "https://github.com/fabro-sh/fabro" }
 tokio = { version = "1", features = ["full"] }
 ```
 
 ### Quick start
 
 ```rust
-use fabro_agent::{
-    AnthropicProfile, LocalSandbox, Session, SessionOptions,
-};
-use fabro_auth::EnvCredentialSource;
-use fabro_llm::client::Client;
-use fabro_model::catalog::LlmCatalogSettings;
-use fabro_model::Catalog;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use fabro_agent::{AgentProfile, AgentProfileBuilder, LocalSandbox, Session, SessionOptions};
+use fabro_auth::VaultCredentialSource;
+use fabro_llm::ClientOptions;
+use fabro_types::AgentProfileKind;
+use lithos_llm::catalog::builtin;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let source = EnvCredentialSource::new();
-    let catalog = Arc::new(Catalog::from_builtin_with_overrides(&LlmCatalogSettings::default())?);
-    let client = Client::from_source(&source, Arc::clone(&catalog)).await?;
+    let catalog = Arc::new(fabro_llm::default_catalog());
+    let client = fabro_llm::build_client(
+        (*catalog).clone(),
+        Arc::new(VaultCredentialSource::environment_only()),
+        ClientOptions::standard(),
+    )
+    .await?
+    .client;
     let sandbox = Arc::new(LocalSandbox::new(PathBuf::from(".")));
-    let profile = Arc::new(AnthropicProfile::new("claude-sonnet-4-5"));
+    let profile: Arc<dyn AgentProfile> = Arc::from(
+        AgentProfileBuilder::new(
+            AgentProfileKind::Anthropic,
+            builtin::anthropic(),
+            "claude-sonnet-4.5",
+            Arc::clone(&catalog),
+        )
+        .build(),
+    );
     let config = SessionOptions::default();
 
     let mut session = Session::new(client, profile, sandbox, config);
@@ -181,7 +193,7 @@ pub trait AgentProfile: Send + Sync {
 }
 ```
 
-Built-in profiles: `AnthropicProfile`, `OpenAiProfile`, `GeminiProfile`.
+Profiles are built with `AgentProfileBuilder::new(kind, provider, model, catalog)`. The `AgentProfileKind` values are `anthropic`, `claude-5`, `openai`, `gemini`, `kimi`, `gpt56`, and `gpt6`; the catalog's `metadata.agent.profile` picks one per provider or model.
 
 ### Events
 
@@ -289,7 +301,7 @@ All fallible `Session` methods return `Result<T, AgentError>`:
 
 | Variant | Description |
 |---|---|
-| `Llm(SdkError)` | An error from the LLM provider (wraps `fabro_llm::error::SdkError`). |
+| `Llm(Box<ErrorData>)` | An error from the LLM provider: the lithos `ErrorData`, the stored form of a lithos `Error`. |
 | `SessionClosed` | `process_input` was called on a closed session. |
 | `InvalidState(String)` | The session is in an unexpected state. |
 | `ToolExecution(String)` | A tool execution failed. |
@@ -299,410 +311,110 @@ All fallible `Session` methods return `Result<T, AgentError>`:
 
 ## LLM client (`fabro-llm`)
 
-The `fabro-llm` crate is a standalone Rust library for calling LLM providers. It provides a unified client that routes requests to Anthropic, OpenAI, Gemini, and other providers, with built-in streaming, tool execution, retries, and middleware.
+The `fabro-llm` crate is Fabro's integration layer over [lithos-llm](https://docs.rs/lithos-llm), a provider-neutral LLM catalog and client. lithos owns the request and response vocabulary, the provider catalog, the wire codecs, streaming, and retries. `fabro-llm` adds what Fabro needs on top: building the catalog from lithos built-ins plus Fabro policy and the operator `[llm]` overlay, constructing a client from a Fabro credential source, inlining local file attachments, normalizing reasoning output, one-shot structured output, model probes, and the `fabro exec` server gateway adapter.
 
-You can use it independently of Fabro's workflow engine — add it as a dependency in any Rust project.
+Everything below the Fabro layer is the lithos API. `fabro_llm` re-exports the pieces Fabro code touches most: `Client`, `Request`, `Response`, `StreamEvent`, `Error`, `ErrorKind`, `FinishReason`, and the `lithos_catalog`, `types`, `middleware`, `adapter`, and `credentials` modules. See the lithos-llm README for the full client, middleware, and streaming contract.
 
 ```toml title="Cargo.toml"
 [dependencies]
 fabro-auth = { git = "https://github.com/fabro-sh/fabro" }
 fabro-llm = { git = "https://github.com/fabro-sh/fabro" }
-fabro-model = { git = "https://github.com/fabro-sh/fabro" }
+fabro-types = { git = "https://github.com/fabro-sh/fabro" }
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 ```
 
 ### Quick start
 
-The simplest path is an environment-backed `CredentialSource`, an explicit `Arc<Catalog>`, then `Client::from_source(&source, catalog)`. That keeps credential and model resolution explicit while still auto-reading environment variables such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `GEMINI_API_KEY`.
+Build a catalog, build a client over a credential source, then send a lithos `Request`. `VaultCredentialSource::environment_only()` reads provider keys such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `GEMINI_API_KEY` from the process environment.
 
 ```rust
-use fabro_auth::EnvCredentialSource;
-use fabro_llm::client::Client;
-use fabro_llm::generate::{generate, GenerateParams};
-use fabro_model::catalog::LlmCatalogSettings;
-use fabro_model::Catalog;
 use std::sync::Arc;
+
+use fabro_auth::VaultCredentialSource;
+use fabro_llm::{ClientOptions, Request};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let source = EnvCredentialSource::new();
-    let catalog = Arc::new(Catalog::from_builtin_with_overrides(&LlmCatalogSettings::default())?);
-    let client = Client::from_source(&source, Arc::clone(&catalog)).await?;
+    let catalog = fabro_llm::default_catalog();
+    let built = fabro_llm::build_client(
+        catalog,
+        Arc::new(VaultCredentialSource::environment_only()),
+        ClientOptions::standard(),
+    )
+    .await?;
+    for issue in &built.build_issues {
+        eprintln!("provider {} is unavailable: {}", issue.provider, issue.cause);
+    }
+    let client = built.client;
 
-    let result = generate(
-        GenerateParams::new("claude-sonnet-4-5", client.clone())
-            .prompt("Explain ownership in Rust in two sentences.")
-    ).await?;
+    let request = Request::builder()
+        .model("claude-sonnet-4.5")
+        .user("Explain ownership in Rust in two sentences.")
+        .build()?;
+    let response = client.complete(request).await?;
 
-    println!("{}", result.text());
-    println!("Tokens used: {}", result.total_usage.total_tokens);
+    println!("{}", response.text());
+    println!("Tokens used: {}", response.usage.input + response.usage.billable_output());
     Ok(())
 }
 ```
 
+### Catalog
+
+`fabro_llm::default_catalog()` is the lithos built-in catalog with Fabro's policy layer applied. `fabro_llm::build_catalog(&overlay, &env_lookup)` adds an operator `[llm]` overlay on top, the same layering the server and CLI use. `fabro_config::load_llm_overlay(None)` reads that overlay from the active settings file.
+
+```rust
+use fabro_config::load_llm_overlay;
+
+let overlay = load_llm_overlay(None)?;
+let catalog = fabro_llm::build_catalog(&overlay, &|name| std::env::var(name).ok())?;
+```
+
+The `fabro_llm::catalog` module reads Fabro policy from the catalog: `enabled_providers`, `models`, `model_on_provider`, `default_model`, `probe_model`, `small_default_for_ready`, and `agent_profile`. Disabled providers and models are invisible to every query. `fabro_llm::selection` chooses a provider and model before a request exists, the way run creation and validation do: a known selector resolves to its canonical offering, `provider/model` pins the provider, and an unknown selector on a passthrough provider passes through verbatim.
+
 ### Client
 
-`Client` is the core type that holds provider adapters and middleware. It routes each request to the appropriate provider.
+`fabro_llm::build_client(catalog, credentials, options)` takes any lithos `CredentialProvider` and returns a `FabroClient`: the lithos `Client`, the providers that are ready, the providers whose credentials could not be used, and the providers lithos could not build an adapter for. Credentials are read from the provider on every attempt, so a refreshed OAuth token is picked up without rebuilding the client.
 
-#### Creating from a credential source
+`ClientOptions::standard()` turns on the lithos retry middleware (three attempts with short exponential backoff) and local attachment inlining. Add middleware with `with_middleware`, replace a provider's adapter with `with_adapter`, or set `http` to inject a configured HTTP client. `fabro_llm::build_offline_client(catalog, options)` builds a client whose only providers are custom adapters, which is how `fabro exec --server` routes every call through a Fabro server.
 
-```rust
-use fabro_auth::EnvCredentialSource;
-use fabro_llm::client::Client;
-use fabro_model::catalog::LlmCatalogSettings;
-use fabro_model::Catalog;
-use std::sync::Arc;
+Credential sources live in `fabro-auth`: `VaultCredentialSource` reads a Fabro vault with an optional process-environment fallback (`VaultCredentialSource::environment_only()` for SDK callers with no vault), and `SqlVaultCredentialSource` reads the server's secret store. lithos-llm decides which secret names a provider reads (`OPENAI_API_KEY`, `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, or `<PROVIDER>_API_KEY` for an operator-defined provider); Fabro's vault is keyed by those same names.
 
-let source = EnvCredentialSource::new();
-let catalog = Arc::new(Catalog::from_builtin_with_overrides(&LlmCatalogSettings::default())?);
-let client = Client::from_source(&source, Arc::clone(&catalog)).await?;
-```
+#### Requests and responses
 
-For env-backed usage, `EnvCredentialSource` checks for API key environment variables and registers adapters for each provider found:
-
-| Environment variable | Provider |
-|---|---|
-| `ANTHROPIC_API_KEY` | Anthropic |
-| `OPENAI_API_KEY` | OpenAI |
-| `GEMINI_API_KEY` or `GOOGLE_API_KEY` | Gemini |
-| `MOONSHOT_API_KEY` or `KIMI_API_KEY` | Moonshot AI; `MOONSHOT_API_KEY` takes precedence |
-| `ZAI_API_KEY` | ZAI |
-| `MINIMAX_API_KEY` | Minimax |
-| `INCEPTION_API_KEY` | Inception |
-| `POOLSIDE_API_KEY` | Poolside |
-| `DEEPSEEK_API_KEY` | DeepSeek |
-| `OPENROUTER_API_KEY` | OpenRouter, when enabled in settings |
-
-The first provider registered becomes the default. Provider base URLs come from the model catalog. For vault-backed usage inside Fabro, use `fabro_auth::VaultCredentialSource` instead.
-
-The built-in Modal definition reads two proxy-token headers from the vault, so `EnvCredentialSource` does not configure it automatically. For direct SDK use, enable Modal and set its endpoint URL in the catalog:
-
-```toml
-[llm.providers.modal]
-enabled = true
-base_url = "https://your-endpoint.modal.run/v1"
-```
-
-Then read the two environment variables explicitly and create a typed credential after constructing `catalog` from those settings:
+`Request::builder()` is the lithos request builder. `model` takes a `provider/model` route, a model id or alias, or a provider id. `system`, `user`, and `message` add messages; `tool`, `tool_choice`, `response_format`, `max_output_tokens`, `temperature`, `reasoning_effort`, and `speed` set controls. `client.complete(request)` returns a `Response` whose `content` is a list of `ContentPart` values, with `text()` and `tool_calls()` helpers, plus `finish_reason`, `usage`, and `cost`.
 
 ```rust
-use fabro_auth::ApiCredential;
-use fabro_llm::client::Client;
-use std::collections::HashMap;
+use fabro_llm::Request;
+use lithos_llm::types::{Message, Role};
 
-let credential = ApiCredential::with_extra_headers(
-    "modal",
-    HashMap::from([
-        ("Modal-Key".to_string(), std::env::var("MODAL_TOKEN_ID")?),
-        (
-            "Modal-Secret".to_string(),
-            std::env::var("MODAL_TOKEN_SECRET")?,
-        ),
-    ]),
-);
-let client = Client::from_credentials(vec![credential], catalog).await?;
-```
+let request = Request::builder()
+    .model("openai/gpt-5.4")
+    .system("You are a helpful assistant.")
+    .message(Message::text(Role::User, "What is the capital of France?"))
+    .temperature(0.0)
+    .build()?;
 
-#### Creating manually
-
-```rust
-use fabro_llm::client::Client;
-use fabro_llm::providers::AnthropicAdapter;
-use std::collections::HashMap;
-use std::sync::Arc;
-
-let adapter = AnthropicAdapter::new("sk-ant-...")
-    .with_base_url("https://custom-proxy.example.com");
-
-let mut providers = HashMap::new();
-providers.insert("anthropic".to_string(), Arc::new(adapter) as _);
-
-let client = Client::new(providers, Some("anthropic".to_string()), vec![]);
-```
-
-#### Low-level calls
-
-For direct control without the tool loop, use `complete()` and `stream()` on the client:
-
-```rust
-use fabro_llm::types::{Request, Message};
-
-let request = Request {
-    model: "claude-sonnet-4-5".into(),
-    messages: vec![Message::user("Hello")],
-    ..Default::default()
-};
-
-let response = client.complete(&request).await?;
+let response = client.complete(request).await?;
 println!("{}", response.text());
 ```
 
-### High-level generation
-
-The `generate()` function wraps the client with automatic tool execution loops, retries, and timeouts. It is the recommended entry point for most use cases.
-
-#### Basic completion
-
-```rust
-use fabro_auth::EnvCredentialSource;
-use fabro_llm::client::Client;
-use fabro_llm::generate::{generate, GenerateParams};
-
-# let source = EnvCredentialSource::new();
-# let catalog = std::sync::Arc::new(fabro_model::Catalog::from_builtin_with_overrides(&fabro_model::catalog::LlmCatalogSettings::default()).unwrap());
-# let client = Client::from_source(&source, catalog).await?;
-let result = generate(
-    GenerateParams::new("claude-sonnet-4-5", client.clone())
-        .system("You are a helpful assistant.")
-        .prompt("What is the capital of France?")
-        .temperature(0.0)
-).await?;
-
-println!("{}", result.text());
-```
-
-#### Multi-turn conversations
-
-Use `.messages()` instead of `.prompt()` to pass a full conversation history:
-
-```rust
-use fabro_auth::EnvCredentialSource;
-use fabro_llm::client::Client;
-use fabro_llm::types::Message;
-
-# let source = EnvCredentialSource::new();
-# let catalog = std::sync::Arc::new(fabro_model::Catalog::from_builtin_with_overrides(&fabro_model::catalog::LlmCatalogSettings::default()).unwrap());
-# let client = Client::from_source(&source, catalog).await?;
-let result = generate(
-    GenerateParams::new("claude-sonnet-4-5", client.clone())
-        .messages(vec![
-            Message::user("My name is Alice."),
-            Message::assistant("Hello Alice! How can I help you?"),
-            Message::user("What's my name?"),
-        ])
-).await?;
-```
-
-<Note>
-You cannot use both `.prompt()` and `.messages()` on the same request — this returns `SdkError::Configuration`.
-</Note>
-
-#### GenerateParams reference
-
-| Method | Type | Description |
-|---|---|---|
-| `new(model, client)` | `(impl Into<String>, Arc<Client>)` | Required. Model ID or alias plus the client to use |
-| `.prompt(text)` | `impl Into<String>` | Convenience: sends a single user message |
-| `.messages(msgs)` | `Vec<Message>` | Full conversation history |
-| `.system(text)` | `impl Into<String>` | System prompt |
-| `.tools(tools)` | `Vec<Tool>` | Tools available to the model |
-| `.tool_choice(choice)` | `ToolChoice` | How the model selects tools |
-| `.max_tool_rounds(n)` | `u32` | Max tool execution rounds (default: 1) |
-| `.temperature(t)` | `f64` | Sampling temperature |
-| `.top_p(p)` | `f64` | Nucleus sampling |
-| `.max_tokens(n)` | `i64` | Maximum output tokens |
-| `.stop_sequences(seqs)` | `Vec<String>` | Stop sequences |
-| `.reasoning_effort(level)` | `impl Into<String>` | e.g. `"low"`, `"medium"`, `"high"` |
-| `.provider(name)` | `impl Into<String>` | Force a specific provider |
-| `.max_retries(n)` | `u32` | Retry count for transient errors (default: 2) |
-| `.timeout(config)` | `TimeoutConfig` | Total and per-step timeouts |
-| `.abort_signal(token)` | `CancellationToken` | Cancel generation |
-| `.stop_when(f)` | `Fn(&[StepResult]) -> bool` | Custom stop condition after each tool round |
-
-#### GenerateResult
-
-`GenerateResult` dereferences to `Response`, so you can call response methods directly:
-
-```rust
-let result = generate(params).await?;
-
-// Response methods (via Deref)
-result.text();            // concatenated text output
-result.tool_calls();      // Vec<ToolCall> from the final response
-result.reasoning();       // Option<String> — extended thinking content
-
-// GenerateResult fields
-result.response;          // Response — the final LLM response
-result.tool_results;      // Vec<ToolResult> — from the final step
-result.total_usage;       // Usage — aggregated across all steps
-result.steps;             // Vec<StepResult> — one per tool round
-result.output;            // Option<Value> — for structured output
-```
-
-### Tools
-
-Tools let the model call functions during generation. There are two kinds:
-
-- **Active tools** have an execute handler — Fabro runs them automatically and feeds results back to the model.
-- **Passive tools** have no handler — Fabro returns the tool calls to you in the response.
-
-#### Defining an active tool
-
-```rust
-use fabro_auth::EnvCredentialSource;
-use fabro_llm::client::Client;
-use fabro_llm::tools::Tool;
-use serde_json::json;
-
-let weather = Tool::active(
-    "get_weather",
-    "Get the current weather for a city",
-    json!({
-        "type": "object",
-        "properties": {
-            "city": { "type": "string", "description": "City name" }
-        },
-        "required": ["city"]
-    }),
-    |args, _ctx| async move {
-        let city = args["city"].as_str().unwrap_or("unknown");
-        Ok(json!({ "temperature": "72°F", "city": city }))
-    },
-);
-```
-
-#### Using tools with generate
-
-```rust
-# use fabro_auth::EnvCredentialSource;
-# use fabro_llm::client::Client;
-# let source = EnvCredentialSource::new();
-# let catalog = std::sync::Arc::new(fabro_model::Catalog::from_builtin_with_overrides(&fabro_model::catalog::LlmCatalogSettings::default()).unwrap());
-# let client = Client::from_source(&source, catalog).await?;
-let result = generate(
-    GenerateParams::new("claude-sonnet-4-5", client.clone())
-        .prompt("What's the weather in San Francisco?")
-        .tools(vec![weather])
-        .max_tool_rounds(5)
-).await?;
-
-// Inspect the tool execution history
-for (i, step) in result.steps.iter().enumerate() {
-    let calls = step.response.tool_calls();
-    println!("Step {i}: {} tool calls, {} results", calls.len(), step.tool_results.len());
-}
-```
-
-The `generate()` function loops automatically: the model calls tools, Fabro executes them, feeds results back, and repeats until the model stops or `max_tool_rounds` is reached.
-
-#### Tool choice
-
-Control how the model selects tools:
-
-```rust
-use fabro_llm::types::ToolChoice;
-
-// Let the model decide (default)
-# use fabro_auth::EnvCredentialSource;
-# use fabro_llm::client::Client;
-# let source = EnvCredentialSource::new();
-# let catalog = std::sync::Arc::new(fabro_model::Catalog::from_builtin_with_overrides(&fabro_model::catalog::LlmCatalogSettings::default()).unwrap());
-# let client = Client::from_source(&source, catalog).await?;
-GenerateParams::new("opus", client.clone()).tool_choice(ToolChoice::Auto);
-
-// Force a specific tool
-GenerateParams::new("opus", client.clone()).tool_choice(ToolChoice::Named {
-    tool_name: "get_weather".into()
-});
-
-// Force the model to use some tool
-GenerateParams::new("opus", client.clone()).tool_choice(ToolChoice::Required);
-
-// Prevent tool use
-GenerateParams::new("opus", client.clone()).tool_choice(ToolChoice::None);
-```
-
-#### Passive tools
-
-Passive tools let you handle execution yourself:
-
-```rust
-# use fabro_auth::EnvCredentialSource;
-# use fabro_llm::client::Client;
-# let source = EnvCredentialSource::new();
-# let catalog = std::sync::Arc::new(fabro_model::Catalog::from_builtin_with_overrides(&fabro_model::catalog::LlmCatalogSettings::default()).unwrap());
-# let client = Client::from_source(&source, catalog).await?;
-let search = Tool::passive(
-    "search",
-    "Search the codebase",
-    json!({
-        "type": "object",
-        "properties": {
-            "query": { "type": "string" }
-        },
-        "required": ["query"]
-    }),
-);
-
-let result = generate(
-    GenerateParams::new("claude-sonnet-4-5", client.clone())
-        .prompt("Find all uses of the Config struct")
-        .tools(vec![search])
-).await?;
-
-// Handle tool calls yourself
-for call in result.tool_calls() {
-    println!("Model wants to call {} with {}", call.name, call.arguments);
-}
-```
+There is no tool-execution loop in `fabro-llm`. The agent loop lives in `fabro-agent`, which decides when to run a tool and feeds results back as `Role::Tool` messages.
 
 ### Streaming
 
-#### Text stream
-
-For simple cases where you only need the text deltas:
+`client.stream(request)` returns a lithos `ResponseStream`, a `Stream` of `StreamEvent` values. Events are discriminated by `type` on the wire: `started`, `content_block_start`, `text_delta`, `reasoning_delta`, `tool_call_delta`, `content_block_end`, `usage`, `rate_limits`, and `ended`, which carries the complete `Response`.
 
 ```rust
-use fabro_auth::EnvCredentialSource;
-use fabro_llm::client::Client;
-use fabro_llm::generate::{stream, GenerateParams};
+use fabro_llm::StreamEvent;
 use futures::StreamExt;
 
-# let source = EnvCredentialSource::new();
-# let catalog = std::sync::Arc::new(fabro_model::Catalog::from_builtin_with_overrides(&fabro_model::catalog::LlmCatalogSettings::default()).unwrap());
-# let client = Client::from_source(&source, catalog).await?;
-let stream_result = stream(
-    GenerateParams::new("claude-sonnet-4-5", client.clone())
-        .prompt("Write a haiku about Rust")
-).await?;
-
-let mut text_stream = stream_result.text_stream();
-while let Some(chunk) = text_stream.next().await {
-    print!("{}", chunk?);
-}
-```
-
-#### Full event stream
-
-For fine-grained control, consume `StreamEvent` variants directly:
-
-```rust
-use fabro_auth::EnvCredentialSource;
-use fabro_llm::client::Client;
-use fabro_llm::generate::{stream, GenerateParams};
-use fabro_llm::types::StreamEvent;
-use futures::StreamExt;
-
-# let source = EnvCredentialSource::new();
-# let catalog = std::sync::Arc::new(fabro_model::Catalog::from_builtin_with_overrides(&fabro_model::catalog::LlmCatalogSettings::default()).unwrap());
-# let client = Client::from_source(&source, catalog).await?;
-let mut stream_result = stream(
-    GenerateParams::new("claude-sonnet-4-5", client.clone())
-        .prompt("Explain monads")
-).await?;
-
-while let Some(event) = stream_result.next().await {
+let mut stream = client.stream(request).await?;
+while let Some(event) = stream.next().await {
     match event? {
-        StreamEvent::TextDelta { delta, .. } => print!("{delta}"),
-        StreamEvent::ReasoningDelta { delta } => eprint!("[thinking] {delta}"),
-        StreamEvent::ToolCallStart { tool_call } => {
-            println!("\n> Calling tool: {}", tool_call.name);
-        }
-        StreamEvent::StepFinish { usage, .. } => {
-            println!("\n[step done, {} tokens]", usage.total_tokens);
-        }
-        StreamEvent::Finish { response, .. } => {
+        StreamEvent::TextDelta { text, .. } => print!("{text}"),
+        StreamEvent::Ended { response } => {
             println!("\n[done: {:?}]", response.finish_reason);
         }
         _ => {}
@@ -710,282 +422,95 @@ while let Some(event) = stream_result.next().await {
 }
 ```
 
-#### StreamEvent variants
-
-| Variant | Description |
-|---|---|
-| `StreamStart` | Stream opened |
-| `TextStart { text_id }` | Text block started |
-| `TextDelta { delta, text_id }` | Incremental text chunk |
-| `TextEnd { text_id }` | Text block ended |
-| `ReasoningStart` | Extended thinking started |
-| `ReasoningDelta { delta }` | Incremental reasoning chunk |
-| `ReasoningEnd` | Extended thinking ended |
-| `ToolCallStart { tool_call }` | Tool call started |
-| `ToolCallDelta { tool_call }` | Incremental tool call arguments |
-| `ToolCallEnd { tool_call }` | Tool call complete |
-| `StepFinish { finish_reason, usage, response, tool_calls, tool_results }` | A tool round completed (more rounds may follow) |
-| `Finish { finish_reason, usage, response }` | Generation complete |
-| `Error { error, raw }` | Provider error |
+A turn that ends with `FinishReason::Length` or `FinishReason::Incomplete` is not complete. Tool calls from such a turn arrive in `response.suppressed_tool_calls` and must not be executed. `fabro-agent` treats both as a retryable failure of the turn.
 
 ### Structured output
 
-Generate typed JSON objects that conform to a JSON Schema:
+`Client::complete_object` (a lithos method) attaches a JSON Schema as the request's response format and parses the reply into a `StructuredCompletion` with the response and the parsed document:
 
 ```rust
-use fabro_auth::EnvCredentialSource;
-use fabro_llm::client::Client;
-use fabro_llm::generate::{generate_object, GenerateParams};
+use fabro_llm::Request;
 use serde_json::json;
 
-# let source = EnvCredentialSource::new();
-# let catalog = std::sync::Arc::new(fabro_model::Catalog::from_builtin_with_overrides(&fabro_model::catalog::LlmCatalogSettings::default()).unwrap());
-# let client = Client::from_source(&source, catalog).await?;
 let schema = json!({
     "type": "object",
     "properties": {
         "name": { "type": "string" },
-        "age": { "type": "integer" },
-        "hobbies": {
-            "type": "array",
-            "items": { "type": "string" }
-        }
+        "age": { "type": "integer" }
     },
-    "required": ["name", "age", "hobbies"]
+    "required": ["name", "age"]
 });
 
-let result = generate_object(
-    GenerateParams::new("claude-sonnet-4-5", client.clone())
-        .prompt("Generate a profile for a fictional character"),
-    schema,
-).await?;
-
-let profile = result.output.expect("structured output");
-println!("Name: {}", profile["name"]);
+let request = Request::builder()
+    .model("claude-sonnet-4.5")
+    .user("Generate a profile for a fictional character")
+    .build()?;
+let completion = client.complete_object(request, "profile", schema).await?;
+println!("Name: {}", completion.object["name"]);
 ```
+
+### Reasoning
+
+`response.reasoning()` (a lithos method) folds a response's readable reasoning parts into a `ReasoningOutput` with a summary and a trace, whichever channel the provider used. Provider replay data such as signatures and encrypted reasoning never appears in it; `ContentPart::is_replay_material()` marks the parts a conversation keeps for the next request instead.
 
 ### Middleware
 
-Middleware intercepts requests and responses for logging, caching, or transformation:
-
-```rust
-use fabro_llm::middleware::{Middleware, NextFn, NextStreamFn};
-use fabro_llm::provider::StreamEventStream;
-use fabro_llm::types::{Request, Response};
-use fabro_llm::error::SdkError;
-use async_trait::async_trait;
-
-struct LoggingMiddleware;
-
-#[async_trait]
-impl Middleware for LoggingMiddleware {
-    async fn handle_complete(
-        &self,
-        request: Request,
-        next: NextFn,
-    ) -> Result<Response, SdkError> {
-        println!("Request to model: {}", request.model);
-        let response = next(request).await?;
-        println!("Response: {} tokens", response.usage.total_tokens);
-        Ok(response)
-    }
-
-    async fn handle_stream(
-        &self,
-        request: Request,
-        next: NextStreamFn,
-    ) -> Result<StreamEventStream, SdkError> {
-        println!("Streaming request to model: {}", request.model);
-        next(request).await
-    }
-}
-```
-
-Add middleware to the client:
-
-```rust
-use fabro_auth::EnvCredentialSource;
-use fabro_llm::client::Client;
-use fabro_model::catalog::LlmCatalogSettings;
-use fabro_model::Catalog;
-
-let source = EnvCredentialSource::new();
-let catalog = std::sync::Arc::new(Catalog::from_builtin_with_overrides(&LlmCatalogSettings::default())?);
-let mut client = Client::from_source(&source, catalog).await?;
-client.add_middleware(std::sync::Arc::new(LoggingMiddleware));
-```
-
-### Model catalog
-
-The crate embeds a catalog of known models with metadata:
-
-```rust
-use fabro_llm::catalog;
-
-// Look up a model by ID or alias
-let info = catalog::get_model_info("opus").unwrap();
-println!("{} ({})", info.display_name, info.provider);
-println!("Context: {} tokens", info.limits.context_window);
-println!("Tools: {}, Vision: {}", info.features.tools, info.features.vision);
-
-// List all models for a provider
-let models = catalog::list_models(Some("anthropic"));
-
-// Get the default model for a provider
-let default = catalog::default_model_for_provider("openai").unwrap();
-
-// Find a capability-matched model on a different provider
-let equivalent = catalog::closest_model("gemini", &info);
-```
-
-See [Models](/core-concepts/models) for the full catalog table.
+Middleware is the lithos `Middleware` trait: `handle(&self, call: Call, next: Next)` sees the resolved route and request and returns an `Output` that is either a complete response or a stream. `ClientOptions::standard()` installs lithos's `InlineLocalFiles`, which rewrites local file paths in messages into inline media before dispatch.
 
 ### Error handling
 
-All fallible operations return `Result<T, SdkError>`. The error type classifies failures to enable retry and failover decisions:
+Every fallible operation returns `Result<T, fabro_llm::Error>`, the lithos error. `error.kind()` is an `ErrorKind` such as `Authentication`, `RateLimit`, `Server`, `ContextLength`, `ContentFilter`, `Timeout`, `StreamDecode`, or `Cancelled`. `error.data()` is the `ErrorData` snapshot Fabro stores in run events; it reads like `Error`, prints its message, and implements `std::error::Error`.
 
-```rust
-use fabro_llm::error::SdkError;
+Both `Error` and `ErrorData` answer the policy questions directly; only the loop-detection signature is Fabro's:
 
-match result {
-    Err(SdkError::Provider { kind, detail }) => {
-        println!("Provider error ({}): {}", detail.provider, detail.message);
-        if let Some(code) = detail.status_code {
-            println!("HTTP {code}");
-        }
-    }
-    Err(SdkError::RequestTimeout { message, .. }) => println!("Timeout: {message}"),
-    Err(SdkError::Network { message, .. }) => println!("Network: {message}"),
-    Err(SdkError::Interrupt { message }) => println!("Cancelled: {message}"),
-    Err(e) => println!("Other: {e}"),
-    Ok(_) => {}
-}
-```
-
-#### Error classification
-
-Every `SdkError` exposes classification methods:
-
-| Method | Returns | Description |
-|---|---|---|
-| `retryable()` | `bool` | Safe to retry with the same provider (e.g. rate limit, server error) |
-| `failover_eligible()` | `bool` | Safe to try a different provider |
-| `retry_after()` | `Option<f64>` | Seconds to wait before retrying (from provider `Retry-After` header) |
-| `status_code()` | `Option<u16>` | HTTP status code, if applicable |
-| `provider_name()` | `&str` | Which provider returned the error |
-
-#### Provider error kinds
-
-| Kind | HTTP status | Retryable | Failover |
-|---|---|---|---|
-| `Authentication` | 401 | No | No |
-| `AccessDenied` | 403 | No | No |
-| `NotFound` | 404 | No | No |
-| `InvalidRequest` | 400 | No | No |
-| `RateLimit` | 429 | Yes | Yes |
-| `Server` | 500, 502, 503 | Yes | Yes |
-| `ContentFilter` | varies | No | No |
-| `ContextLength` | varies | No | No |
-| `QuotaExceeded` | varies | No | Yes |
+| Function | Description |
+|---|---|
+| `error.is_retryable()` | Safe to retry with the same provider, from lithos's retry classification |
+| `error.failover_eligible()` | Safe to try a different provider |
+| `error.is_auth_error()` | The credential was missing or rejected |
+| `error.is_cancelled()` | The caller cancelled the call |
+| `fabro_llm::failure_signature_hint(&data)` | A stable string for loop and restart detection |
 
 ### Retries
 
-The `generate()` function retries automatically based on `max_retries` (default: 2). For low-level use, the `retry` function wraps any async operation:
-
-```rust
-use fabro_llm::retry::retry;
-use fabro_llm::types::RetryPolicy;
-
-let policy = RetryPolicy {
-    max_retries: 3,
-    base_delay: 1.0,
-    max_delay: 60.0,
-    backoff_multiplier: 2.0,
-    jitter: true,
-    on_retry: None,
-};
-
-let response = retry(&policy, || {
-    let c = client.clone();
-    let r = request.clone();
-    async move { c.complete(&r).await }
-}).await?;
-```
-
-Retry only fires when `error.retryable()` returns `true` and respects `Retry-After` headers.
+The lithos `RetryMiddleware` installed by `ClientOptions::standard()` retries a request until its stream delivers visible output. After visible output the client never replays on its own; `fabro-agent` decides whether to replay a turn using `RetryPolicy::next_delay`, the same decision the middleware uses. Insert a `fabro_llm::RetryListener` into a call's context extensions to be told about each retry the middleware performs.
 
 ### Cancellation
 
-Pass a `CancellationToken` to interrupt long-running generation:
+Pass a `CallContext` with a cancellation token through `complete_with_context` or `stream_with_context`. Cancelling the token ends the call with `ErrorKind::Cancelled`.
 
 ```rust
-use fabro_auth::EnvCredentialSource;
-use fabro_llm::client::Client;
-use tokio_util::sync::CancellationToken;
+use fabro_llm::CallContext;
 
-# let source = EnvCredentialSource::new();
-# let catalog = std::sync::Arc::new(fabro_model::Catalog::from_builtin_with_overrides(&fabro_model::catalog::LlmCatalogSettings::default()).unwrap());
-# let client = Client::from_source(&source, catalog).await?;
-let token = CancellationToken::new();
-let token_clone = token.clone();
-
-// Cancel after 30 seconds
+let context = CallContext::new();
+let cancel = context.cancellation().clone();
 tokio::spawn(async move {
     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-    token_clone.cancel();
+    cancel.cancel();
 });
-
-let result = generate(
-    GenerateParams::new("opus", client.clone())
-        .prompt("Write a novel")
-        .abort_signal(token)
-).await;
-// Returns SdkError::Interrupt if cancelled
+let result = client.complete_with_context(request, context).await;
 ```
+
+### Probes
+
+`fabro_llm::probe::run_model_test(&client, "provider/model", mode, reasoning_effort, timeout)` sends the lithos model probe: one word in `Basic` mode, a two-step tool exchange in `Deep` mode. `probe_provider_with_api_key` validates an operator-supplied key against a provider's probe model before it is stored.
 
 ### Provider adapters
 
-Each provider has a dedicated adapter. All adapters implement the `ProviderAdapter` trait and are interchangeable.
+Providers are lithos adapters selected by the catalog `adapter` id: `anthropic`, `openai`, `gemini`, `openai-compatible`, and `bedrock`. A new OpenAI-compatible endpoint needs a catalog entry, not code.
 
-| Adapter | Provider | Constructor |
-|---|---|---|
-| `AnthropicAdapter` | Anthropic Messages API | `::new(api_key)` |
-| `OpenAiAdapter` | OpenAI Responses API | `::new(api_key)` |
-| `GeminiAdapter` | Google Gemini API | `::new(api_key)` |
-| `OpenAiCompatibleAdapter` | Any OpenAI-compatible endpoint | `::new(api_key, base_url)` |
-
-All adapters support `.with_base_url()` for proxies or custom endpoints. `OpenAiAdapter` also supports `.with_org_id()` and `.with_project_id()`.
-
-#### Custom provider
-
-Implement the `ProviderAdapter` trait to add a new provider:
+To add a custom transport, implement the lithos `ProviderAdapter` trait and register it with `ClientOptions::with_adapter`. `fabro_llm::gateway::GatewayAdapter` is Fabro's own example: it posts each request to a Fabro server's completions endpoint, which returns lithos `Response` JSON and streams lithos `StreamEvent` JSON verbatim.
 
 ```rust
-use fabro_llm::provider::{ProviderAdapter, StreamEventStream};
-use fabro_llm::types::{Request, Response};
-use fabro_llm::error::SdkError;
-use async_trait::async_trait;
+use std::sync::Arc;
 
-struct MyProvider;
+use fabro_llm::ClientOptions;
+use fabro_llm::gateway::GatewayAdapter;
+use lithos_llm::catalog::ProviderId;
 
-#[async_trait]
-impl ProviderAdapter for MyProvider {
-    fn name(&self) -> &str { "my-provider" }
-
-    async fn complete(&self, request: &Request) -> Result<Response, SdkError> {
-        // Call your provider's API
-        todo!()
-    }
-
-    async fn stream(&self, request: &Request) -> Result<StreamEventStream, SdkError> {
-        // Return a stream of events
-        todo!()
-    }
-}
-```
-
-Register it on the client:
-
-```rust
-client.register_provider(Arc::new(MyProvider)).await?;
+let adapter = Arc::new(GatewayAdapter::new(Box::new(my_transport)));
+let built = fabro_llm::build_offline_client(
+    catalog,
+    ClientOptions::default().with_adapter(ProviderId::new("anthropic"), adapter),
+)?;
 ```

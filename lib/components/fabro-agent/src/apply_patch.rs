@@ -5,7 +5,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use fabro_llm::types::ToolDefinition;
+use lithos_llm::types::ToolDefinition;
 
 use crate::sandbox::Sandbox;
 use crate::tool_registry::{RegisteredTool, ToolSource};
@@ -502,16 +502,15 @@ pub fn make_apply_patch_tool() -> RegisteredTool {
 mod tests {
     use std::collections::HashMap;
 
-    use fabro_llm::types::{
-        ContentPart, FinishReason, Message as LlmMessage, Response, Role, TokenCounts, ToolCall,
-    };
+    use fabro_types::tool_result_to_json;
+    use lithos_llm::types::{ContentPart, ToolCall};
     use tokio::fs;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::LocalSandbox;
     use crate::test_support::MutableMockSandbox;
-    use crate::tool_registry::ToolContext;
+    use crate::tool_registry::{ToolContext, ToolDefinitionExt};
 
     #[test]
     fn parse_apply_patch_add_file() {
@@ -1689,7 +1688,9 @@ def gamma():
     async fn e2e_through_tool_executor() {
         use crate::config::SessionOptions;
         use crate::session::Session;
-        use crate::test_support::{MockLlmProvider, TestProfile, make_client, text_response};
+        use crate::test_support::{
+            MockLlmProvider, TestProfile, make_client, response_with_parts, text_response,
+        };
         use crate::tool_registry::ToolRegistry;
 
         // Set up sandbox with a file
@@ -1731,28 +1732,9 @@ def farewell(name):
 *** Delete File: src/obsolete.py
 *** End Patch";
 
-        let mut tool_call = ToolCall::new("call_1", "apply_patch", serde_json::json!(patch_text));
-        tool_call.tool_type = "custom".to_string();
-        tool_call.raw_arguments = Some(patch_text.to_string());
+        let tool_call = ToolCall::custom("call_1", "apply_patch", patch_text);
         let responses = vec![
-            Response {
-                id:            "resp_call_1".to_string(),
-                model:         "mock-model".to_string(),
-                provider:      "mock".to_string(),
-                message:       LlmMessage {
-                    role:         Role::Assistant,
-                    content:      vec![ContentPart::ToolCall(tool_call)],
-                    name:         None,
-                    tool_call_id: None,
-                },
-                finish_reason: FinishReason::ToolCalls,
-                usage:         TokenCounts::default(),
-                raw:           None,
-                warnings:      vec![],
-                rate_limit:    None,
-                cost_usd:      None,
-                cost_source:   None,
-            },
+            response_with_parts("resp_call_1", vec![ContentPart::ToolCall(tool_call)]),
             text_response("Done! Updated greet and farewell functions."),
         ];
 
@@ -1787,7 +1769,9 @@ def farewell(name):
     async fn failed_custom_tool_call_returns_codex_style_error_to_session_history() {
         use crate::config::SessionOptions;
         use crate::session::Session;
-        use crate::test_support::{MockLlmProvider, TestProfile, make_client, text_response};
+        use crate::test_support::{
+            MockLlmProvider, TestProfile, make_client, response_with_parts, text_response,
+        };
         use crate::tool_registry::ToolRegistry;
         use crate::types::Message as AgentMessage;
 
@@ -1808,29 +1792,10 @@ def farewell(name):
 -    return 1
 +    return 2
 *** End Patch";
-        let mut tool_call = ToolCall::new("call_1", "apply_patch", serde_json::json!(patch_text));
-        tool_call.tool_type = "custom".to_string();
-        tool_call.raw_arguments = Some(patch_text.to_string());
+        let tool_call = ToolCall::custom("call_1", "apply_patch", patch_text);
 
         let responses = vec![
-            Response {
-                id:            "resp_call_1".to_string(),
-                model:         "mock-model".to_string(),
-                provider:      "mock".to_string(),
-                message:       LlmMessage {
-                    role:         Role::Assistant,
-                    content:      vec![ContentPart::ToolCall(tool_call)],
-                    name:         None,
-                    tool_call_id: None,
-                },
-                finish_reason: FinishReason::ToolCalls,
-                usage:         TokenCounts::default(),
-                raw:           None,
-                warnings:      vec![],
-                rate_limit:    None,
-                cost_usd:      None,
-                cost_source:   None,
-            },
+            response_with_parts("resp_call_1", vec![ContentPart::ToolCall(tool_call)]),
             text_response("I will correct the patch."),
         ];
 
@@ -1850,7 +1815,7 @@ def farewell(name):
                 assert_eq!(results.len(), 1);
                 assert!(results[0].is_error);
                 assert_eq!(
-                    results[0].content.as_str(),
+                    tool_result_to_json(&results[0]).as_str(),
                     Some("Failed to find context 'def missing():' in src/app.py")
                 );
             }

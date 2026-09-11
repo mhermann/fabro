@@ -10,21 +10,21 @@ use fabro_agent::{
     Sandbox, Session, SessionOptions, SessionShutdownReason, StaticEnvProvider, ToolEnvProvider,
     ToolSecrets, WebFetchSummarizer, canonical_tool_name, register_question_tools,
 };
-use fabro_auth::CredentialSource;
 use fabro_graphviz::graph::{AttrValue, Node};
-use fabro_llm::client::Client;
-use fabro_llm::types::{
-    Message, ReasoningEffort, Request, Response, ResponseFormat, Speed, TokenCounts,
-    ToolDefinition as LlmToolDefinition,
-};
+use fabro_llm::credentials::CredentialProvider;
+use fabro_llm::lithos_catalog::Catalog;
+use fabro_llm::types::ResponseFormat;
+use fabro_llm::{Client, ClientOptions, ErrorData, FallbackTarget, Request, Response};
 use fabro_mcp::config::McpServerSettings;
-#[cfg(test)]
-use fabro_model::catalog::LlmCatalogSettings;
-use fabro_model::{
-    AgentProfileKind, Catalog, FallbackTarget, ModelHandle, ModelRef, ProviderId, UsdMicros,
-};
 use fabro_types::settings::run::RunModelControls;
-use fabro_types::{FailoverProps, PermissionLevel, RunId, SessionCapability, StageId, StageTiming};
+use fabro_types::{
+    AgentProfileKind, FailoverProps, ModelRef, PermissionLevel, RunId, SessionCapability, StageId,
+    StageTiming, UsdMicros, billing,
+};
+use lithos_llm::catalog::{ModelHandle, ModelId, ProviderId};
+use lithos_llm::types::{
+    Message, ReasoningEffort, Role, Speed, TokenCounts, ToolDefinition as LlmToolDefinition,
+};
 use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -42,7 +42,7 @@ use crate::context::WorkflowContext;
 use crate::context::keys::Fidelity;
 use crate::error::Error;
 use crate::event::{Emitter, Event, StageScope};
-use crate::model_fallback::{ModelFallbackNotice, ModelFallbackPolicy};
+use crate::model_fallback::{ModelFallbackNotice, ModelFallbackPolicy, canonical_model_id};
 use crate::outcome::billed_model_usage_from_llm;
 use crate::services::FabroRunToolServices;
 use crate::steering_hub::{ActiveControlHandle, SteeringHub};
@@ -112,7 +112,7 @@ enum AgentApiErrorDisposition {
     /// Session was interrupted via cancellation; surface as `Error::Cancelled`.
     Cancelled,
     /// Underlying LLM error eligible for provider failover.
-    FailoverEligible(fabro_llm::Error),
+    FailoverEligible(ErrorData),
     /// Terminal error; abort the invocation with this workflow `Error`.
     Terminal(Error),
 }
@@ -134,7 +134,7 @@ fn classify_agent_error(err: fabro_agent::Error, allow_failover: bool) -> AgentA
             ))
         }
         fabro_agent::Error::Llm(err) if allow_failover && err.failover_eligible() => {
-            AgentApiErrorDisposition::FailoverEligible(err)
+            AgentApiErrorDisposition::FailoverEligible(*err)
         }
         fabro_agent::Error::Llm(err) => AgentApiErrorDisposition::Terminal(Error::Llm(err)),
         other @ (fabro_agent::Error::SessionClosed
@@ -213,11 +213,11 @@ fn fabro_run_tool(
 ) -> RegisteredTool {
     let name = definition.name.to_string();
     RegisteredTool {
-        definition: LlmToolDefinition {
-            name:        name.clone(),
-            description: definition.description.to_string(),
-            parameters:  definition.parameters.clone(),
-        },
+        definition: LlmToolDefinition::function(
+            name.clone(),
+            definition.description.to_string(),
+            definition.parameters.clone(),
+        ),
         executor:   Arc::new(move |args, _context: ToolContext| {
             let name = name.clone();
             let services = services.clone();
@@ -394,40 +394,37 @@ fn control_attr<'a>(node: &'a Node, key: &str) -> Option<&'a str> {
 }
 
 fn parse_reasoning_effort(node: &Node, value: &str) -> Result<ReasoningEffort, Error> {
-    value.parse::<ReasoningEffort>().map_err(|source| {
-        Error::handler_with_source(
-            format!(
-                "Invalid reasoning_effort \"{value}\" for node \"{}\"; expected one of: {}",
-                node.id,
-                expected_values(ReasoningEffort::variants()),
+    value.parse().map_err(|_| {
+        Error::handler(format!(
+            "Invalid reasoning_effort \"{value}\" for node \"{}\"; expected one of: {}",
+            node.id,
+            expected_values(
+                ReasoningEffort::ALL
+                    .into_iter()
+                    .map(ReasoningEffort::as_str)
             ),
-            source,
-        )
+        ))
     })
 }
 
 fn parse_speed(node: &Node, value: &str) -> Result<Speed, Error> {
-    value.parse::<Speed>().map_err(|source| {
-        Error::handler_with_source(
-            format!(
-                "Invalid speed \"{value}\" for node \"{}\"; expected one of: {}",
-                node.id,
-                expected_values(Speed::variants()),
-            ),
-            source,
-        )
+    value.parse().map_err(|_| {
+        Error::handler(format!(
+            "Invalid speed \"{value}\" for node \"{}\"; expected one of: {}",
+            node.id,
+            expected_values(Speed::ALL.into_iter().map(Speed::as_str)),
+        ))
     })
 }
 
-fn expected_values<T>(values: &[T]) -> String
-where
-    T: ToString,
-{
-    values
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
+fn expected_values<'a>(values: impl Iterator<Item = &'a str>) -> String {
+    values.collect::<Vec<_>>().join(", ")
+}
+
+/// Node-level `max_tokens`, as the client's `u32` output budget.
+fn node_max_output_tokens(node: &Node) -> Option<u32> {
+    node.max_tokens()
+        .and_then(|tokens| u32::try_from(tokens).ok())
 }
 
 /// Shared state for tracking file modifications from agent tool calls.
@@ -643,7 +640,7 @@ pub struct AgentApiBackend {
     mcp_servers:          Vec<McpServerSettings>,
     tool_secrets:         ToolSecrets,
     run_model_controls:   RunModelControls,
-    source:               Arc<dyn CredentialSource>,
+    source:               Arc<dyn CredentialProvider>,
     steering_hub:         Arc<SteeringHub>,
     catalog:              Arc<Catalog>,
     fabro_run_tools:      Option<FabroRunToolServices>,
@@ -760,7 +757,7 @@ impl LiveAgentInvocation {
         error: fabro_agent::Error,
         allow_failover: bool,
         emitter: &Arc<Emitter>,
-    ) -> Result<fabro_llm::Error, Error> {
+    ) -> Result<ErrorData, Error> {
         let disposition = classify_agent_error(error, allow_failover);
         self.abort_and_discard(emitter).await;
         match disposition {
@@ -778,7 +775,7 @@ impl LiveAgentInvocation {
 
     async fn record_input_usage(&mut self) {
         self.event_forwarder.wait_for_processing_end().await;
-        self.total_usage += self.session.last_input_usage();
+        billing::add_usage(&mut self.total_usage, self.session.last_input_usage());
         UsdMicros::accumulate(&mut self.total_cost, self.session.last_input_cost());
     }
 }
@@ -789,10 +786,10 @@ impl AgentApiBackend {
         model: String,
         provider_id: impl Into<ProviderId>,
         fallbacks: ModelFallbackPolicy,
-        source: Arc<dyn CredentialSource>,
+        source: Arc<dyn CredentialProvider>,
         steering_hub: Arc<SteeringHub>,
     ) -> Self {
-        let catalog = Arc::new(Catalog::from_builtin().expect("default catalog should build"));
+        let catalog = Arc::new(fabro_llm::default_catalog());
         Self::new_with_catalog(
             model,
             provider_id.into(),
@@ -808,7 +805,7 @@ impl AgentApiBackend {
         model: String,
         provider_id: ProviderId,
         fallbacks: ModelFallbackPolicy,
-        source: Arc<dyn CredentialSource>,
+        source: Arc<dyn CredentialProvider>,
         steering_hub: Arc<SteeringHub>,
         catalog: Arc<Catalog>,
     ) -> Self {
@@ -895,20 +892,29 @@ impl AgentApiBackend {
         };
         let Some(offering) = self
             .catalog
-            .get_on_provider(&target.provider, target.model.as_str())
+            .enabled_provider(target.provider.as_str())
+            .and_then(|provider| provider.offering(target.model.as_str()))
         else {
             // A catalog-unknown passthrough target has no advertised controls.
             // Preserve the request and let the provider validate it.
             return FallbackControls::Usable(requested);
         };
-        let effective_effort = self.catalog.settings_for(offering).and_then(|settings| {
-            requested_effort.closest_supported(&settings.controls.reasoning_effort)
-        });
+        let capabilities = offering.model.capabilities();
+        let effective_effort = capabilities.closest_supported_effort(requested_effort);
         match effective_effort {
             Some(effort) => FallbackControls::Usable(EffectiveRequestControls {
                 reasoning_effort: Some(effort),
                 speed:            requested.speed,
             }),
+            // No level is verified. Unless the requested one is verified
+            // unsupported, preserve it and let the provider validate, as for
+            // a passthrough target.
+            None if !capabilities
+                .reasoning_effort(requested_effort)
+                .is_unsupported() =>
+            {
+                FallbackControls::Usable(requested)
+            }
             None => FallbackControls::NoNearbyReasoningLevel(requested_effort),
         }
     }
@@ -919,7 +925,7 @@ impl AgentApiBackend {
         provider: &ProviderId,
         requested_controls: EffectiveRequestControls,
     ) -> (FallbackPlan, Vec<ModelFallbackNotice>) {
-        let primary_model = self.catalog.canonical_model_id(provider, model);
+        let primary_model = canonical_model_id(&self.catalog, provider, model);
         let original = LlmRoute {
             target:   FallbackTarget::new(provider, &primary_model),
             controls: requested_controls,
@@ -1021,7 +1027,7 @@ impl AgentApiBackend {
             route.controls,
             node,
             sandbox,
-            self.source.as_ref(),
+            Arc::clone(&self.source),
             Arc::clone(&self.catalog),
             self.tool_env.as_ref(),
             tool_hooks,
@@ -1045,7 +1051,7 @@ impl AgentApiBackend {
         controls: EffectiveRequestControls,
         node: &Node,
         sandbox: &Arc<dyn Sandbox>,
-        source: &dyn CredentialSource,
+        source: Arc<dyn CredentialProvider>,
         catalog: Arc<Catalog>,
         tool_env: Option<&Arc<dyn ToolEnvProvider>>,
         tool_hooks: Option<Arc<dyn fabro_agent::ToolHookCallback>>,
@@ -1053,9 +1059,7 @@ impl AgentApiBackend {
         tool_secrets: ToolSecrets,
         fabro_run_tools: Option<FabroRunToolServices>,
     ) -> Result<Session, Error> {
-        let client = Client::from_source(source, Arc::clone(&catalog))
-            .await
-            .map_err(|e| Error::handler_with_source("Failed to create LLM client", e))?;
+        let client = build_llm_client(&catalog, source).await?;
 
         let profile_builder = AgentProfileBuilder::new(
             provider.profile_kind,
@@ -1067,10 +1071,7 @@ impl AgentApiBackend {
         let profile_builder = if provider.profile_kind == AgentProfileKind::Claude5 {
             profile_builder.with_web_fetch_summarizer(Some(WebFetchSummarizer {
                 client:   client.clone(),
-                model_id: ModelHandle::ByName {
-                    provider: provider.provider_id.clone(),
-                    model:    model.to_string(),
-                },
+                model_id: ModelHandle::new(provider.provider_id.clone(), ModelId::new(model)),
             }))
         } else {
             profile_builder
@@ -1078,7 +1079,7 @@ impl AgentApiBackend {
         let mut profile = profile_builder.build();
 
         let config = SessionOptions {
-            max_tokens: node.max_tokens(),
+            max_tokens: node_max_output_tokens(node),
             reasoning_effort: controls.reasoning_effort,
             speed: controls.speed,
             tool_hooks,
@@ -1196,7 +1197,7 @@ impl AgentApiBackend {
     async fn failover_agent_session(
         &self,
         fallback_plan: &mut FallbackPlan,
-        initial_error: fabro_llm::Error,
+        initial_error: ErrorData,
         request: &CodergenRunRequest<'_>,
         input: &str,
         stage_scope: &StageScope,
@@ -1204,7 +1205,7 @@ impl AgentApiBackend {
         live: &mut LiveAgentInvocation,
     ) -> Result<(), Error> {
         let emitter = request.emitter;
-        let mut last_error = Error::Llm(initial_error);
+        let mut last_error = Error::from(initial_error);
 
         while fallback_plan.advance() {
             Self::emit_failover(
@@ -1236,7 +1237,7 @@ impl AgentApiBackend {
                 route.controls,
                 request.node,
                 request.sandbox,
-                self.source.as_ref(),
+                Arc::clone(&self.source),
                 Arc::clone(&self.catalog),
                 self.tool_env.as_ref(),
                 request.tool_hooks.clone(),
@@ -1268,7 +1269,7 @@ impl AgentApiBackend {
             begin_session_lifecycle(&live.session, emitter, None);
             if let Err(error) = live.session.initialize().await {
                 let allow_failover = fallback_plan.has_next();
-                last_error = Error::Llm(
+                last_error = Error::from(
                     live.discard_for_error(error, allow_failover, emitter)
                         .await?,
                 );
@@ -1301,7 +1302,7 @@ impl AgentApiBackend {
                 }
                 Err(error) => {
                     let allow_failover = fallback_plan.has_next();
-                    last_error = Error::Llm(
+                    last_error = Error::from(
                         live.discard_for_error(error, allow_failover, emitter)
                             .await?,
                     );
@@ -1368,11 +1369,13 @@ impl AgentApiBackend {
         );
     }
 
-    fn route_max_tokens(&self, node: &Node, route: &LlmRoute) -> Option<i64> {
-        node.max_tokens().or_else(|| {
+    fn route_max_tokens(&self, node: &Node, route: &LlmRoute) -> Option<u32> {
+        node_max_output_tokens(node).or_else(|| {
             self.catalog
-                .get_on_provider(&route.target.provider, route.target.model.as_str())
-                .and_then(|model| model.limits.max_output)
+                .enabled_provider(route.target.provider.as_str())
+                .and_then(|provider| provider.offering(route.target.model.as_str()))
+                .and_then(|entry| entry.model.limits())
+                .map(|limits| u32::try_from(limits.max_output_tokens).unwrap_or(u32::MAX))
         })
     }
 
@@ -1383,23 +1386,27 @@ impl AgentApiBackend {
         route: &LlmRoute,
         messages: Vec<Message>,
         response_format: Option<ResponseFormat>,
-    ) -> Request {
-        Request {
-            model: route.target.model.to_string(),
-            messages,
-            provider: Some(route.target.provider.to_string()),
-            tools: None,
-            tool_choice: None,
-            response_format,
-            temperature: None,
-            top_p: None,
-            max_tokens: self.route_max_tokens(node, route),
-            stop_sequences: None,
-            reasoning_effort: route.controls.reasoning_effort,
-            speed: route.controls.speed,
-            metadata: None,
-            provider_options: None,
+    ) -> Result<Request, Error> {
+        let mut builder =
+            Request::builder().model(format!("{}/{}", route.target.provider, route.target.model));
+        for message in messages {
+            builder = builder.message(message);
         }
+        if let Some(format) = response_format {
+            builder = builder.response_format(format);
+        }
+        if let Some(max_tokens) = self.route_max_tokens(node, route) {
+            builder = builder.max_output_tokens(max_tokens);
+        }
+        if let Some(effort) = route.controls.reasoning_effort {
+            builder = builder.reasoning_effort(effort);
+        }
+        if let Some(speed) = route.controls.speed {
+            builder = builder.speed(speed);
+        }
+        builder
+            .build()
+            .map_err(|err| Error::handler(format!("invalid LLM request: {err}")))
     }
 
     async fn complete_one_shot_request(
@@ -1412,16 +1419,16 @@ impl AgentApiBackend {
         plan: &mut FallbackPlan,
     ) -> Result<OneShotCompletion, Error> {
         loop {
-            match client.complete(&request).await {
+            match client.complete(request.clone()).await {
                 Ok(response) => {
                     let route = plan.current();
                     return Ok(OneShotCompletion {
                         response,
-                        model: ModelRef {
-                            provider: route.target.provider.clone(),
-                            model_id: route.target.model.clone(),
-                            speed:    route.controls.speed,
-                        },
+                        model: ModelRef::new(
+                            route.target.provider.clone(),
+                            route.target.model.clone(),
+                        )
+                        .with_speed(route.controls.speed),
                     });
                 }
                 Err(error) if error.failover_eligible() && plan.has_next() => {
@@ -1431,14 +1438,25 @@ impl AgentApiBackend {
                     request = self.route_request(
                         node,
                         plan.current(),
-                        request.messages,
-                        request.response_format,
-                    );
+                        request.messages().to_vec(),
+                        request.response_format().cloned(),
+                    )?;
                 }
-                Err(error) => return Err(Error::Llm(error)),
+                Err(error) => return Err(Error::from(error)),
             }
         }
     }
+}
+
+/// Build the LLM client a stage session dispatches through.
+async fn build_llm_client(
+    catalog: &Arc<Catalog>,
+    source: Arc<dyn CredentialProvider>,
+) -> Result<Client, Error> {
+    fabro_llm::build_client(Catalog::clone(catalog), source, ClientOptions::standard())
+        .await
+        .map(|built| built.client)
+        .map_err(|e| Error::handler_with_source("Failed to create LLM client", e))
 }
 
 #[async_trait]
@@ -1458,9 +1476,7 @@ impl CodergenBackend for AgentApiBackend {
         let emitter = request.emitter;
         let stage_scope = request.stage_scope;
 
-        let client = Client::from_source(self.source.as_ref(), Arc::clone(&self.catalog))
-            .await
-            .map_err(|e| Error::handler_with_source("Failed to create LLM client", e))?;
+        let client = build_llm_client(&self.catalog, Arc::clone(&self.source)).await?;
 
         let model = node.model().unwrap_or(&self.model);
         let provider = self.resolve_provider_context(model, node.provider())?;
@@ -1471,9 +1487,9 @@ impl CodergenBackend for AgentApiBackend {
 
         let mut messages = Vec::new();
         if let Some(sys) = system_prompt {
-            messages.push(Message::system(sys));
+            messages.push(Message::text(Role::System, sys));
         }
-        messages.push(Message::user(prompt));
+        messages.push(Message::text(Role::User, prompt));
 
         let output_schema = structured_output::parse_node_output_schema(node)?;
         let response_format = output_schema
@@ -1491,7 +1507,7 @@ impl CodergenBackend for AgentApiBackend {
                 fallback_plan.current(),
                 messages.clone(),
                 response_format.clone(),
-            );
+            )?;
 
             let inference_start = Instant::now();
             let completion_result = self
@@ -1506,10 +1522,10 @@ impl CodergenBackend for AgentApiBackend {
                 .await;
             inference_duration = inference_duration.saturating_add(inference_start.elapsed());
             let completion = completion_result?;
-            total_usage += completion.response.usage.clone();
+            billing::add_usage(&mut total_usage, completion.response.usage);
             UsdMicros::accumulate(
                 &mut total_cost,
-                completion.response.cost_usd.map(UsdMicros::from_usd),
+                completion.response.cost.as_ref().map(UsdMicros::from_cost),
             );
             let response_text = completion.response.text();
 
@@ -1531,18 +1547,15 @@ impl CodergenBackend for AgentApiBackend {
                 let repair_message =
                     error.repair_message(schema, previous_validation_error.as_ref());
                 previous_validation_error = Some(error);
-                messages.push(Message::assistant(response_text));
-                messages.push(Message::user(repair_message));
+                messages.push(Message::text(Role::Assistant, response_text));
+                messages.push(Message::text(Role::User, repair_message));
                 repair_attempts += 1;
                 continue;
             }
 
-            let stage_usage = billed_model_usage_from_llm(
-                self.catalog.as_ref(),
-                &completion.model,
-                &total_usage,
-            )?
-            .with_reported_cost(total_cost);
+            let stage_usage =
+                billed_model_usage_from_llm(self.catalog.as_ref(), &completion.model, total_usage)?
+                    .with_reported_cost(total_cost);
 
             return Ok(CodergenResult::Text {
                 text:              response_text,
@@ -1570,8 +1583,8 @@ impl CodergenBackend for AgentApiBackend {
         };
 
         // Take a cached session if reusing, otherwise create a new one. Cancel
-        // checks bracket `Client::from_source(...)` so cancellation arriving
-        // during credential refresh is not lost.
+        // checks bracket the client build so cancellation arriving during
+        // credential refresh is not lost.
         if request.cancel_token.is_cancelled() {
             return Err(Error::Cancelled);
         }
@@ -1784,12 +1797,12 @@ impl CodergenBackend for AgentApiBackend {
 
         let stage_usage = billed_model_usage_from_llm(
             self.catalog.as_ref(),
-            &ModelRef {
-                provider: live.session.provider_id(),
-                model_id: live.session.model().into(),
-                speed:    live.session.speed(),
-            },
-            &live.total_usage,
+            &ModelRef::new(
+                live.session.provider_id(),
+                ModelId::new(live.session.model()),
+            )
+            .with_speed(live.session.speed()),
+            live.total_usage,
         )?
         .with_reported_cost(live.total_cost);
 
@@ -1883,8 +1896,10 @@ mod tests {
     use fabro_agent::{AgentProfile, LocalSandbox, ToolRegistry};
     use fabro_api::types;
     use fabro_auth::{VaultCredentialSource, test_support as auth_test_support};
-    use fabro_llm::provider::{ProviderAdapter, StreamEventStream};
-    use fabro_llm::{Error as LlmError, ProviderErrorDetail, ProviderErrorKind};
+    use fabro_llm::adapter::{ProviderAdapter, ResolvedCall};
+    use fabro_llm::lithos_catalog::AdapterId;
+    use fabro_llm::test_support::{client_with_adapters, test_catalog, test_catalog_with_overlay};
+    use fabro_llm::{ErrorKind, ResponseStream, RetryClassification};
     use fabro_tool::FabroToolBackend;
     use fabro_types::{
         EventEnvelope, FailureReason, Run, RunId, RunLifecycle, RunLinks, RunOrigin,
@@ -1895,6 +1910,8 @@ mod tests {
     use futures::stream;
     use httpmock::Method::POST;
     use httpmock::MockServer;
+    use lithos_llm::catalog::builtin;
+    use lithos_llm::types::ContentPart;
     use tokio::sync::RwLock as AsyncRwLock;
     use tokio_util::sync::CancellationToken;
 
@@ -1920,7 +1937,7 @@ mod tests {
         }
 
         fn provider_id(&self) -> ProviderId {
-            ProviderId::openai()
+            builtin::openai()
         }
 
         fn model(&self) -> &str {
@@ -1947,129 +1964,143 @@ mod tests {
         }
     }
 
-    struct ShutdownTestProvider;
+    struct ShutdownTestProvider {
+        id: AdapterId,
+    }
 
-    #[async_trait]
-    impl ProviderAdapter for ShutdownTestProvider {
-        fn name(&self) -> &str {
-            "openai"
-        }
-
-        async fn complete(
-            &self,
-            _request: &Request,
-        ) -> Result<fabro_llm::types::Response, LlmError> {
-            unreachable!("shutdown test never calls LLM completion")
-        }
-
-        async fn stream(&self, _request: &Request) -> Result<StreamEventStream, LlmError> {
-            Ok(Box::pin(stream::empty()))
+    impl ShutdownTestProvider {
+        fn new() -> Self {
+            Self {
+                id: AdapterId::new("mock"),
+            }
         }
     }
 
-    struct RefusalTestProvider;
+    #[async_trait]
+    impl ProviderAdapter for ShutdownTestProvider {
+        fn id(&self) -> &AdapterId {
+            &self.id
+        }
+
+        async fn complete(&self, _call: &ResolvedCall) -> Result<Response, fabro_llm::Error> {
+            unreachable!("shutdown test never calls LLM completion")
+        }
+
+        async fn stream(&self, _call: &ResolvedCall) -> Result<ResponseStream, fabro_llm::Error> {
+            Ok(ResponseStream::new(stream::empty()))
+        }
+    }
+
+    struct RefusalTestProvider {
+        id: AdapterId,
+    }
+
+    impl RefusalTestProvider {
+        fn new() -> Self {
+            Self {
+                id: AdapterId::new("mock"),
+            }
+        }
+    }
 
     #[async_trait]
     impl ProviderAdapter for RefusalTestProvider {
-        fn name(&self) -> &str {
-            "anthropic"
+        fn id(&self) -> &AdapterId {
+            &self.id
         }
 
-        async fn complete(
-            &self,
-            _request: &Request,
-        ) -> Result<fabro_llm::types::Response, LlmError> {
+        async fn complete(&self, _call: &ResolvedCall) -> Result<Response, fabro_llm::Error> {
             Err(refusal_llm_error())
         }
 
-        async fn stream(&self, _request: &Request) -> Result<StreamEventStream, LlmError> {
-            Ok(Box::pin(stream::empty()))
+        async fn stream(&self, _call: &ResolvedCall) -> Result<ResponseStream, fabro_llm::Error> {
+            Ok(ResponseStream::new(stream::empty()))
         }
     }
 
     struct TextTestProvider {
-        provider: &'static str,
-        text:     &'static str,
+        id:   AdapterId,
+        text: &'static str,
+    }
+
+    impl TextTestProvider {
+        fn new(text: &'static str) -> Self {
+            Self {
+                id: AdapterId::new("mock"),
+                text,
+            }
+        }
     }
 
     #[async_trait]
     impl ProviderAdapter for TextTestProvider {
-        fn name(&self) -> &str {
-            self.provider
+        fn id(&self) -> &AdapterId {
+            &self.id
         }
 
-        async fn complete(
-            &self,
-            request: &Request,
-        ) -> Result<fabro_llm::types::Response, LlmError> {
-            Ok(fabro_llm::types::Response {
-                id:            "msg_fallback".to_string(),
-                model:         request.model.clone(),
-                provider:      self.provider.to_string(),
-                message:       Message::assistant(self.text),
-                finish_reason: fabro_llm::types::FinishReason::Stop,
-                usage:         TokenCounts {
-                    input_tokens: 3,
-                    output_tokens: 2,
-                    ..TokenCounts::default()
-                },
-                raw:           None,
-                warnings:      vec![],
-                rate_limit:    None,
-                cost_usd:      None,
-                cost_source:   None,
-            })
+        async fn complete(&self, call: &ResolvedCall) -> Result<Response, fabro_llm::Error> {
+            let handle = call.route().handle();
+            let mut response =
+                Response::new(handle.provider().clone(), handle.model().clone(), vec![
+                    ContentPart::Text {
+                        text: self.text.to_string(),
+                    },
+                ]);
+            response.id = Some("msg_fallback".to_string());
+            response.usage = TokenCounts {
+                input: 3,
+                output: 2,
+                ..TokenCounts::default()
+            };
+            Ok(response)
         }
 
-        async fn stream(&self, _request: &Request) -> Result<StreamEventStream, LlmError> {
-            Ok(Box::pin(stream::empty()))
+        async fn stream(&self, _call: &ResolvedCall) -> Result<ResponseStream, fabro_llm::Error> {
+            Ok(ResponseStream::new(stream::empty()))
         }
+    }
+
+    /// An OpenAI-compatible mock provider served by `server`, with one model.
+    /// Its API key is the name lithos derives from the provider id, such as
+    /// `MOCK_API_KEY`.
+    fn mock_provider_overlay(provider: &str, model: &str, base_url: &str) -> String {
+        format!(
+            r#"
+[providers.{provider}]
+display_name = "{provider}"
+adapter = "openai-compatible"
+codec = "openai-chat"
+base_url = {base_url}
+auth = {{ type = "bearer" }}
+default_model = "{model}"
+
+[providers.{provider}.metadata.agent]
+profile = "openai"
+
+[providers.{provider}.models.{model}]
+display_name = "{model}"
+api_model = "{model}"
+limits = {{ context_tokens = 8192, max_output_tokens = 1024 }}
+capabilities = {{ text = true, tools = true, response_format = {{ json_object = true, json_schema = true }} }}
+"#,
+            base_url = toml::Value::String(base_url.to_string()),
+        )
     }
 
     fn mock_llm_catalog(server: &MockServer) -> Arc<Catalog> {
-        let settings: LlmCatalogSettings = toml::from_str(&format!(
-            r#"
-[providers.mock]
-adapter = "openai_compatible"
-agent_profile = "openai"
-base_url = "{}"
-
-[providers.mock.auth]
-credentials = ["env:MOCK_API_KEY"]
-
-[models.mock-model]
-provider = "mock"
-display_name = "Mock Model"
-family = "mock"
-default = true
-
-[models.mock-model.limits]
-context_window = 8192
-max_output = 1024
-
-[models.mock-model.features]
-tools = true
-vision = false
-reasoning = false
-"#,
-            server.base_url()
-        ))
-        .unwrap();
-        Arc::new(Catalog::from_builtin_with_overrides(&settings).unwrap())
+        Arc::new(test_catalog_with_overlay(&mock_provider_overlay(
+            "mock",
+            "mock-model",
+            &server.base_url(),
+        )))
     }
 
+    /// Modal and OpenRouter ship disabled; enable them the way an operator
+    /// would so their models become fallback targets.
     fn enabled_fallback_catalog() -> Arc<Catalog> {
-        let settings: LlmCatalogSettings = toml::from_str(
-            r"
-[providers.modal]
-enabled = true
-
-[providers.openrouter]
-enabled = true
-",
-        )
-        .expect("fallback catalog overrides should parse");
-        Arc::new(Catalog::from_builtin_with_overrides(&settings).unwrap())
+        Arc::new(test_catalog_with_overlay(
+            "[providers.modal]\nenabled = true\n\n[providers.openrouter]\nenabled = true\n",
+        ))
     }
 
     fn mock_api_backend(server: &MockServer) -> AgentApiBackend {
@@ -2082,7 +2113,7 @@ enabled = true
         });
         AgentApiBackend::new_with_catalog(
             "mock-model".to_string(),
-            ProviderId::from("mock"),
+            ProviderId::new("mock"),
             ModelFallbackPolicy::default(),
             source,
             SteeringHub::for_tests(),
@@ -2091,59 +2122,20 @@ enabled = true
     }
 
     fn fallback_api_backend(server: &MockServer) -> AgentApiBackend {
-        let settings: LlmCatalogSettings = toml::from_str(&format!(
-            r#"
-[providers.primary]
-adapter = "openai_compatible"
-agent_profile = "openai"
-base_url = "{}/primary"
-
-[providers.primary.auth]
-credentials = ["env:PRIMARY_API_KEY"]
-
-[providers.primary.models.test-model]
-display_name = "Primary Test Model"
-family = "test"
-default = true
-
-[providers.primary.models.test-model.limits]
-context_window = 8192
-max_output = 1024
-
-[providers.primary.models.test-model.features]
-tools = true
-vision = false
-reasoning = false
-
-[providers.fallback]
-adapter = "openai_compatible"
-agent_profile = "openai"
-base_url = "{}/fallback"
-
-[providers.fallback.auth]
-credentials = ["env:FALLBACK_API_KEY"]
-
-[providers.fallback.models.test-model]
-display_name = "Fallback Test Model"
-family = "test"
-default = true
-
-[providers.fallback.models.test-model.limits]
-context_window = 8192
-max_output = 1024
-
-[providers.fallback.models.test-model.features]
-tools = true
-vision = false
-reasoning = false
-"#,
-            server.base_url(),
-            server.base_url(),
-        ))
-        .expect("fallback catalog should parse");
-        let catalog = Arc::new(
-            Catalog::from_builtin_with_overrides(&settings).expect("catalog should build"),
+        let overlay = format!(
+            "{}\n{}",
+            mock_provider_overlay(
+                "primary",
+                "test-model",
+                &format!("{}/primary", server.base_url()),
+            ),
+            mock_provider_overlay(
+                "fallback",
+                "test-model",
+                &format!("{}/fallback", server.base_url()),
+            ),
         );
+        let catalog = Arc::new(test_catalog_with_overlay(&overlay));
         let source = auth_test_support::env_credential_source(|name| match name {
             "PRIMARY_API_KEY" | "FALLBACK_API_KEY" => Some("sk-test".to_string()),
             _ => None,
@@ -2192,7 +2184,7 @@ reasoning = false
                 "delta": {
                     "content": text
                 },
-                "finish_reason": null
+                "finish_reason": "stop"
             }]
         });
         let usage_chunk = serde_json::json!({
@@ -2263,20 +2255,20 @@ reasoning = false
     fn agent_backend_stores_config() {
         let backend = AgentApiBackend::new(
             "claude-opus-4-6".to_string(),
-            ProviderId::openai(),
+            builtin::openai(),
             ModelFallbackPolicy::default(),
             auth_test_support::vault_only_credential_source(),
             SteeringHub::for_tests(),
         );
         assert_eq!(backend.model, "claude-opus-4-6");
-        assert_eq!(backend.provider_id, ProviderId::openai());
+        assert_eq!(backend.provider_id, builtin::openai());
     }
 
     #[test]
     fn agent_backend_initializes_empty_sessions() {
         let backend = AgentApiBackend::new(
             "claude-opus-4-6".to_string(),
-            ProviderId::anthropic(),
+            builtin::anthropic(),
             ModelFallbackPolicy::default(),
             auth_test_support::vault_only_credential_source(),
             SteeringHub::for_tests(),
@@ -2311,7 +2303,10 @@ reasoning = false
                 .get(definition.name)
                 .expect("shared Fabro run tool should be registered");
             assert_eq!(registered.definition.description, definition.description);
-            assert_eq!(registered.definition.parameters, definition.parameters);
+            assert_eq!(
+                fabro_agent::tool_registry::ToolDefinitionExt::parameters(&registered.definition),
+                &definition.parameters
+            );
         }
     }
 
@@ -2962,9 +2957,9 @@ reasoning = false
     fn build_profile_can_register_subagent_tools() {
         let mut profile = AgentProfileBuilder::new(
             AgentProfileKind::Anthropic,
-            ProviderId::anthropic(),
+            builtin::anthropic(),
             "claude-opus-4-6",
-            Arc::new(Catalog::from_builtin().unwrap()),
+            Arc::new(test_catalog()),
         )
         .build();
         let supervisor = SubAgentSupervisor::new(1);
@@ -3012,7 +3007,7 @@ reasoning = false
         // Parent turn 1: spawn a subagent.
         let parent_spawn = server.mock(|when, then| {
             when.method(POST)
-                .path("/chat/completions")
+                .path("/v1/chat/completions")
                 .body_includes("PARENT_PROMPT_MARKER")
                 .body_excludes(r#""role":"tool""#);
             then.status(200)
@@ -3027,7 +3022,7 @@ reasoning = false
         // while the child keeps running in the background.
         let parent_final = server.mock(|when, then| {
             when.method(POST)
-                .path("/chat/completions")
+                .path("/v1/chat/completions")
                 .body_includes("call_spawn_helper");
             then.status(200)
                 .header("content-type", "text/event-stream")
@@ -3036,7 +3031,7 @@ reasoning = false
         // Child turn 1: the child session uses a tool.
         let child_read = server.mock(|when, then| {
             when.method(POST)
-                .path("/chat/completions")
+                .path("/v1/chat/completions")
                 .body_includes("CHILD_TASK_MARKER")
                 .body_excludes("PARENT_PROMPT_MARKER")
                 .body_excludes(r#""role":"tool""#);
@@ -3051,7 +3046,7 @@ reasoning = false
         // Child turn 2: the tool result is back; the child completes.
         let child_final = server.mock(|when, then| {
             when.method(POST)
-                .path("/chat/completions")
+                .path("/v1/chat/completions")
                 .body_includes("call_child_read");
             then.status(200)
                 .header("content-type", "text/event-stream")
@@ -3111,79 +3106,44 @@ reasoning = false
 
     #[test]
     fn api_backend_provider_pin_wins_over_priority_selection() {
-        let settings: LlmCatalogSettings = toml::from_str(
-            r"
-[providers.openrouter]
-enabled = true
-",
-        )
-        .unwrap();
         let backend = AgentApiBackend::new_with_catalog(
             "gpt-5.4".to_string(),
-            ProviderId::from("openrouter"),
+            ProviderId::new("openrouter"),
             ModelFallbackPolicy::default(),
             auth_test_support::vault_only_credential_source(),
             SteeringHub::for_tests(),
-            Arc::new(Catalog::from_builtin_with_overrides(&settings).unwrap()),
+            Arc::new(test_catalog_with_overlay(OPENROUTER_ENABLED)),
         );
 
         let provider = backend.resolve_provider_context("gpt-5.4", None).unwrap();
 
-        assert_eq!(provider.provider_id, ProviderId::from("openrouter"));
+        assert_eq!(provider.provider_id, ProviderId::new("openrouter"));
     }
 
     #[test]
     fn api_backend_node_provider_attr_overrides_backend_pin() {
         let backend = AgentApiBackend::new_with_catalog(
             "gpt-5.4".to_string(),
-            ProviderId::from("openrouter"),
+            ProviderId::new("openrouter"),
             ModelFallbackPolicy::default(),
             auth_test_support::vault_only_credential_source(),
             SteeringHub::for_tests(),
-            Arc::new(Catalog::from_builtin().unwrap()),
+            Arc::new(test_catalog()),
         );
 
         let provider = backend
             .resolve_provider_context("gpt-5.4", Some("openai"))
             .unwrap();
 
-        assert_eq!(provider.provider_id, ProviderId::openai());
+        assert_eq!(provider.provider_id, builtin::openai());
     }
 
     #[test]
     fn api_backend_resolves_custom_catalog_provider_profile() {
-        let settings: LlmCatalogSettings = toml::from_str(
-            r#"
-[providers.acme]
-adapter = "openai_compatible"
-agent_profile = "openai"
-base_url = "https://api.acme.test/v1"
-
-[providers.acme.auth]
-credentials = ["env:ACME_API_KEY"]
-
-[models.acme-llama]
-provider = "acme"
-display_name = "Acme Llama"
-family = "llama"
-training = "2026-01"
-default = true
-
-[models.acme-llama.limits]
-context_window = 131072
-max_output = 8192
-
-[models.acme-llama.features]
-tools = true
-vision = false
-reasoning = false
-"#,
-        )
-        .unwrap();
-        let catalog = Arc::new(Catalog::from_builtin_with_overrides(&settings).unwrap());
+        let catalog = Arc::new(test_catalog_with_overlay(ACME_LLAMA_OVERLAY));
         let backend = AgentApiBackend::new_with_catalog(
             "acme-llama".to_string(),
-            ProviderId::from("acme"),
+            ProviderId::new("acme"),
             ModelFallbackPolicy::default(),
             auth_test_support::vault_only_credential_source(),
             SteeringHub::for_tests(),
@@ -3194,43 +3154,16 @@ reasoning = false
             .resolve_provider_context("acme-llama", None)
             .unwrap();
 
-        assert_eq!(provider.provider_id, ProviderId::from("acme"));
+        assert_eq!(provider.provider_id, ProviderId::new("acme"));
         assert_eq!(provider.profile_kind, AgentProfileKind::OpenAi);
     }
 
     #[test]
     fn api_backend_resolves_model_agent_profile_override() {
-        let settings: LlmCatalogSettings = toml::from_str(
-            r#"
-[providers.acme]
-adapter = "openai_compatible"
-agent_profile = "openai"
-base_url = "https://api.acme.test/v1"
-
-[models.acme-claude]
-provider = "acme"
-display_name = "Acme Claude"
-family = "claude"
-training = "2026-01"
-default = true
-agent_profile = "anthropic"
-aliases = ["ac"]
-
-[models.acme-claude.limits]
-context_window = 131072
-max_output = 8192
-
-[models.acme-claude.features]
-tools = true
-vision = false
-reasoning = false
-"#,
-        )
-        .unwrap();
-        let catalog = Arc::new(Catalog::from_builtin_with_overrides(&settings).unwrap());
+        let catalog = Arc::new(test_catalog_with_overlay(ACME_CLAUDE_OVERLAY));
         let backend = AgentApiBackend::new_with_catalog(
             "acme-claude".to_string(),
-            ProviderId::from("acme"),
+            ProviderId::new("acme"),
             ModelFallbackPolicy::default(),
             auth_test_support::vault_only_credential_source(),
             SteeringHub::for_tests(),
@@ -3239,7 +3172,7 @@ reasoning = false
 
         let provider = backend.resolve_provider_context("ac", None).unwrap();
 
-        assert_eq!(provider.provider_id, ProviderId::from("acme"));
+        assert_eq!(provider.provider_id, ProviderId::new("acme"));
         assert_eq!(provider.profile_kind, AgentProfileKind::Anthropic);
     }
 
@@ -3247,34 +3180,27 @@ reasoning = false
     fn api_backend_selects_claude5_profile_for_sonnet5() {
         let backend = AgentApiBackend::new_with_catalog(
             "claude-sonnet-5".to_string(),
-            ProviderId::anthropic(),
+            builtin::anthropic(),
             ModelFallbackPolicy::default(),
             auth_test_support::vault_only_credential_source(),
             SteeringHub::for_tests(),
-            Arc::new(Catalog::from_builtin().unwrap()),
+            Arc::new(test_catalog()),
         );
 
         let provider = backend
             .resolve_provider_context("claude-sonnet-5", None)
             .unwrap();
 
-        assert_eq!(provider.provider_id, ProviderId::anthropic());
+        assert_eq!(provider.provider_id, builtin::anthropic());
         assert_eq!(provider.profile_kind, AgentProfileKind::Claude5);
     }
 
     #[test]
     fn api_backend_preserves_default_provider_for_legacy_model_identifier() {
-        let settings: LlmCatalogSettings = toml::from_str(
-            r"
-[providers.openrouter]
-enabled = true
-",
-        )
-        .unwrap();
-        let catalog = Arc::new(Catalog::from_builtin_with_overrides(&settings).unwrap());
+        let catalog = Arc::new(test_catalog_with_overlay(OPENROUTER_ENABLED));
         let backend = AgentApiBackend::new_with_catalog(
             "openai/gpt-5.4".to_string(),
-            ProviderId::from("openrouter"),
+            ProviderId::new("openrouter"),
             ModelFallbackPolicy::default(),
             auth_test_support::vault_only_credential_source(),
             SteeringHub::for_tests(),
@@ -3285,7 +3211,7 @@ enabled = true
             .resolve_provider_context("openai/gpt-5.4", None)
             .unwrap();
 
-        assert_eq!(provider.provider_id, ProviderId::from("openrouter"));
+        assert_eq!(provider.provider_id, ProviderId::new("openrouter"));
         assert_eq!(provider.profile_kind, AgentProfileKind::OpenAi);
     }
 
@@ -3293,7 +3219,7 @@ enabled = true
     fn run_model_controls_apply_when_node_omits_controls() {
         let backend = AgentApiBackend::new(
             "gpt-5.4".to_string(),
-            ProviderId::openai(),
+            builtin::openai(),
             ModelFallbackPolicy::default(),
             auth_test_support::vault_only_credential_source(),
             SteeringHub::for_tests(),
@@ -3314,7 +3240,7 @@ enabled = true
     fn node_controls_override_run_model_controls() {
         let backend = AgentApiBackend::new(
             "gpt-5.4".to_string(),
-            ProviderId::openai(),
+            builtin::openai(),
             ModelFallbackPolicy::default(),
             auth_test_support::vault_only_credential_source(),
             SteeringHub::for_tests(),
@@ -3330,20 +3256,20 @@ enabled = true
         );
         node.attrs.insert(
             "speed".to_string(),
-            fabro_graphviz::graph::AttrValue::String("standard".to_string()),
+            fabro_graphviz::graph::AttrValue::String("balanced".to_string()),
         );
 
         let controls = backend.resolve_effective_request_controls(&node).unwrap();
 
         assert_eq!(controls.reasoning_effort, Some(ReasoningEffort::High));
-        assert_eq!(controls.speed, Some(Speed::Standard));
+        assert_eq!(controls.speed, Some(Speed::Balanced));
     }
 
     #[test]
     fn omitted_reasoning_effort_stays_unset() {
         let backend = AgentApiBackend::new(
             "gpt-5.4".to_string(),
-            ProviderId::openai(),
+            builtin::openai(),
             ModelFallbackPolicy::default(),
             auth_test_support::vault_only_credential_source(),
             SteeringHub::for_tests(),
@@ -3411,7 +3337,7 @@ enabled = true
         ]));
         let backend = AgentApiBackend::new_with_catalog(
             "claude-fable-5".to_string(),
-            ProviderId::anthropic(),
+            builtin::anthropic(),
             policy,
             auth_test_support::vault_only_credential_source(),
             SteeringHub::for_tests(),
@@ -3419,7 +3345,7 @@ enabled = true
         );
         let (mut plan, notices) = backend.fallback_plan(
             "claude-fable-5",
-            &ProviderId::anthropic(),
+            &builtin::anthropic(),
             EffectiveRequestControls::default(),
         );
 
@@ -3454,7 +3380,7 @@ enabled = true
             .unwrap();
         let backend = AgentApiBackend::new(
             "claude-opus-4-6".to_string(),
-            ProviderId::anthropic(),
+            builtin::anthropic(),
             ModelFallbackPolicy::default(),
             Arc::new(VaultCredentialSource::with_env_lookup(
                 Arc::new(AsyncRwLock::new(vault)),
@@ -3463,11 +3389,14 @@ enabled = true
             SteeringHub::for_tests(),
         );
 
-        let client = Client::from_source(backend.source.as_ref(), Arc::clone(&backend.catalog))
+        let client = build_llm_client(&backend.catalog, Arc::clone(&backend.source))
             .await
             .unwrap();
 
-        assert_eq!(client.provider_names(), vec!["anthropic"]);
+        assert_eq!(
+            client.available_providers().iter().collect::<Vec<_>>(),
+            vec![&builtin::anthropic()]
+        );
     }
 
     #[tokio::test]
@@ -3479,24 +3408,24 @@ enabled = true
         )]));
         let backend = AgentApiBackend::new(
             "claude-fable-5".to_string(),
-            ProviderId::anthropic(),
+            builtin::anthropic(),
             fallback_policy,
             auth_test_support::vault_only_credential_source(),
             SteeringHub::for_tests(),
         );
-        let mut providers = HashMap::new();
-        providers.insert(
-            "anthropic".to_string(),
-            Arc::new(RefusalTestProvider) as Arc<dyn ProviderAdapter>,
+        let client = client_with_adapters(
+            vec![
+                (
+                    "anthropic",
+                    Arc::new(RefusalTestProvider::new()) as Arc<dyn ProviderAdapter>,
+                ),
+                (
+                    "openai",
+                    Arc::new(TextTestProvider::new("fallback ok")) as Arc<dyn ProviderAdapter>,
+                ),
+            ],
+            ClientOptions::default(),
         );
-        providers.insert(
-            "openai".to_string(),
-            Arc::new(TextTestProvider {
-                provider: "openai",
-                text:     "fallback ok",
-            }) as Arc<dyn ProviderAdapter>,
-        );
-        let client = Client::new(providers, Some("anthropic".to_string()), Vec::new());
         let node = Node::new("ask");
         let context = Context::new();
         let stage_scope = StageScope::for_handler(&context, &node.id);
@@ -3508,25 +3437,15 @@ enabled = true
                 *emitted_failover_for_listener.lock().unwrap() = Some(props.clone());
             }
         });
-        let request = Request {
-            model:            "claude-fable-5".to_string(),
-            messages:         vec![Message::user("Hello")],
-            provider:         Some("anthropic".to_string()),
-            tools:            None,
-            tool_choice:      None,
-            response_format:  None,
-            temperature:      None,
-            top_p:            None,
-            max_tokens:       Some(128),
-            stop_sequences:   None,
-            reasoning_effort: None,
-            speed:            None,
-            metadata:         None,
-            provider_options: None,
-        };
+        let request = Request::builder()
+            .model("anthropic/claude-fable-5")
+            .user("Hello")
+            .max_output_tokens(128)
+            .build()
+            .unwrap();
         let (mut fallback_plan, notices) = backend.fallback_plan(
             "claude-fable-5",
-            &ProviderId::anthropic(),
+            &builtin::anthropic(),
             EffectiveRequestControls::default(),
         );
         assert!(notices.is_empty());
@@ -3544,8 +3463,8 @@ enabled = true
             .unwrap();
 
         assert_eq!(completion.response.text(), "fallback ok");
-        assert_eq!(completion.model.provider, ProviderId::openai());
-        assert_eq!(completion.model.model_id, "gpt-5.5");
+        assert_eq!(completion.model.provider, builtin::openai());
+        assert_eq!(completion.model.model_id.as_str(), "gpt-5.5");
         let failover = emitted_failover
             .lock()
             .unwrap()
@@ -3567,7 +3486,7 @@ enabled = true
     async fn explicit_provider_one_shot_stays_on_fallback_during_output_repair() {
         let server = MockServer::start();
         let primary_failure = server.mock(|when, then| {
-            when.method(POST).path("/primary/chat/completions");
+            when.method(POST).path("/primary/v1/chat/completions");
             then.status(401)
                 .header("content-type", "application/json")
                 .json_body(serde_json::json!({
@@ -3579,7 +3498,7 @@ enabled = true
         });
         let fallback_response = server.mock(|when, then| {
             when.method(POST)
-                .path("/fallback/chat/completions")
+                .path("/fallback/v1/chat/completions")
                 .body_excludes(r#""role":"assistant""#);
             then.status(200)
                 .header("content-type", "application/json")
@@ -3587,7 +3506,7 @@ enabled = true
         });
         let fallback_repair = server.mock(|when, then| {
             when.method(POST)
-                .path("/fallback/chat/completions")
+                .path("/fallback/v1/chat/completions")
                 .body_includes(r#""role":"assistant""#)
                 .body_includes("not json");
             then.status(200)
@@ -3638,7 +3557,7 @@ enabled = true
         let server = MockServer::start();
         let first = server.mock(|when, then| {
             when.method(POST)
-                .path("/chat/completions")
+                .path("/v1/chat/completions")
                 .body_includes(r#""type":"json_schema""#)
                 .body_excludes(r#""role":"assistant""#);
             then.status(200)
@@ -3651,7 +3570,7 @@ enabled = true
         });
         let repair = server.mock(|when, then| {
             when.method(POST)
-                .path("/chat/completions")
+                .path("/v1/chat/completions")
                 .body_includes(r#""type":"json_schema""#)
                 .body_includes(r#""role":"assistant""#)
                 .body_includes("not json")
@@ -3697,8 +3616,8 @@ enabled = true
         };
         assert_eq!(text, r#"{"passed":true}"#);
         let usage = usage.expect("usage should be aggregated");
-        assert_eq!(usage.tokens().input_tokens, 21);
-        assert_eq!(usage.tokens().output_tokens, 3);
+        assert_eq!(usage.tokens().input, 21);
+        assert_eq!(usage.tokens().output, 3);
         assert_eq!(usage.total_usd_micros, Some(100_000));
     }
 
@@ -3707,7 +3626,7 @@ enabled = true
         let server = MockServer::start();
         let first = server.mock(|when, then| {
             when.method(POST)
-                .path("/chat/completions")
+                .path("/v1/chat/completions")
                 .body_includes(r#""stream":true"#)
                 .body_excludes(r#""role":"assistant""#);
             then.status(200)
@@ -3716,7 +3635,7 @@ enabled = true
         });
         let repair = server.mock(|when, then| {
             when.method(POST)
-                .path("/chat/completions")
+                .path("/v1/chat/completions")
                 .body_includes(r#""stream":true"#)
                 .body_includes(r#""role":"assistant""#)
                 .body_includes("not json")
@@ -3760,8 +3679,8 @@ enabled = true
         };
         assert_eq!(text, r#"{"passed":true}"#);
         let usage = usage.expect("usage should be aggregated");
-        assert_eq!(usage.tokens().input_tokens, 41);
-        assert_eq!(usage.tokens().output_tokens, 7);
+        assert_eq!(usage.tokens().input, 41);
+        assert_eq!(usage.tokens().output, 7);
     }
 
     #[tokio::test]
@@ -3769,7 +3688,7 @@ enabled = true
         let server = MockServer::start();
         let first = server.mock(|when, then| {
             when.method(POST)
-                .path("/chat/completions")
+                .path("/v1/chat/completions")
                 .body_includes(r#""stream":true"#)
                 .body_excludes(r#""role":"assistant""#);
             then.status(200)
@@ -3778,7 +3697,7 @@ enabled = true
         });
         let first_repair = server.mock(|when, then| {
             when.method(POST)
-                .path("/chat/completions")
+                .path("/v1/chat/completions")
                 .body_includes("JSON Pointer `/findings/0/rationale`")
                 .body_excludes("unchanged from your previous repair");
             then.status(200)
@@ -3787,7 +3706,7 @@ enabled = true
         });
         let second_repair = server.mock(|when, then| {
             when.method(POST)
-                .path("/chat/completions")
+                .path("/v1/chat/completions")
                 .body_includes("JSON Pointer `/findings/0/rationale`")
                 .body_includes("unchanged from your previous repair");
             then.status(200)
@@ -3839,7 +3758,7 @@ enabled = true
         let server = MockServer::start();
         let primary_response = server.mock(|when, then| {
             when.method(POST)
-                .path("/primary/chat/completions")
+                .path("/primary/v1/chat/completions")
                 .body_includes(r#""stream":true"#)
                 .body_excludes(r#""role":"assistant""#);
             then.status(200)
@@ -3848,7 +3767,7 @@ enabled = true
         });
         let failed_repair = server.mock(|when, then| {
             when.method(POST)
-                .path("/primary/chat/completions")
+                .path("/primary/v1/chat/completions")
                 .body_includes(r#""role":"assistant""#)
                 .body_includes("not json");
             then.status(401)
@@ -3862,7 +3781,7 @@ enabled = true
         });
         let fallback_response = server.mock(|when, then| {
             when.method(POST)
-                .path("/fallback/chat/completions")
+                .path("/fallback/v1/chat/completions")
                 .body_includes(r#""stream":true"#)
                 .body_excludes(r#""role":"assistant""#);
             then.status(200)
@@ -3910,7 +3829,7 @@ enabled = true
         let server = MockServer::start();
         let tool_call = server.mock(|when, then| {
             when.method(POST)
-                .path("/chat/completions")
+                .path("/v1/chat/completions")
                 .body_includes(r#""stream":true"#)
                 .body_excludes(r#""role":"tool""#);
             then.status(200)
@@ -3923,7 +3842,7 @@ enabled = true
         });
         let completion = server.mock(|when, then| {
             when.method(POST)
-                .path("/chat/completions")
+                .path("/v1/chat/completions")
                 .body_includes("call_web_search");
             then.status(200)
                 .header("content-type", "text/event-stream")
@@ -3993,7 +3912,7 @@ enabled = true
     async fn api_backend_shutdown_closes_cached_sessions_once() {
         let backend = AgentApiBackend::new(
             "gpt-5.4".to_string(),
-            ProviderId::openai(),
+            builtin::openai(),
             ModelFallbackPolicy::default(),
             auth_test_support::vault_only_credential_source(),
             SteeringHub::for_tests(),
@@ -4008,12 +3927,13 @@ enabled = true
                 .push(event.event_name().to_string());
         });
 
-        let mut providers = HashMap::new();
-        providers.insert(
-            "openai".to_string(),
-            Arc::new(ShutdownTestProvider) as Arc<dyn ProviderAdapter>,
+        let client = client_with_adapters(
+            vec![(
+                "openai",
+                Arc::new(ShutdownTestProvider::new()) as Arc<dyn ProviderAdapter>,
+            )],
+            ClientOptions::default(),
         );
-        let client = Client::new(providers, Some("openai".to_string()), Vec::new());
         let session = Session::new(
             client,
             Arc::new(ShutdownTestProfile::new()),
@@ -4025,7 +3945,7 @@ enabled = true
         );
         let (fallback_plan, notices) = backend.fallback_plan(
             "gpt-5.4",
-            &ProviderId::openai(),
+            &builtin::openai(),
             EffectiveRequestControls::default(),
         );
         assert!(notices.is_empty());
@@ -4051,12 +3971,13 @@ enabled = true
 
     #[tokio::test]
     async fn session_end_barrier_preserves_child_close_ordering() {
-        let mut providers = HashMap::new();
-        providers.insert(
-            "openai".to_string(),
-            Arc::new(ShutdownTestProvider) as Arc<dyn ProviderAdapter>,
+        let client = client_with_adapters(
+            vec![(
+                "openai",
+                Arc::new(ShutdownTestProvider::new()) as Arc<dyn ProviderAdapter>,
+            )],
+            ClientOptions::default(),
         );
-        let client = Client::new(providers, Some("openai".to_string()), Vec::new());
         let mut session = Session::new(
             client,
             Arc::new(ShutdownTestProfile::new()),
@@ -4113,47 +4034,90 @@ enabled = true
 
     // --- Bridge guard tests ---
 
-    fn failover_eligible_llm_error() -> LlmError {
-        LlmError::Network {
-            message: "boom".into(),
-            source:  None,
-        }
+    fn failover_eligible_llm_error() -> ErrorData {
+        ErrorData::from(
+            fabro_llm::Error::new(ErrorKind::Network, "boom")
+                .with_provider(builtin::openai())
+                .with_retry(RetryClassification::Safe),
+        )
     }
 
-    fn non_failover_llm_error() -> LlmError {
-        LlmError::Provider {
-            kind:   ProviderErrorKind::InvalidRequest,
-            detail: Box::new(ProviderErrorDetail {
-                message:     "bad key".into(),
-                provider:    "openai".into(),
-                status_code: Some(401),
-                error_code:  None,
-                retry_after: None,
-                raw:         None,
-            }),
-        }
+    fn non_failover_llm_error() -> ErrorData {
+        ErrorData::from(
+            fabro_llm::Error::new(ErrorKind::InvalidRequest, "bad key")
+                .with_provider(builtin::openai())
+                .with_status(401),
+        )
     }
 
-    fn refusal_llm_error() -> LlmError {
-        LlmError::Provider {
-            kind:   ProviderErrorKind::ContentFilter,
-            detail: Box::new(ProviderErrorDetail {
-                message:     "claude-fable-5 refused the request".into(),
-                provider:    "anthropic".into(),
-                status_code: None,
-                error_code:  Some("refusal".into()),
-                retry_after: None,
-                raw:         Some(serde_json::json!({
-                    "stop_reason": "refusal",
-                    "stop_details": {
-                        "type": "refusal",
-                        "category": "cyber",
-                        "explanation": "This request was declined."
-                    }
-                })),
-            }),
-        }
+    fn refusal_llm_error() -> fabro_llm::Error {
+        fabro_llm::Error::new(
+            ErrorKind::ContentFilter,
+            "claude-fable-5 refused the request",
+        )
+        .with_provider(builtin::anthropic())
+        .with_provider_code("refusal")
+        .with_raw_data(serde_json::json!({
+            "stop_reason": "refusal",
+            "stop_details": {
+                "type": "refusal",
+                "category": "cyber",
+                "explanation": "This request was declined."
+            }
+        }))
     }
+
+    const OPENROUTER_ENABLED: &str = "[providers.openrouter]\nenabled = true\n";
+
+    /// An operator-defined OpenAI-compatible provider whose models take the
+    /// provider's `openai` agent profile.
+    const ACME_LLAMA_OVERLAY: &str = r#"
+[providers.acme]
+display_name = "Acme"
+adapter = "openai-compatible"
+codec = "openai-chat"
+base_url = "https://api.acme.test/v1"
+auth = { type = "bearer" }
+default_model = "acme-llama"
+
+[providers.acme.metadata.agent]
+profile = "openai"
+
+[providers.acme.models.acme-llama]
+display_name = "Acme Llama"
+api_model = "acme-llama"
+limits = { context_tokens = 131072, max_output_tokens = 8192 }
+capabilities = { text = true, tools = true }
+family = "llama"
+training_cutoff = "2026-01"
+
+"#;
+
+    /// The same provider serving a Claude model that overrides the profile.
+    const ACME_CLAUDE_OVERLAY: &str = r#"
+[providers.acme]
+display_name = "Acme"
+adapter = "openai-compatible"
+codec = "openai-chat"
+base_url = "https://api.acme.test/v1"
+auth = { type = "bearer" }
+default_model = "acme-claude"
+
+[providers.acme.metadata.agent]
+profile = "openai"
+
+[providers.acme.models.acme-claude]
+display_name = "Acme Claude"
+aliases = ["ac"]
+api_model = "acme-claude"
+limits = { context_tokens = 131072, max_output_tokens = 8192 }
+capabilities = { text = true, tools = true }
+family = "claude"
+training_cutoff = "2026-01"
+
+[providers.acme.models.acme-claude.metadata.agent]
+profile = "anthropic"
+"#;
 
     #[tokio::test]
     async fn spawn_bridge_task_sets_cancelled_and_cancels_session_token() {
@@ -4308,7 +4272,7 @@ enabled = true
 
     #[test]
     fn classify_failover_eligible_llm_returns_failover_when_allowed() {
-        let err = fabro_agent::Error::Llm(failover_eligible_llm_error());
+        let err = fabro_agent::Error::from(failover_eligible_llm_error());
         assert!(matches!(
             classify_agent_error(err, true),
             AgentApiErrorDisposition::FailoverEligible(_)
@@ -4317,7 +4281,7 @@ enabled = true
 
     #[test]
     fn classify_failover_eligible_llm_returns_terminal_when_not_allowed() {
-        let err = fabro_agent::Error::Llm(failover_eligible_llm_error());
+        let err = fabro_agent::Error::from(failover_eligible_llm_error());
         match classify_agent_error(err, false) {
             AgentApiErrorDisposition::Terminal(Error::Llm(_)) => {}
             _ => panic!("expected Terminal(Error::Llm) when failover disallowed"),
@@ -4326,7 +4290,7 @@ enabled = true
 
     #[test]
     fn classify_non_failover_eligible_llm_is_terminal_llm() {
-        let err = fabro_agent::Error::Llm(non_failover_llm_error());
+        let err = fabro_agent::Error::from(non_failover_llm_error());
         match classify_agent_error(err, true) {
             AgentApiErrorDisposition::Terminal(Error::Llm(_)) => {}
             _ => panic!("expected Terminal(Error::Llm) for non-failover-eligible LLM error"),
@@ -4335,7 +4299,7 @@ enabled = true
 
     #[test]
     fn classify_refusal_llm_returns_failover_when_allowed() {
-        let err = fabro_agent::Error::Llm(refusal_llm_error());
+        let err = fabro_agent::Error::from(refusal_llm_error());
         assert!(matches!(
             classify_agent_error(err, true),
             AgentApiErrorDisposition::FailoverEligible(_)
@@ -4344,7 +4308,7 @@ enabled = true
 
     #[test]
     fn classify_refusal_llm_returns_terminal_when_not_allowed() {
-        let err = fabro_agent::Error::Llm(refusal_llm_error());
+        let err = fabro_agent::Error::from(refusal_llm_error());
         match classify_agent_error(err, false) {
             AgentApiErrorDisposition::Terminal(Error::Llm(llm_err)) => {
                 assert!(llm_err.to_string().contains("claude-fable-5 refused"));

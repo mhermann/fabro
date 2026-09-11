@@ -27,8 +27,8 @@ anyhow.workspace = true
 fabro-auth = { path = "../../foundation/fabro-auth" }
 fabro-config = { path = "../../foundation/fabro-config", features = ["clap"] }
 fabro-types = { path = "../../foundation/fabro-types", features = ["clap"] }
+lithos-llm = { workspace = true, features = ["runtime"] }
 fabro-llm = { path = "../fabro-llm" }
-fabro-model = { path = "../../foundation/fabro-model" }
 fabro-mcp = { path = "../fabro-mcp" }
 fabro-sandbox = { path = "../fabro-sandbox" }
 fabro-static.workspace = true
@@ -60,6 +60,7 @@ libc = "0.2"
 
 [dev-dependencies]
 fabro-auth = { path = "../../foundation/fabro-auth", features = ["test-support"] }
+fabro-llm = { path = "../fabro-llm", features = ["test-support"] }
 insta.workspace = true
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = "3"

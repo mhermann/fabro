@@ -7,8 +7,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use fabro_llm::types::ToolDefinition;
 use fabro_util::error as util_error;
+use lithos_llm::types::{ToolDefinition, ToolDefinitionKind};
 use serde_json::Value;
 use tokio::time;
 
@@ -26,19 +26,16 @@ fn definition(
     description: impl Into<String>,
     parameters: Value,
 ) -> ToolDefinition {
-    ToolDefinition {
-        name: tool.canonical_name().to_string(),
-        description: description.into(),
-        parameters,
-    }
+    ToolDefinition::function(tool.canonical_name(), description, parameters)
 }
 
 /// Reject unknown top-level fields while retaining a shared executor.
 #[must_use]
 pub(crate) fn strict_object_tool(mut tool: RegisteredTool) -> RegisteredTool {
-    let object = tool
-        .definition
-        .parameters
+    let ToolDefinitionKind::Function { input_schema } = &mut tool.definition.kind else {
+        panic!("native JSON-schema tools should use a function definition");
+    };
+    let object = input_schema
         .as_object_mut()
         .expect("native JSON-schema tools should use an object schema");
     object.insert("additionalProperties".to_string(), Value::Bool(false));
@@ -469,9 +466,10 @@ mod tests {
     use crate::todo_tools::{
         make_task_create_tool, make_task_get_tool, make_task_list_tool, make_task_update_tool,
     };
+    use crate::tool_registry::ToolDefinitionExt;
 
     fn property_names(tool: &RegisteredTool) -> BTreeSet<&str> {
-        tool.definition.parameters["properties"]
+        tool.definition.parameters()["properties"]
             .as_object()
             .unwrap()
             .keys()
@@ -480,7 +478,7 @@ mod tests {
     }
 
     fn required_names(tool: &RegisteredTool) -> BTreeSet<&str> {
-        tool.definition.parameters["required"]
+        tool.definition.parameters()["required"]
             .as_array()
             .map(|required| {
                 required
@@ -492,9 +490,9 @@ mod tests {
     }
 
     fn assert_schema(tool: &RegisteredTool, properties: &[&str], required: &[&str]) {
-        assert_eq!(tool.definition.parameters["type"], "object");
+        assert_eq!(tool.definition.parameters()["type"], "object");
         assert_eq!(
-            tool.definition.parameters["additionalProperties"],
+            tool.definition.parameters()["additionalProperties"],
             Value::Bool(false)
         );
         assert_eq!(property_names(tool), properties.iter().copied().collect());
@@ -515,7 +513,7 @@ mod tests {
 
     #[test]
     fn core_adapter_schemas_match_the_claude5_contract() {
-        let options = NativeToolOptions::for_profile(fabro_model::AgentProfileKind::Claude5);
+        let options = NativeToolOptions::for_profile(fabro_types::AgentProfileKind::Claude5);
         assert_schema(&make_read_tool(), &["file_path", "limit", "offset"], &[
             "file_path",
         ]);
@@ -531,7 +529,7 @@ mod tests {
         let bash = make_bash_tool(&options);
         assert_schema(&bash, &["command", "description", "timeout"], &["command"]);
         assert_eq!(
-            bash.definition.parameters["properties"]["timeout"]["maximum"],
+            bash.definition.parameters()["properties"]["timeout"]["maximum"],
             600_000
         );
         assert_schema(&make_web_fetch_tool(None), &["prompt", "url"], &[

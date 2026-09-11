@@ -207,7 +207,7 @@ impl Concluded {
                 merge_strategy: pr_config.merge_strategy,
             }),
             run_store: &self.services.run_store,
-            llm_source: self.services.llm_source.as_ref(),
+            llm_source: Arc::clone(&self.services.llm_source),
             catalog: Arc::clone(&self.services.catalog),
             conclusion: Some(&self.conclusion),
             run_state: None,

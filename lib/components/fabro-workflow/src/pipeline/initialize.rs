@@ -4,13 +4,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fabro_agent::{Sandbox, ToolSecrets};
-use fabro_auth::{
-    CredentialSource, ExtraHeadersCredentialSource, VaultCredentialSource, auth_issue_message,
-};
+use fabro_auth::{ExtraHeadersCredentialSource, VaultCredentialSource};
 use fabro_github::token_source::InstallationTokenSource;
 use fabro_graphviz::graph;
 use fabro_hooks::{HookContext, HookDecision, HookEvent, HookExecutionContext, HookRunner};
-use fabro_model::Catalog;
+use fabro_llm::credentials::{CredentialProvider, readiness};
+use fabro_llm::lithos_catalog::Catalog;
 use fabro_sandbox::{
     GitSetupIntent, SandboxEventCallback, SandboxSpec, reconnect_for_run_with_callback, shell_quote,
 };
@@ -264,7 +263,7 @@ async fn build_registry(
     tool_env_provider: Arc<WorkflowToolEnvProvider>,
     github_token_refresh_managed: bool,
     graph: &graph::Graph,
-    llm_source: Arc<dyn CredentialSource>,
+    llm_source: Arc<dyn CredentialProvider>,
     catalog: Arc<Catalog>,
     tool_secrets: ToolSecrets,
     fabro_run_tools: Option<FabroRunToolServices>,
@@ -330,42 +329,34 @@ async fn build_registry(
         return Ok((build_llm_registry(), false));
     }
 
-    match llm_source.resolve(catalog.as_ref()).await {
-        Ok(result) if result.credentials.is_empty() => {
-            if graph_needs_llm {
-                let detail = (!result.auth_issues.is_empty()).then(|| {
-                    result
-                        .auth_issues
-                        .iter()
-                        .map(|(provider, issue)| auth_issue_message(provider, issue))
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                });
-                let prefix = detail.map_or_else(
-                    || "No LLM providers configured".to_string(),
-                    |detail| format!("No usable LLM providers configured: {detail}"),
-                );
-                return Err(Error::Precondition(format!(
-                    "{prefix}. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or pass --dry-run to simulate."
-                )));
-            }
-            Ok((build_no_backend(), false))
+    let result = readiness(catalog.enabled_providers(), llm_source.as_ref()).await;
+    if result.ready.is_empty() {
+        if graph_needs_llm {
+            let detail = (!result.issues.is_empty()).then(|| {
+                result
+                    .issues
+                    .iter()
+                    .map(|(_, issue)| issue.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            });
+            let prefix = detail.map_or_else(
+                || "No LLM providers configured".to_string(),
+                |detail| format!("No usable LLM providers configured: {detail}"),
+            );
+            return Err(Error::Precondition(format!(
+                "{prefix}. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or pass --dry-run to simulate."
+            )));
         }
-        Ok(_result) => Ok((build_llm_registry(), false)),
-        Err(e) => {
-            if graph_needs_llm {
-                return Err(Error::Precondition(format!(
-                    "Failed to initialize LLM client: {e}. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or pass --dry-run to simulate.",
-                )));
-            }
-            Ok((build_no_backend(), false))
-        }
+        return Ok((build_no_backend(), false));
     }
+    Ok((build_llm_registry(), false))
 }
 
 async fn tool_secrets_from_configured_sources(vault: &Arc<AsyncRwLock<Vault>>) -> ToolSecrets {
     let vault = vault.read().await;
     ToolSecrets {
+        searxng_url:          vault.get(EnvVars::SEARXNG_URL).map(str::to_string),
         brave_search_api_key: vault.get(EnvVars::BRAVE_SEARCH_API_KEY).map(str::to_string),
         venice_api_key:       vault.get(EnvVars::VENICE_API_KEY).map(str::to_string),
     }
@@ -383,7 +374,7 @@ const SESSION_ID_HEADER: &str = "x-session-id";
 fn build_llm_source(
     vault: Arc<AsyncRwLock<Vault>>,
     run_id: fabro_types::RunId,
-) -> Arc<dyn CredentialSource> {
+) -> Arc<dyn CredentialProvider> {
     Arc::new(ExtraHeadersCredentialSource::new(
         Arc::new(VaultCredentialSource::new(vault)),
         HashMap::from([(SESSION_ID_HEADER.to_string(), run_id.to_string())]),
@@ -837,7 +828,7 @@ mod tests {
     }
 
     fn test_catalog() -> Arc<Catalog> {
-        Arc::new(Catalog::from_builtin().expect("default catalog should build"))
+        Arc::new(fabro_llm::test_support::test_catalog())
     }
 
     fn memory_store() -> Arc<Database> {
@@ -968,7 +959,7 @@ mod tests {
             sandbox: SandboxSpec::Local { working_directory },
             llm: LlmSpec {
                 model:          "test-model".to_string(),
-                provider_id:    fabro_model::ProviderId::anthropic(),
+                provider_id:    lithos_llm::catalog::builtin::anthropic(),
                 fallbacks:      ModelFallbackPolicy::default(),
                 mcp_servers:    Vec::new(),
                 model_controls: RunModelControls::default(),
@@ -1160,18 +1151,16 @@ mod tests {
         assert_eq!(initialized.model, "test-model");
         assert_eq!(
             initialized.engine.run.provider_id,
-            fabro_model::ProviderId::anthropic()
+            lithos_llm::catalog::builtin::anthropic()
         );
         assert!(
-            initialized
-                .engine
-                .run
-                .llm_source
-                .resolve(&initialized.engine.run.catalog)
-                .await
-                .unwrap()
-                .credentials
-                .is_empty()
+            readiness(
+                initialized.engine.run.catalog.enabled_providers(),
+                initialized.engine.run.llm_source.as_ref(),
+            )
+            .await
+            .ready
+            .is_empty()
         );
     }
 
@@ -1289,7 +1278,7 @@ mod tests {
         let (_registry, effective_dry_run) = build_registry(
             &LlmSpec {
                 model:          "claude-opus-4-6".to_string(),
-                provider_id:    fabro_model::ProviderId::anthropic(),
+                provider_id:    lithos_llm::catalog::builtin::anthropic(),
                 fallbacks:      ModelFallbackPolicy::default(),
                 mcp_servers:    Vec::new(),
                 model_controls: RunModelControls::default(),
@@ -1321,17 +1310,22 @@ mod tests {
         let expected_session_id = run_id.to_string();
 
         let source = build_llm_source(vault, run_id);
-        let resolved = source.resolve(test_catalog().as_ref()).await.unwrap();
+        let catalog = test_catalog();
+        let resolved = readiness(catalog.enabled_providers(), source.as_ref()).await;
 
-        assert!(!resolved.credentials.is_empty());
-        for credential in &resolved.credentials {
-            assert_eq!(
-                credential
-                    .extra_headers
-                    .get(SESSION_ID_HEADER)
-                    .map(String::as_str),
-                Some(expected_session_id.as_str())
-            );
+        assert!(!resolved.ready.is_empty());
+        for provider in &resolved.ready {
+            let provider = catalog.provider(provider.as_str()).unwrap();
+            let credentials = source.credentials(provider).await.unwrap();
+            let fabro_llm::credentials::Credentials::Http(http) = credentials else {
+                panic!("vault credentials should be HTTP credentials");
+            };
+            let session_header = http
+                .extra_headers
+                .iter()
+                .find(|header| header.name == SESSION_ID_HEADER)
+                .map(|header| header.value.expose_secret());
+            assert_eq!(session_header, Some(expected_session_id.as_str()));
         }
     }
 
@@ -1411,7 +1405,7 @@ mod tests {
             },
             llm: LlmSpec {
                 model:          "fake-acp".to_string(),
-                provider_id:    fabro_model::ProviderId::openai(),
+                provider_id:    lithos_llm::catalog::builtin::openai(),
                 fallbacks:      ModelFallbackPolicy::default(),
                 mcp_servers:    Vec::new(),
                 model_controls: RunModelControls::default(),
@@ -1515,7 +1509,7 @@ mod tests {
             },
             llm:               LlmSpec {
                 model:          "test-model".to_string(),
-                provider_id:    fabro_model::ProviderId::anthropic(),
+                provider_id:    lithos_llm::catalog::builtin::anthropic(),
                 fallbacks:      ModelFallbackPolicy::default(),
                 mcp_servers:    Vec::new(),
                 model_controls: RunModelControls::default(),
@@ -1658,7 +1652,7 @@ mod tests {
             },
             llm: LlmSpec {
                 model:          "test-model".to_string(),
-                provider_id:    fabro_model::ProviderId::anthropic(),
+                provider_id:    lithos_llm::catalog::builtin::anthropic(),
                 fallbacks:      ModelFallbackPolicy::default(),
                 mcp_servers:    Vec::new(),
                 model_controls: RunModelControls::default(),

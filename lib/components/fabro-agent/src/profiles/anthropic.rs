@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use fabro_model::{AgentProfileKind, Catalog, ProviderId};
+use fabro_llm::lithos_catalog::Catalog;
+use fabro_types::AgentProfileKind;
+use lithos_llm::catalog::{ProviderId, builtin};
 
 use super::EnvContext;
 use crate::agent_profile::AgentProfile;
@@ -47,7 +49,7 @@ impl AnthropicProfile {
         Self {
             base: BaseProfile {
                 profile_kind: AgentProfileKind::Anthropic,
-                provider_id: ProviderId::anthropic(),
+                provider_id: builtin::anthropic(),
                 model: model.into(),
                 catalog: None,
                 registry,
@@ -101,19 +103,21 @@ impl AgentProfile for AnthropicProfile {
 mod tests {
     use std::sync::Arc;
 
+    use fabro_llm::test_support::test_catalog as fabro_test_catalog;
+
     use super::*;
     use crate::subagent::{SessionFactory, SubAgentSupervisor};
     use crate::test_support::MockSandbox;
 
     fn test_catalog() -> Arc<Catalog> {
-        Arc::new(Catalog::from_builtin().unwrap())
+        Arc::new(fabro_test_catalog())
     }
 
     #[test]
     fn anthropic_profile_identity() {
         let profile = AnthropicProfile::new("claude-sonnet-4-20250514");
         assert_eq!(profile.profile_kind(), AgentProfileKind::Anthropic);
-        assert_eq!(profile.provider_id(), ProviderId::anthropic());
+        assert_eq!(profile.provider_id(), builtin::anthropic());
         assert_eq!(profile.model(), "claude-sonnet-4-20250514");
     }
 
@@ -122,7 +126,7 @@ mod tests {
         let profile = AnthropicProfile::new("claude-opus-4-6").with_catalog(test_catalog());
         assert_eq!(profile.context_window_size(), 1_000_000);
 
-        let profile = AnthropicProfile::new("claude-sonnet-4-6").with_catalog(test_catalog());
+        let profile = AnthropicProfile::new("claude-sonnet-4.5").with_catalog(test_catalog());
         assert_eq!(profile.context_window_size(), 200_000);
     }
 

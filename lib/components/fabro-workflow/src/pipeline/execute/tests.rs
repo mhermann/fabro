@@ -87,13 +87,8 @@ fn test_run_id(label: &str) -> RunId {
     }
 }
 
-fn test_catalog() -> Arc<fabro_model::Catalog> {
-    Arc::new(
-        fabro_model::Catalog::from_builtin_with_overrides(
-            &fabro_model::catalog::LlmCatalogSettings::default(),
-        )
-        .expect("default catalog should build"),
-    )
+fn test_catalog() -> Arc<fabro_llm::lithos_catalog::Catalog> {
+    Arc::new(fabro_llm::test_support::test_catalog())
 }
 
 fn test_emitter(label: &str) -> Emitter {
@@ -271,7 +266,7 @@ async fn execute_test_run_with_options(
             },
             llm: LlmSpec {
                 model:          "test-model".to_string(),
-                provider_id:    fabro_model::ProviderId::anthropic(),
+                provider_id:    lithos_llm::catalog::builtin::anthropic(),
                 fallbacks:      ModelFallbackPolicy::default(),
                 mcp_servers:    Vec::new(),
                 model_controls: RunModelControls::default(),
@@ -332,7 +327,7 @@ async fn execute_runs_start_to_exit_and_returns_final_context() {
             },
             llm: LlmSpec {
                 model:          "test-model".to_string(),
-                provider_id:    fabro_model::ProviderId::anthropic(),
+                provider_id:    lithos_llm::catalog::builtin::anthropic(),
                 fallbacks:      ModelFallbackPolicy::default(),
                 mcp_servers:    Vec::new(),
                 model_controls: RunModelControls::default(),
@@ -474,7 +469,7 @@ async fn resumed_in_flight_node_starts_a_new_stage_execution() {
             },
             llm: LlmSpec {
                 model:          "test-model".to_string(),
-                provider_id:    fabro_model::ProviderId::anthropic(),
+                provider_id:    lithos_llm::catalog::builtin::anthropic(),
                 fallbacks:      ModelFallbackPolicy::default(),
                 mcp_servers:    Vec::new(),
                 model_controls: RunModelControls::default(),
@@ -589,7 +584,7 @@ async fn run_with_lifecycle(
             },
             llm: LlmSpec {
                 model:          "test-model".to_string(),
-                provider_id:    fabro_model::ProviderId::anthropic(),
+                provider_id:    lithos_llm::catalog::builtin::anthropic(),
                 fallbacks:      ModelFallbackPolicy::default(),
                 mcp_servers:    Vec::new(),
                 model_controls: RunModelControls::default(),

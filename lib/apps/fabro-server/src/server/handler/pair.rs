@@ -846,13 +846,13 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use chrono::{TimeZone, Utc};
-    use fabro_model::{ModelRef, ProviderId};
     use fabro_types::run_event::AgentMessageProps;
     use fabro_types::{
-        BilledTokenCounts, EventEnvelope, Graph, PairMessageId, RunEvent, StageId,
+        BilledTokenCounts, EventEnvelope, Graph, ModelRef, PairMessageId, RunEvent, StageId,
         WorkflowSettings, fixtures, test_support,
     };
     use fabro_workflow::event as workflow_event;
+    use lithos_llm::catalog::{ModelId, ProviderId};
     use tower::ServiceExt;
 
     use super::*;
@@ -881,11 +881,10 @@ mod tests {
                 Some(StageId::new("code", 1)),
                 EventBody::AgentMessage(AgentMessageProps {
                     text:            "I found the issue.".to_string(),
-                    model:           ModelRef {
-                        provider: ProviderId::new("openai"),
-                        model_id: "gpt-5.4".into(),
-                        speed:    None,
-                    },
+                    model:           ModelRef::new(
+                        ProviderId::new("openai"),
+                        ModelId::new("gpt-5.4"),
+                    ),
                     billing:         BilledTokenCounts::default(),
                     cost_source:     None,
                     tool_call_count: 0,
@@ -915,11 +914,10 @@ mod tests {
                     Some(StageId::new("other", 1)),
                     EventBody::AgentMessage(AgentMessageProps {
                         text:            "wrong stage".to_string(),
-                        model:           ModelRef {
-                            provider: ProviderId::new("openai"),
-                            model_id: "gpt-5.4".into(),
-                            speed:    None,
-                        },
+                        model:           ModelRef::new(
+                            ProviderId::new("openai"),
+                            ModelId::new("gpt-5.4"),
+                        ),
                         billing:         BilledTokenCounts::default(),
                         cost_source:     None,
                         tool_call_count: 0,

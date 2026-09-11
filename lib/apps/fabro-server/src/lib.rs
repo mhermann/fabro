@@ -60,4 +60,4 @@ mod worker_token;
 pub use error::{ApiError, Error, Result};
 pub use run_manifest::workflow_bundle_from_manifest;
 pub use server_secrets::process_env_snapshot;
-pub use startup::{migrate_startup_vault, validate_startup, validate_startup_configuration};
+pub use startup::{validate_startup, validate_startup_configuration};

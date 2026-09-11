@@ -445,9 +445,9 @@ mod tests {
     use std::time::Duration;
 
     use fabro_graphviz::graph::AttrValue;
-    use fabro_model::{ReasoningEffort, Speed};
     use fabro_store::{Database, RunDatabase, StageId};
     use fabro_types::{fixtures, test_support};
+    use lithos_llm::types::{ReasoningEffort, Speed};
     use object_store::memory::InMemory;
     use tempfile::TempDir;
 

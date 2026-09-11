@@ -12,8 +12,8 @@ use std::fmt::Write;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use fabro_llm::types::ToolDefinition;
 use fabro_types::{TodoListKind, TodoProjection, TodoStatus, TodoUpdatedProps};
+use lithos_llm::types::ToolDefinition;
 use serde_json::Value;
 use strum::{EnumString, IntoStaticStr};
 
@@ -151,12 +151,11 @@ fn reconcile_replacement_list(
 #[must_use]
 pub fn make_update_plan_tool(runtime: Arc<TodoRuntime>) -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "update_plan".into(),
-            description: "Update the multi-step plan for the current task. Submit the entire \
-                          plan; existing steps are reconciled by exact step text."
-                .into(),
-            parameters:  serde_json::json!({
+        definition: ToolDefinition::function(
+            "update_plan",
+            "Update the multi-step plan for the current task. Submit the entire \
+                          plan; existing steps are reconciled by exact step text.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "explanation": {
@@ -181,7 +180,7 @@ pub fn make_update_plan_tool(runtime: Arc<TodoRuntime>) -> RegisteredTool {
                 },
                 "required": ["plan"]
             }),
-        },
+        ),
         executor:   Arc::new(move |args, ctx| {
             let runtime = runtime.clone();
             Box::pin(async move {
@@ -298,16 +297,15 @@ fn render_kimi_todos<'a>(items: impl IntoIterator<Item = (TodoStatus, &'a str)>)
 /// same [`TodoRuntime`] backs it, so projections and events are unchanged.
 pub fn make_todo_list_tool(runtime: Arc<TodoRuntime>) -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "TodoList".into(),
-            description: "Maintain a structured TODO list for the current task. Use it \
+        definition: ToolDefinition::function(
+            "TodoList",
+            "Maintain a structured TODO list for the current task. Use it \
                           proactively for multi-step work. Pass `todos` to replace the entire \
                           list, omit `todos` to read the current list without changing it, and \
                           pass an empty array to clear it. Keep exactly one item `in_progress` \
                           while work is underway, and mark an item `done` as soon as it is \
-                          finished rather than batching completions at the end."
-                .into(),
-            parameters:  serde_json::json!({
+                          finished rather than batching completions at the end.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "todos": {
@@ -332,7 +330,7 @@ pub fn make_todo_list_tool(runtime: Arc<TodoRuntime>) -> RegisteredTool {
                     }
                 }
             }),
-        },
+        ),
         executor:   Arc::new(move |args, ctx| {
             let runtime = runtime.clone();
             Box::pin(async move {
@@ -449,10 +447,10 @@ fn format_task_details(todo: &TodoProjection) -> String {
 #[must_use]
 pub fn make_task_create_tool(runtime: Arc<TodoRuntime>) -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "TaskCreate".into(),
-            description: TASK_CREATE_DESCRIPTION.into(),
-            parameters:  serde_json::json!({
+        definition: ToolDefinition::function(
+            "TaskCreate",
+            TASK_CREATE_DESCRIPTION,
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "subject":     {"type": "string"},
@@ -462,7 +460,7 @@ pub fn make_task_create_tool(runtime: Arc<TodoRuntime>) -> RegisteredTool {
                 },
                 "required": ["subject", "description"]
             }),
-        },
+        ),
         executor:   Arc::new(move |args, ctx| {
             let runtime = runtime.clone();
             Box::pin(async move {
@@ -498,10 +496,10 @@ pub fn make_task_create_tool(runtime: Arc<TodoRuntime>) -> RegisteredTool {
 #[must_use]
 pub fn make_task_update_tool(runtime: Arc<TodoRuntime>) -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "TaskUpdate".into(),
-            description: TASK_UPDATE_DESCRIPTION.into(),
-            parameters:  serde_json::json!({
+        definition: ToolDefinition::function(
+            "TaskUpdate",
+            TASK_UPDATE_DESCRIPTION,
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "taskId":       {"type": "string"},
@@ -519,7 +517,7 @@ pub fn make_task_update_tool(runtime: Arc<TodoRuntime>) -> RegisteredTool {
                 },
                 "required": ["taskId"]
             }),
-        },
+        ),
         executor:   Arc::new(move |args, ctx| {
             let runtime = runtime.clone();
             Box::pin(async move {
@@ -567,17 +565,17 @@ pub fn make_task_update_tool(runtime: Arc<TodoRuntime>) -> RegisteredTool {
 #[must_use]
 pub fn make_task_get_tool(runtime: Arc<TodoRuntime>) -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "TaskGet".into(),
-            description: TASK_GET_DESCRIPTION.into(),
-            parameters:  serde_json::json!({
+        definition: ToolDefinition::function(
+            "TaskGet",
+            TASK_GET_DESCRIPTION,
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "taskId": {"type": "string"}
                 },
                 "required": ["taskId"]
             }),
-        },
+        ),
         executor:   Arc::new(move |args, ctx| {
             let runtime = runtime.clone();
             Box::pin(async move {
@@ -604,15 +602,15 @@ pub fn make_task_get_tool(runtime: Arc<TodoRuntime>) -> RegisteredTool {
 #[must_use]
 pub fn make_task_list_tool(runtime: Arc<TodoRuntime>) -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "TaskList".into(),
-            description: TASK_LIST_DESCRIPTION.into(),
-            parameters:  serde_json::json!({
+        definition: ToolDefinition::function(
+            "TaskList",
+            TASK_LIST_DESCRIPTION,
+            serde_json::json!({
                 "type": "object",
                 "properties": {},
                 "additionalProperties": false
             }),
-        },
+        ),
         executor:   Arc::new(move |_args, ctx| {
             let runtime = runtime.clone();
             Box::pin(async move {

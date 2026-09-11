@@ -74,18 +74,18 @@ fn is_task_reminder(content: &str) -> bool {
 mod tests {
     use std::time::SystemTime;
 
-    use fabro_llm::types::{TokenCounts, ToolCall};
+    use lithos_llm::types::{TokenCounts, ToolCall};
 
     use super::*;
     fn assistant(tool_name: Option<&str>) -> Message {
         let tool_calls = tool_name
-            .map(|name| vec![ToolCall::new("call_1", name, serde_json::json!({}))])
+            .map(|name| vec![ToolCall::function("call_1", name, serde_json::json!({}))])
             .unwrap_or_default();
         Message::Assistant {
             content: String::new(),
             tool_calls,
             provider_parts: Vec::new(),
-            usage: Box::<TokenCounts>::default(),
+            usage: TokenCounts::default(),
             response_id: "resp".into(),
             timestamp: SystemTime::now(),
         }

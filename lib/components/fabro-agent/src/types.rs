@@ -1,14 +1,14 @@
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
-use fabro_llm::Error as LlmError;
-use fabro_llm::types::{
-    ContentPart, Message as LlmMessage, Role, ThinkingData, TokenCounts, ToolCall, ToolResult,
-};
-use fabro_model::{CostSource, ModelRef};
+use fabro_llm::ErrorData;
 use fabro_types::{
-    CommandTermination, ExecOutputTail, LlmOutputKind, LlmRetryPhase, ReasoningOutput,
-    SessionMessage, StageContextWindowProjection,
+    CommandTermination, ExecOutputTail, LlmOutputKind, LlmRetryPhase, ModelRef, SessionMessage,
+    StageContextWindowProjection,
+};
+use lithos_llm::types::{
+    ContentPart, Cost, Message as LlmMessage, ReasoningOutput, Role, Speed, TokenCounts, ToolCall,
+    ToolResult,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -52,9 +52,9 @@ pub enum Message {
         /// Provider-specific content parts (e.g. `OpenAI` reasoning items,
         /// `Anthropic` thinking blocks with signatures) preserved for
         /// round-tripping. Reasoning/thinking text is stored here as
-        /// `ContentPart::Thinking`.
+        /// `ContentPart::Reasoning`.
         provider_parts: Vec<ContentPart>,
-        usage:          Box<TokenCounts>,
+        usage:          TokenCounts,
         response_id:    String,
         timestamp:      SystemTime,
     },
@@ -86,11 +86,9 @@ impl Message {
             return None;
         };
         provider_parts.iter().find_map(|p| match p {
-            ContentPart::Thinking(ThinkingData {
-                text,
-                redacted: false,
-                ..
-            }) => Some(text.as_str()),
+            ContentPart::Reasoning(reasoning) if !reasoning.redacted => {
+                Some(reasoning.text.as_str())
+            }
             _ => None,
         })
     }
@@ -101,7 +99,9 @@ impl Message {
     #[must_use]
     pub fn to_llm_message(&self) -> LlmMessage {
         match self {
-            Self::User { content, .. } => LlmMessage::user(content),
+            Self::User { content, .. } | Self::Steering { content, .. } => {
+                LlmMessage::text(Role::User, content)
+            }
             Self::Assistant {
                 content,
                 tool_calls,
@@ -114,39 +114,28 @@ impl Message {
                 // function calls for correct round-tripping.
                 parts.extend(provider_parts.iter().cloned());
                 if !content.is_empty() {
-                    parts.push(ContentPart::text(content));
+                    parts.push(ContentPart::Text {
+                        text: content.clone(),
+                    });
                 }
                 for tc in tool_calls {
                     parts.push(ContentPart::ToolCall(tc.clone()));
                 }
-                LlmMessage {
-                    role:         Role::Assistant,
-                    content:      parts,
-                    name:         None,
-                    tool_call_id: None,
-                }
+                LlmMessage::new(Role::Assistant, parts)
             }
             Self::ToolResults { results, .. } => {
                 let content: Vec<ContentPart> = results
                     .iter()
                     .map(|r| ContentPart::ToolResult(r.clone()))
                     .collect();
+                let message = LlmMessage::new(Role::Tool, content);
                 // Use the first result's tool_call_id if available
-                let tool_call_id = results.first().map(|r| r.tool_call_id.clone());
-                LlmMessage {
-                    role: Role::Tool,
-                    content,
-                    name: None,
-                    tool_call_id,
+                match results.first() {
+                    Some(first) => message.with_tool_call_id(first.tool_call_id.clone()),
+                    None => message,
                 }
             }
-            Self::System { content, .. } => LlmMessage::system(content),
-            Self::Steering { content, .. } => LlmMessage {
-                role:         Role::User,
-                content:      vec![ContentPart::text(content)],
-                name:         None,
-                tool_call_id: None,
-            },
+            Self::System { content, .. } => LlmMessage::text(Role::System, content),
         }
     }
 
@@ -168,7 +157,7 @@ impl Message {
                 content:        content.clone(),
                 tool_calls:     values_or_empty(tool_calls),
                 provider_parts: values_or_empty(provider_parts),
-                usage:          value_or_null(&**usage),
+                usage:          value_or_null(usage),
                 response_id:    response_id.clone(),
                 timestamp:      system_time_to_utc(*timestamp),
             },
@@ -204,7 +193,7 @@ impl Message {
                 content:        content.clone(),
                 tool_calls:     values_from_json(tool_calls)?,
                 provider_parts: values_from_json(provider_parts)?,
-                usage:          Box::new(serde_json::from_value(usage.clone())?),
+                usage:          serde_json::from_value(usage.clone())?,
                 response_id:    response_id.clone(),
                 timestamp:      utc_to_system_time(*timestamp),
             },
@@ -318,12 +307,10 @@ pub enum AgentEvent {
         text:            String,
         model:           ModelRef,
         usage:           TokenCounts,
-        /// USD cost reported or estimated for this individual response.
+        /// Cost reported or estimated for this individual response, with its
+        /// provenance.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        cost_usd:        Option<f64>,
-        /// Provenance of `cost_usd`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cost_source:     Option<CostSource>,
+        cost:            Option<Cost>,
         tool_call_count: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_window:  Option<StageContextWindowProjection>,
@@ -417,7 +404,7 @@ pub enum AgentEvent {
         model:      String,
         attempt:    usize,
         delay_secs: f64,
-        error:      LlmError,
+        error:      ErrorData,
         phase:      LlmRetryPhase,
     },
     SubAgentSpawned {
@@ -527,7 +514,7 @@ impl AgentEvent {
                     session_id,
                     provider = %requested_model.provider,
                     model = %requested_model.model_id,
-                    speed = requested_model.speed.map_or("", <&'static str>::from),
+                    speed = requested_model.speed.map_or("", Speed::as_str),
                     "LLM request started"
                 );
             }
@@ -544,8 +531,8 @@ impl AgentEvent {
                     session_id,
                     provider = %model.provider,
                     model = model.model_id.as_str(),
-                    input_tokens = usage.input_tokens,
-                    output_tokens = usage.output_tokens,
+                    input_tokens = usage.input,
+                    output_tokens = usage.output,
                     tool_call_count,
                     "Assistant message"
                 );
@@ -832,9 +819,18 @@ pub struct SessionEvent {
 
 #[cfg(test)]
 mod tests {
-    use fabro_model::ProviderId;
+    use fabro_llm::{ErrorKind, RetryClassification};
+    use lithos_llm::catalog::{ModelId, ProviderId, builtin};
+    use lithos_llm::types::CostSource;
 
     use super::*;
+
+    fn network_error(message: &str) -> ErrorData {
+        ErrorData::from(
+            fabro_llm::Error::new(ErrorKind::Network, message)
+                .with_retry(RetryClassification::Safe),
+        )
+    }
 
     #[test]
     fn session_event_construction() {
@@ -1102,40 +1098,37 @@ mod tests {
     #[test]
     fn agent_event_assistant_message() {
         let usage = TokenCounts {
-            input_tokens:       100,
-            output_tokens:      50,
-            cache_read_tokens:  80,
-            cache_write_tokens: 10,
-            reasoning_tokens:   20,
+            input:       100,
+            output:      50,
+            cache_read:  80,
+            cache_write: 10,
+            reasoning:   20,
         };
         let event = AgentEvent::AssistantMessage {
-            text:            "Hello".into(),
-            model:           ModelRef {
-                provider: ProviderId::openai(),
-                model_id: "test-model".into(),
-                speed:    None,
-            },
-            usage:           usage.clone(),
-            cost_usd:        Some(0.125),
-            cost_source:     Some(CostSource::Authoritative),
+            text: "Hello".into(),
+            model: ModelRef::new(builtin::openai(), ModelId::new("test-model")),
+            usage,
+            cost: Some(Cost {
+                usd_micros: 125_000,
+                source:     CostSource::Provider,
+            }),
             tool_call_count: 2,
-            context_window:  None,
-            reasoning:       None,
+            context_window: None,
+            reasoning: None,
         };
         match &event {
             AgentEvent::AssistantMessage {
                 usage,
-                cost_usd,
-                cost_source,
+                cost,
                 tool_call_count,
                 ..
             } => {
                 assert_eq!(*tool_call_count, 2);
-                assert_eq!(usage.input_tokens, 100);
-                assert_eq!(usage.cache_read_tokens, 80);
-                assert_eq!(usage.reasoning_tokens, 20);
-                assert_eq!(*cost_usd, Some(0.125));
-                assert_eq!(*cost_source, Some(CostSource::Authoritative));
+                assert_eq!(usage.input, 100);
+                assert_eq!(usage.cache_read, 80);
+                assert_eq!(usage.reasoning, 20);
+                assert_eq!(cost.map(|cost| cost.usd_micros), Some(125_000));
+                assert_eq!(cost.map(|cost| cost.source), Some(CostSource::Provider));
             }
             _ => panic!("expected AssistantMessage"),
         }
@@ -1163,10 +1156,7 @@ mod tests {
     #[test]
     fn error_event_serde_roundtrip_with_agent_error() {
         let event = AgentEvent::Error {
-            error: Error::Llm(LlmError::Network {
-                message: "refused".into(),
-                source:  None,
-            }),
+            error: Error::from(network_error("refused")),
         };
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
@@ -1180,31 +1170,27 @@ mod tests {
 
     #[test]
     fn llm_retry_event_carries_sdk_error() {
-        use fabro_llm::error::{ProviderErrorDetail, ProviderErrorKind};
         let event = AgentEvent::LlmRetry {
             provider:   "openai".into(),
             model:      "gpt-4".into(),
             attempt:    1,
             delay_secs: 2.0,
             phase:      LlmRetryPhase::Open,
-            error:      LlmError::Provider {
-                kind:   ProviderErrorKind::RateLimit,
-                detail: Box::new(ProviderErrorDetail {
-                    message:     "too fast".into(),
-                    provider:    "openai".into(),
-                    status_code: Some(429),
-                    error_code:  None,
-                    retry_after: Some(2.0),
-                    raw:         None,
-                }),
-            },
+            error:      ErrorData::from(
+                fabro_llm::Error::new(ErrorKind::RateLimit, "too fast")
+                    .with_provider(ProviderId::new("openai"))
+                    .with_status(429)
+                    .with_retry(RetryClassification::after(std::time::Duration::from_secs(
+                        2,
+                    ))),
+            ),
         };
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
         match deserialized {
             AgentEvent::LlmRetry { error, .. } => {
-                assert!(error.retryable());
-                assert_eq!(error.retry_after(), Some(2.0));
+                assert!(error.is_retryable());
+                assert_eq!(error.retry_after(), Some(std::time::Duration::from_secs(2)));
             }
             _ => panic!("expected LlmRetry variant"),
         }

@@ -27,9 +27,16 @@ import {
 // Parse the `provider` query param used by the create flow into a creatable
 // provider, defaulting to Docker for anything unexpected.
 export function parseCreatableProvider(value: string | null): EnvironmentProvider {
-  return value === EnvironmentProvider.DAYTONA
-    ? EnvironmentProvider.DAYTONA
-    : EnvironmentProvider.DOCKER;
+  if (value === EnvironmentProvider.DAYTONA) return EnvironmentProvider.DAYTONA;
+  if (value === EnvironmentProvider.KUBERNETES) return EnvironmentProvider.KUBERNETES;
+  return EnvironmentProvider.DOCKER;
+}
+
+// Kubernetes environments always run a prebuilt image reference; the server
+// rejects image.dockerfile for them, so the form never offers the Dockerfile
+// source.
+function supportsDockerfileSource(provider: EnvironmentProvider): boolean {
+  return provider !== EnvironmentProvider.KUBERNETES;
 }
 
 // Environment ids are server-managed file names: lowercase, digits, hyphens.
@@ -273,7 +280,9 @@ export function EnvironmentFormFields({
             className={INPUT_CLASS}
           >
             <option value="image">Image reference</option>
-            <option value="dockerfile">Dockerfile</option>
+            {supportsDockerfileSource(values.provider) ? (
+              <option value="dockerfile">Dockerfile</option>
+            ) : null}
           </select>
         </Row>
         {values.imageSource === "image" ? (

@@ -6,6 +6,7 @@ import { EnvironmentProvider, type Environment } from "@qltysh/fabro-api-client"
 export const CREATABLE_PROVIDERS = [
   EnvironmentProvider.DOCKER,
   EnvironmentProvider.DAYTONA,
+  EnvironmentProvider.KUBERNETES,
 ] as const;
 
 // Whether a server-managed environment can back Git-targeted work such as

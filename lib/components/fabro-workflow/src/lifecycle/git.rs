@@ -645,7 +645,6 @@ mod tests {
     use fabro_core::lifecycle::RunLifecycle;
     use fabro_core::state::ExecutionState;
     use fabro_graphviz::graph::types::{AttrValue, Edge, Graph, Node};
-    use fabro_model::Catalog;
     use fabro_store::{EventEnvelope, RunDatabase, RunProjection};
     use fabro_types::run_event::{MetadataSnapshotFailureKind, MetadataSnapshotPhase};
     use fabro_types::{BlobHash, EventBody, RunEvent, WorkflowSettings, fixtures, test_support};
@@ -1308,10 +1307,10 @@ mod tests {
             None,
             finalize_locations,
             tokio_util::sync::CancellationToken::new(),
-            fabro_model::ProviderId::anthropic(),
+            lithos_llm::catalog::builtin::anthropic(),
             "claude-sonnet-4-6".to_string(),
             auth_test_support::vault_only_credential_source(),
-            Arc::new(Catalog::from_builtin().expect("default catalog should build")),
+            Arc::new(fabro_llm::test_support::test_catalog()),
             Arc::new(SandboxGitRuntime::new()),
             Arc::clone(&lifecycle.metadata_runtime),
             lifecycle.metadata_writer.clone(),

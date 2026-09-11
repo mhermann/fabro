@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-#[cfg(feature = "docker")]
+#[cfg(any(feature = "docker", feature = "kubernetes"))]
 use anyhow::Context as _;
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 use fabro_github::GitHubCredentials;
 #[allow(
     unused_imports,
@@ -11,12 +11,16 @@ use fabro_github::GitHubCredentials;
 )]
 use fabro_types::{RunId, RunSandboxInstance, RunSandboxRuntime, SandboxProviderKind};
 
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 use crate::clone_source;
 #[cfg(feature = "daytona")]
 use crate::daytona::{self, DaytonaConfig, DaytonaSandbox};
 #[cfg(feature = "docker")]
 use crate::docker::{self, DockerSandbox, DockerSandboxOptions};
+#[cfg(feature = "kubernetes")]
+use crate::kubernetes::{
+    KubernetesSandbox, KubernetesSandboxOptions, REPOS_ROOT, WORKING_DIRECTORY,
+};
 use crate::local::LocalSandbox;
 use crate::{Sandbox, SandboxEventCallback};
 
@@ -55,6 +59,16 @@ pub enum SandboxSpec {
         clone_commit_sha: Option<String>,
         api_key:          Option<String>,
     },
+    #[cfg(feature = "kubernetes")]
+    Kubernetes {
+        config:           KubernetesSandboxOptions,
+        github_app:       Option<GitHubCredentials>,
+        run_id:           Option<RunId>,
+        clone_origin_url: Option<String>,
+        clone_branch:     Option<String>,
+        clone_tag:        Option<String>,
+        clone_commit_sha: Option<String>,
+    },
 }
 
 impl SandboxSpec {
@@ -65,6 +79,8 @@ impl SandboxSpec {
             Self::Docker { .. } => SandboxProviderKind::Docker,
             #[cfg(feature = "daytona")]
             Self::Daytona { .. } => SandboxProviderKind::Daytona,
+            #[cfg(feature = "kubernetes")]
+            Self::Kubernetes { .. } => SandboxProviderKind::Kubernetes,
         }
     }
 
@@ -73,6 +89,7 @@ impl SandboxSpec {
             SandboxProviderKind::Local => "local",
             SandboxProviderKind::Docker => "docker",
             SandboxProviderKind::Daytona => "daytona",
+            SandboxProviderKind::Kubernetes => "kubernetes",
         }
     }
 
@@ -181,6 +198,51 @@ impl SandboxSpec {
                     },
                 }
             }
+            #[cfg(feature = "kubernetes")]
+            Self::Kubernetes {
+                config,
+                clone_origin_url,
+                clone_branch,
+                ..
+            } => {
+                // The Kubernetes provider is GitHub-only; it has no Forgejo
+                // instance to resolve origins against.
+                let repo_cloned = clone_source::repo_cloned_for_record(
+                    config.skip_clone,
+                    clone_origin_url.as_deref(),
+                    None,
+                );
+                let layout = runtime_layout_metadata(
+                    repo_cloned,
+                    clone_origin_url.as_deref(),
+                    WORKING_DIRECTORY,
+                    REPOS_ROOT,
+                    None,
+                );
+                RunSandboxInstance {
+                    provider: self.provider(),
+                    image:    (!config.image.is_empty()).then(|| config.image.clone()),
+                    snapshot: None,
+                    runtime:  RunSandboxRuntime {
+                        id,
+                        working_directory: working_directory.clone(),
+                        repo_cloned,
+                        clone_origin_url: clone_source::clean_clone_origin_for_record(
+                            clone_origin_url.as_deref(),
+                            None,
+                        ),
+                        clone_branch: clone_branch.clone(),
+                        workspace_root: Some(WORKING_DIRECTORY.to_string()),
+                        repos_root: Some(REPOS_ROOT.to_string()),
+                        primary_repo_path: layout
+                            .as_ref()
+                            .map(|layout| layout.primary_repo_path.clone()),
+                        primary_repo_link: layout
+                            .as_ref()
+                            .map(|layout| layout.primary_repo_link.clone()),
+                    },
+                }
+            }
             _ => RunSandboxInstance {
                 provider: self.provider(),
                 image:    None,
@@ -273,11 +335,38 @@ impl SandboxSpec {
                 }
                 Ok(Arc::new(sandbox))
             }
+            #[cfg(feature = "kubernetes")]
+            Self::Kubernetes {
+                config,
+                github_app,
+                run_id,
+                clone_origin_url,
+                clone_branch,
+                clone_tag,
+                clone_commit_sha,
+            } => {
+                let mut sandbox = KubernetesSandbox::new(
+                    config.clone(),
+                    github_app.as_ref(),
+                    *run_id,
+                    clone_origin_url.clone(),
+                    clone_branch.clone(),
+                    clone_tag.clone(),
+                    clone_commit_sha.clone(),
+                )
+                .await
+                .map_err(anyhow::Error::new)
+                .context("Failed to create Kubernetes sandbox")?;
+                if let Some(callback) = event_callback {
+                    sandbox.set_event_callback(callback);
+                }
+                Ok(Arc::new(sandbox))
+            }
         }
     }
 }
 
-#[cfg(any(feature = "docker", feature = "daytona"))]
+#[cfg(any(feature = "docker", feature = "daytona", feature = "kubernetes"))]
 fn runtime_layout_metadata(
     repo_cloned: Option<bool>,
     clone_origin_url: Option<&str>,

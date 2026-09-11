@@ -6,13 +6,13 @@ use std::time::Instant;
 use async_trait::async_trait;
 use fabro_agent::Sandbox;
 use fabro_agent::tool_registry::ToolContext;
-use fabro_auth::CredentialSource;
-use fabro_llm::client::Client as LlmClient;
-use fabro_llm::generate::{GenerateParams, generate_object};
-use fabro_llm::types::{Message, Request, ToolResult};
-use fabro_model::Catalog;
+use fabro_llm::credentials::CredentialProvider;
+use fabro_llm::lithos_catalog::Catalog;
+use fabro_llm::{Client, ClientOptions, Request};
 use fabro_redact::redacted_url_for_log;
 use fabro_types::settings::{InterpString, ResolveCtx, ResolveError};
+use fabro_types::{tool_call_arguments, tool_result_from_json};
+use lithos_llm::types::{ContentPart, Message, Role, ToolCall};
 use tokio::process::Command as TokioCommand;
 use tokio::time::timeout as tokio_timeout;
 use tokio_util::sync::CancellationToken;
@@ -49,7 +49,7 @@ pub trait HookExecutor: Send + Sync {
         context: &HookContext,
         sandbox: Arc<dyn Sandbox>,
         execution_context: &HookExecutionContext,
-        llm_source: &dyn CredentialSource,
+        llm_source: Arc<dyn CredentialProvider>,
         catalog: Arc<Catalog>,
     ) -> HookResult;
 }
@@ -282,7 +282,7 @@ impl HookExecutorImpl {
         prompt: &InterpString,
         model: Option<&InterpString>,
         context: &HookContext,
-        llm_source: &dyn CredentialSource,
+        llm_source: Arc<dyn CredentialProvider>,
         catalog: Arc<Catalog>,
     ) -> HookDecision {
         let (prompt, model) = match Self::resolve_prompt_and_model(prompt, model) {
@@ -299,33 +299,44 @@ impl HookExecutorImpl {
         let user_msg = Self::build_hook_user_message(&prompt, context);
 
         Self::execute_llm_with_timeout(definition.timeout(), "prompt", || async move {
-            let client = match LlmClient::from_source(llm_source, catalog).await {
-                Ok(client) => Arc::new(client),
+            let client = match Self::build_client(catalog, llm_source).await {
+                Ok(client) => client,
                 Err(e) => {
                     tracing::warn!(error = %e, "prompt hook client creation failed, proceeding");
                     return HookDecision::Proceed;
                 }
             };
 
-            let params = GenerateParams::new(&resolved_model, client)
+            let request = Request::builder()
+                .model(&resolved_model)
                 .system(HOOK_EVALUATOR_SYSTEM_PROMPT)
-                .prompt(user_msg)
-                .max_tokens(1024);
+                .user(user_msg)
+                .max_output_tokens(1024)
+                .build();
+            let request = match request {
+                Ok(request) => request,
+                Err(e) => {
+                    tracing::warn!(error = %e, "prompt hook request invalid, proceeding");
+                    return HookDecision::Proceed;
+                }
+            };
 
-            match generate_object(params, HOOK_RESPONSE_SCHEMA.clone()).await {
-                Ok(result) => if let Some(obj) = result.output { match serde_json::from_value::<PromptHookResponse>(obj) {
-                    Ok(resp) if resp.ok => HookDecision::Proceed,
-                    Ok(resp) => HookDecision::Block {
-                        reason: resp.reason,
-                    },
-                    Err(e) => {
-                        tracing::warn!(error = %e, "prompt hook response deserialize failed, proceeding");
-                        HookDecision::Proceed
+            match client
+                .complete_object(request, "hook_response", HOOK_RESPONSE_SCHEMA.clone())
+            .await
+            {
+                Ok(completion) => {
+                    match serde_json::from_value::<PromptHookResponse>(completion.object) {
+                        Ok(resp) if resp.ok => HookDecision::Proceed,
+                        Ok(resp) => HookDecision::Block {
+                            reason: resp.reason,
+                        },
+                        Err(e) => {
+                            tracing::warn!(error = %e, "prompt hook response deserialize failed, proceeding");
+                            HookDecision::Proceed
+                        }
                     }
-                } } else {
-                    tracing::warn!("prompt hook returned no structured output, proceeding");
-                    HookDecision::Proceed
-                },
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "prompt hook LLM call failed, proceeding");
                     HookDecision::Proceed
@@ -347,7 +358,7 @@ impl HookExecutorImpl {
         max_tool_rounds: Option<u32>,
         context: &HookContext,
         sandbox: Arc<dyn Sandbox>,
-        llm_source: &dyn CredentialSource,
+        llm_source: Arc<dyn CredentialProvider>,
         catalog: Arc<Catalog>,
     ) -> HookDecision {
         let (prompt, model) = match Self::resolve_prompt_and_model(prompt, model) {
@@ -364,7 +375,7 @@ impl HookExecutorImpl {
         let user_msg = Self::build_hook_user_message(&prompt, context);
 
         Self::execute_llm_with_timeout(definition.timeout(), "agent", || async move {
-            let client = match LlmClient::from_source(llm_source, catalog).await {
+            let client = match Self::build_client(catalog, llm_source).await {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(error = %e, "agent hook client creation failed, proceeding");
@@ -378,32 +389,30 @@ impl HookExecutorImpl {
             let tool_defs = registry.definitions();
 
             let mut messages = vec![
-                Message::system(HOOK_EVALUATOR_SYSTEM_PROMPT),
-                Message::user(user_msg),
+                Message::text(Role::System, HOOK_EVALUATOR_SYSTEM_PROMPT),
+                Message::text(Role::User, user_msg),
             ];
 
             let rounds = max_tool_rounds.unwrap_or(50);
             let cancel = CancellationToken::new();
 
             for _ in 0..rounds {
-                let request = Request {
-                    model:            resolved_model.clone(),
-                    messages:         messages.clone(),
-                    provider:         None,
-                    tools:            Some(tool_defs.clone()),
-                    tool_choice:      None,
-                    response_format:  None,
-                    temperature:      None,
-                    top_p:            None,
-                    max_tokens:       None,
-                    stop_sequences:   None,
-                    reasoning_effort: None,
-                    speed:            None,
-                    metadata:         None,
-                    provider_options: None,
+                let mut builder = Request::builder().model(&resolved_model);
+                for message in &messages {
+                    builder = builder.message(message.clone());
+                }
+                for tool in &tool_defs {
+                    builder = builder.tool(tool.clone());
+                }
+                let request = match builder.build() {
+                    Ok(request) => request,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "agent hook request invalid, proceeding");
+                        return HookDecision::Proceed;
+                    }
                 };
 
-                let response = match client.complete(&request).await {
+                let response = match client.complete(request).await {
                     Ok(r) => r,
                     Err(e) => {
                         tracing::warn!(error = %e, "agent hook LLM call failed, proceeding");
@@ -411,13 +420,14 @@ impl HookExecutorImpl {
                     }
                 };
 
-                let tool_calls = response.tool_calls();
+                let tool_calls: Vec<ToolCall> = response.tool_calls().cloned().collect();
                 if tool_calls.is_empty() {
                     return Self::parse_prompt_response(&response.text());
                 }
 
-                messages.push(response.message.clone());
+                messages.push(response.into_message());
 
+                let mut results = Vec::with_capacity(tool_calls.len());
                 for tc in &tool_calls {
                     let tool = registry.get(&tc.name).cloned();
                     let ctx = ToolContext {
@@ -430,28 +440,48 @@ impl HookExecutorImpl {
                         agent_event_emitter: None,
                     };
                     let result = match tool {
-                        Some(t) => match (t.executor)(tc.arguments.clone(), ctx).await {
-                            Ok(output) => {
-                                ToolResult::success(tc.id.clone(), serde_json::json!(output))
-                            }
-                            Err(err) => ToolResult::error(tc.id.clone(), err),
+                        Some(t) => match (t.executor)(tool_call_arguments(tc), ctx).await {
+                            Ok(output) => tool_result_from_json(
+                                tc.id.clone(),
+                                serde_json::Value::String(output),
+                                false,
+                            ),
+                            Err(err) => tool_result_from_json(
+                                tc.id.clone(),
+                                serde_json::Value::String(err),
+                                true,
+                            ),
                         },
-                        None => {
-                            ToolResult::error(tc.id.clone(), format!("Unknown tool: {}", tc.name))
-                        }
+                        None => tool_result_from_json(
+                            tc.id.clone(),
+                            serde_json::Value::String(format!("Unknown tool: {}", tc.name)),
+                            true,
+                        ),
                     };
-                    messages.push(Message::tool_result(
-                        result.tool_call_id,
-                        result.content,
-                        result.is_error,
-                    ));
+                    results.push(ContentPart::ToolResult(result));
                 }
+                messages.push(Message::new(Role::Tool, results));
             }
 
             tracing::warn!("agent hook exhausted max tool rounds, proceeding");
             HookDecision::Proceed
         })
         .await
+    }
+
+    /// The LLM client hooks dispatch through: every provider the source can
+    /// serve, with standard retries.
+    async fn build_client(
+        catalog: Arc<Catalog>,
+        llm_source: Arc<dyn CredentialProvider>,
+    ) -> Result<Client, fabro_llm::LlmSetupError> {
+        fabro_llm::build_client(
+            Catalog::clone(&catalog),
+            llm_source,
+            ClientOptions::standard(),
+        )
+        .await
+        .map(|built| built.client)
     }
 
     /// Build an HTTP client for the given TLS mode.
@@ -629,7 +659,7 @@ impl HookExecutor for HookExecutorImpl {
         context: &HookContext,
         sandbox: Arc<dyn Sandbox>,
         execution_context: &HookExecutionContext,
-        llm_source: &dyn CredentialSource,
+        llm_source: Arc<dyn CredentialProvider>,
         catalog: Arc<Catalog>,
     ) -> HookResult {
         use std::sync::OnceLock;
@@ -728,7 +758,8 @@ impl HookExecutor for HookExecutorImpl {
 
 #[cfg(test)]
 mod tests {
-    use fabro_auth::{CredentialSource, test_support};
+    use fabro_auth::test_support;
+    use fabro_llm::credentials::CredentialProvider;
     use fabro_types::fixtures;
     use fabro_types::settings::ResolveErrorKind;
 
@@ -746,12 +777,12 @@ mod tests {
         ))
     }
 
-    fn test_llm_source() -> Arc<dyn CredentialSource> {
+    fn test_llm_source() -> Arc<dyn CredentialProvider> {
         test_support::vault_only_credential_source()
     }
 
     fn test_catalog() -> Arc<Catalog> {
-        Arc::new(Catalog::from_builtin().unwrap())
+        Arc::new(fabro_llm::default_catalog())
     }
 
     fn test_http_client() -> fabro_http::HttpClient {
@@ -841,7 +872,7 @@ mod tests {
                 &ctx,
                 sandbox,
                 &HookExecutionContext::default(),
-                source.as_ref(),
+                Arc::clone(&source),
                 test_catalog(),
             )
             .await;
@@ -862,7 +893,7 @@ mod tests {
                 &ctx,
                 sandbox,
                 &HookExecutionContext::default(),
-                source.as_ref(),
+                Arc::clone(&source),
                 test_catalog(),
             )
             .await;
@@ -882,7 +913,7 @@ mod tests {
                 &ctx,
                 sandbox,
                 &HookExecutionContext::default(),
-                source.as_ref(),
+                Arc::clone(&source),
                 test_catalog(),
             )
             .await;
@@ -902,7 +933,7 @@ mod tests {
                 &ctx,
                 sandbox,
                 &HookExecutionContext::default(),
-                source.as_ref(),
+                Arc::clone(&source),
                 test_catalog(),
             )
             .await;
@@ -926,7 +957,7 @@ mod tests {
                 &ctx,
                 sandbox,
                 &HookExecutionContext::default(),
-                source.as_ref(),
+                Arc::clone(&source),
                 test_catalog(),
             )
             .await;
@@ -955,7 +986,7 @@ mod tests {
                 &ctx,
                 sandbox,
                 &HookExecutionContext::default(),
-                source.as_ref(),
+                Arc::clone(&source),
                 test_catalog(),
             )
             .await;
@@ -1441,7 +1472,7 @@ mod tests {
                 &ctx,
                 sandbox,
                 &HookExecutionContext::default(),
-                source.as_ref(),
+                Arc::clone(&source),
                 test_catalog(),
             )
             .await;
@@ -1475,7 +1506,7 @@ mod tests {
             &interp("{{ env.MISSING_HOOK_VALUE }}"),
             None,
             &make_context(),
-            test_llm_source().as_ref(),
+            test_llm_source(),
             test_catalog(),
         )
         .await;
@@ -1503,7 +1534,7 @@ mod tests {
             Some(1),
             &make_context(),
             make_sandbox(),
-            test_llm_source().as_ref(),
+            test_llm_source(),
             test_catalog(),
         )
         .await;

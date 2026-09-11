@@ -3,10 +3,10 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
-use fabro_llm::types::ToolDefinition;
 use fabro_types::INITIAL_SUBAGENT_GENERATION;
 use fabro_util::error as util_error;
 use futures::future;
+use lithos_llm::types::ToolDefinition;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, timeout_at};
@@ -1202,10 +1202,10 @@ pub fn make_spawn_agent_tool(
     current_depth: usize,
 ) -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "spawn_agent".into(),
-            description: "Spawn a subagent for independent work or context isolation. Use it for tasks that can proceed separately, and avoid duplicating the same work in the parent session.".into(),
-            parameters:  serde_json::json!({
+        definition: ToolDefinition::function(
+            "spawn_agent",
+            "Spawn a subagent for independent work or context isolation. Use it for tasks that can proceed separately, and avoid duplicating the same work in the parent session.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "task": {
@@ -1215,7 +1215,7 @@ pub fn make_spawn_agent_tool(
                 },
                 "required": ["task"]
             }),
-        },
+        ),
         executor:   Arc::new(move |args, ctx| {
             let supervisor = supervisor.clone();
             let session_factory = session_factory.clone();
@@ -1240,10 +1240,10 @@ pub fn make_spawn_agent_tool(
 
 pub fn make_send_input_tool(supervisor: SubAgentSupervisor) -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "send_input".into(),
-            description: "Send a follow-up message to a subagent. A running agent receives it at a safe turn boundary. A completed agent starts another turn in the same session with its existing history.".into(),
-            parameters:  serde_json::json!({
+        definition: ToolDefinition::function(
+            "send_input",
+            "Send a follow-up message to a subagent. A running agent receives it at a safe turn boundary. A completed agent starts another turn in the same session with its existing history.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "agent_id": {
@@ -1257,7 +1257,7 @@ pub fn make_send_input_tool(supervisor: SubAgentSupervisor) -> RegisteredTool {
                 },
                 "required": ["agent_id", "message"]
             }),
-        },
+        ),
         executor:   Arc::new(move |args, _ctx| {
             let supervisor = supervisor.clone();
             Box::pin(async move {
@@ -1276,10 +1276,10 @@ pub fn make_send_input_tool(supervisor: SubAgentSupervisor) -> RegisteredTool {
 
 pub fn make_wait_tool(supervisor: SubAgentSupervisor) -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "wait".into(),
-            description: "Wait for a subagent to complete, then use the result to synthesize the outcome for the user.".into(),
-            parameters:  serde_json::json!({
+        definition: ToolDefinition::function(
+            "wait",
+            "Wait for a subagent to complete, then use the result to synthesize the outcome for the user.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "agent_id": {
@@ -1289,7 +1289,7 @@ pub fn make_wait_tool(supervisor: SubAgentSupervisor) -> RegisteredTool {
                 },
                 "required": ["agent_id"]
             }),
-        },
+        ),
         executor:   Arc::new(move |args, ctx| {
             let supervisor = supervisor.clone();
             Box::pin(async move {
@@ -1313,10 +1313,10 @@ pub fn make_wait_tool(supervisor: SubAgentSupervisor) -> RegisteredTool {
 
 pub fn make_close_agent_tool(supervisor: SubAgentSupervisor) -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "close_agent".into(),
-            description: "Close a running or completed subagent that is no longer needed.".into(),
-            parameters:  serde_json::json!({
+        definition: ToolDefinition::function(
+            "close_agent",
+            "Close a running or completed subagent that is no longer needed.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "agent_id": {
@@ -1326,7 +1326,7 @@ pub fn make_close_agent_tool(supervisor: SubAgentSupervisor) -> RegisteredTool {
                 },
                 "required": ["agent_id"]
             }),
-        },
+        ),
         executor:   Arc::new(move |args, _ctx| {
             let supervisor = supervisor.clone();
             Box::pin(async move {
@@ -1344,15 +1344,16 @@ pub fn make_close_agent_tool(supervisor: SubAgentSupervisor) -> RegisteredTool {
 
 #[cfg(test)]
 mod tests {
-    use fabro_llm::provider::ProviderAdapter;
-    use fabro_llm::types::Role;
+    use fabro_llm::adapter::ProviderAdapter;
+    use fabro_types::text_of;
+    use lithos_llm::types::Role;
     use tokio::task::yield_now;
     use tokio::time;
 
     use super::*;
     use crate::config::SessionOptions;
     use crate::test_support::*;
-    use crate::tool_registry::ToolContext;
+    use crate::tool_registry::{ToolContext, ToolDefinitionExt};
 
     // --- Tests ---
 
@@ -1657,13 +1658,13 @@ mod tests {
             .as_ref()
             .expect("request should have been captured");
         let system_message = request
-            .messages
+            .messages()
             .iter()
-            .find(|message| message.role == Role::System)
+            .find(|message| message.role() == Role::System)
             .expect("subagent request should include system message");
 
         assert!(
-            !system_message.text().trim().is_empty(),
+            !text_of(system_message.content()).trim().is_empty(),
             "subagent system prompt should not be empty"
         );
     }
@@ -1791,21 +1792,21 @@ mod tests {
 
         let spawn_tool = make_spawn_agent_tool(manager.clone(), factory, 0);
         assert_eq!(spawn_tool.definition.name, "spawn_agent");
-        let spawn_properties = spawn_tool.definition.parameters["properties"]
+        let spawn_properties = spawn_tool.definition.parameters()["properties"]
             .as_object()
             .unwrap();
         assert_eq!(spawn_properties.len(), 1);
         assert!(spawn_properties["task"].is_object());
-        let spawn_required = spawn_tool.definition.parameters["required"]
+        let spawn_required = spawn_tool.definition.parameters()["required"]
             .as_array()
             .unwrap();
         assert!(spawn_required.contains(&serde_json::json!("task")));
 
         let send_tool = make_send_input_tool(manager.clone());
         assert_eq!(send_tool.definition.name, "send_input");
-        assert!(send_tool.definition.parameters["properties"]["agent_id"].is_object());
-        assert!(send_tool.definition.parameters["properties"]["message"].is_object());
-        let send_required = send_tool.definition.parameters["required"]
+        assert!(send_tool.definition.parameters()["properties"]["agent_id"].is_object());
+        assert!(send_tool.definition.parameters()["properties"]["message"].is_object());
+        let send_required = send_tool.definition.parameters()["required"]
             .as_array()
             .unwrap();
         assert!(send_required.contains(&serde_json::json!("agent_id")));
@@ -1813,16 +1814,16 @@ mod tests {
 
         let wait_tool = make_wait_tool(manager.clone());
         assert_eq!(wait_tool.definition.name, "wait");
-        assert!(wait_tool.definition.parameters["properties"]["agent_id"].is_object());
-        let wait_required = wait_tool.definition.parameters["required"]
+        assert!(wait_tool.definition.parameters()["properties"]["agent_id"].is_object());
+        let wait_required = wait_tool.definition.parameters()["required"]
             .as_array()
             .unwrap();
         assert!(wait_required.contains(&serde_json::json!("agent_id")));
 
         let close_tool = make_close_agent_tool(manager);
         assert_eq!(close_tool.definition.name, "close_agent");
-        assert!(close_tool.definition.parameters["properties"]["agent_id"].is_object());
-        let close_required = close_tool.definition.parameters["required"]
+        assert!(close_tool.definition.parameters()["properties"]["agent_id"].is_object());
+        let close_required = close_tool.definition.parameters()["required"]
             .as_array()
             .unwrap();
         assert!(close_required.contains(&serde_json::json!("agent_id")));
@@ -2075,14 +2076,15 @@ mod tests {
             let request = captured
                 .as_ref()
                 .expect("second request should be captured");
-            assert!(request.messages.iter().any(|message| {
-                message.role == Role::User && message.text().contains("Do something")
+            assert!(request.messages().iter().any(|message| {
+                message.role() == Role::User && text_of(message.content()).contains("Do something")
             }));
-            assert!(request.messages.iter().any(|message| {
-                message.role == Role::Assistant && message.text().contains("captured")
+            assert!(request.messages().iter().any(|message| {
+                message.role() == Role::Assistant && text_of(message.content()).contains("captured")
             }));
-            assert!(request.messages.iter().any(|message| {
-                message.role == Role::User && message.text().contains("Fix the review findings")
+            assert!(request.messages().iter().any(|message| {
+                message.role() == Role::User
+                    && text_of(message.content()).contains("Fix the review findings")
             }));
         }
 

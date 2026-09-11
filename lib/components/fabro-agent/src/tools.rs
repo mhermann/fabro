@@ -2,12 +2,12 @@ use std::borrow::Cow;
 use std::fmt::Write;
 use std::sync::Arc;
 
-use fabro_llm::client::Client;
-use fabro_llm::types::{Message, Request, ToolDefinition};
-use fabro_model::ModelHandle;
+use fabro_llm::{Client, Request};
 #[cfg(test)]
 use fabro_static::EnvVars;
 use futures::{StreamExt, stream};
+use lithos_llm::catalog::ModelHandle;
+use lithos_llm::types::ToolDefinition;
 use tokio::task;
 
 use crate::config::NativeToolOptions;
@@ -115,10 +115,10 @@ pub(crate) fn optional_usize_arg(
 #[must_use]
 pub fn make_read_file_tool() -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "read_file".into(),
-            description: "Read files before editing them. Returns line-numbered text and supports offset/limit for large files. Use this instead of shell cat, head, tail, or sed when inspecting repository files.".into(),
-            parameters:  serde_json::json!({
+        definition: ToolDefinition::function(
+            "read_file",
+            "Read files before editing them. Returns line-numbered text and supports offset/limit for large files. Use this instead of shell cat, head, tail, or sed when inspecting repository files.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": "Absolute path to the file"},
@@ -127,13 +127,12 @@ pub fn make_read_file_tool() -> RegisteredTool {
                 },
                 "required": ["file_path"]
             }),
-        },
+        ),
         executor:   Arc::new(|args, ctx| {
             Box::pin(async move {
                 let file_path = required_str(&args, "file_path")?;
                 let offset_usize = optional_usize_arg(&args, "offset")?;
-                let limit_usize =
-                    optional_usize_arg(&args, "limit")?.or(Some(DEFAULT_READ_LINES));
+                let limit_usize = optional_usize_arg(&args, "limit")?.or(Some(DEFAULT_READ_LINES));
 
                 let content = ctx
                     .env
@@ -150,10 +149,10 @@ pub fn make_read_file_tool() -> RegisteredTool {
 #[must_use]
 pub fn make_write_file_tool() -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "write_file".into(),
-            description: "Create new files, or overwrite an existing file only when replacement is explicitly intended. Prefer edit_file for targeted changes to existing files because write_file overwrites the full file content.".into(),
-            parameters:  serde_json::json!({
+        definition: ToolDefinition::function(
+            "write_file",
+            "Create new files, or overwrite an existing file only when replacement is explicitly intended. Prefer edit_file for targeted changes to existing files because write_file overwrites the full file content.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": "Absolute path to the file"},
@@ -161,7 +160,7 @@ pub fn make_write_file_tool() -> RegisteredTool {
                 },
                 "required": ["file_path", "content"]
             }),
-        },
+        ),
         executor:   Arc::new(|args, ctx| {
             Box::pin(async move {
                 let file_path = required_str(&args, "file_path")?;
@@ -181,10 +180,10 @@ pub fn make_write_file_tool() -> RegisteredTool {
 #[must_use]
 pub fn make_edit_file_tool() -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "edit_file".into(),
-            description: "Edit a file by replacing an exact string. The old_string must be an exact match and unique unless replace_all is true; include surrounding context when needed. Read the file first and preserve existing indentation.".into(),
-            parameters:  serde_json::json!({
+        definition: ToolDefinition::function(
+            "edit_file",
+            "Edit a file by replacing an exact string. The old_string must be an exact match and unique unless replace_all is true; include surrounding context when needed. Read the file first and preserve existing indentation.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": "Absolute path to the file"},
@@ -194,7 +193,7 @@ pub fn make_edit_file_tool() -> RegisteredTool {
                 },
                 "required": ["file_path", "old_string", "new_string"]
             }),
-        },
+        ),
         executor:   Arc::new(|args, ctx| {
             Box::pin(async move {
                 let file_path = required_str(&args, "file_path")?;
@@ -248,10 +247,10 @@ pub fn make_shell_tool_with_options(options: &NativeToolOptions) -> RegisteredTo
     let default_timeout = options.default_command_timeout_ms;
     let max_timeout = options.max_command_timeout_ms;
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "shell".into(),
-            description: "Execute Bash commands for terminal operations, package managers, tests and builds. Use dedicated tools for file reads, file edits, filename searches, and content searches. Provide timeout_ms for long-running commands.".into(),
-            parameters:  serde_json::json!({
+        definition: ToolDefinition::function(
+            "shell",
+            "Execute Bash commands for terminal operations, package managers, tests and builds. Use dedicated tools for file reads, file edits, filename searches, and content searches. Provide timeout_ms for long-running commands.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "Bash source to evaluate, run by a non-login Bash shell"},
@@ -260,7 +259,7 @@ pub fn make_shell_tool_with_options(options: &NativeToolOptions) -> RegisteredTo
                 },
                 "required": ["command"]
             }),
-        },
+        ),
         executor:   Arc::new(move |args, ctx| {
             Box::pin(async move {
                 let command = required_str(&args, "command")?;
@@ -412,10 +411,10 @@ fn render_shell_result(streaming: &ExecStreamingResult) -> String {
 #[must_use]
 pub fn make_grep_tool() -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "grep".into(),
-            description: "Search file contents with a regex pattern. Use path to choose the search root, glob_filter to limit matching files, case_insensitive for case folding, and max_results to cap output.".into(),
-            parameters:  serde_json::json!({
+        definition: ToolDefinition::function(
+            "grep",
+            "Search file contents with a regex pattern. Use path to choose the search root, glob_filter to limit matching files, case_insensitive for case folding, and max_results to cap output.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Regex pattern to search for"},
@@ -426,7 +425,7 @@ pub fn make_grep_tool() -> RegisteredTool {
                 },
                 "required": ["pattern"]
             }),
-        },
+        ),
         executor:   Arc::new(|args, ctx| {
             Box::pin(async move {
                 let pattern = required_str(&args, "pattern")?;
@@ -501,10 +500,10 @@ pub(crate) fn grep_result_path<'a>(line: &'a str, searched: &'a str) -> &'a str 
 #[must_use]
 pub fn make_glob_tool() -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "glob".into(),
-            description: "Find files by search-root-relative path using a glob pattern. Use path to choose the search root. `*` stays within one path segment and `**` searches recursively. Prefer this over shell find or ls when locating repository files.".into(),
-            parameters:  serde_json::json!({
+        definition: ToolDefinition::function(
+            "glob",
+            "Find files by search-root-relative path using a glob pattern. Use path to choose the search root. `*` stays within one path segment and `**` searches recursively. Prefer this over shell find or ls when locating repository files.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Glob pattern relative to the search root"},
@@ -512,7 +511,7 @@ pub fn make_glob_tool() -> RegisteredTool {
                 },
                 "required": ["pattern"]
             }),
-        },
+        ),
         executor:   Arc::new(|args, ctx| {
             Box::pin(async move {
                 let pattern = required_str(&args, "pattern")?;
@@ -533,10 +532,10 @@ pub fn make_glob_tool() -> RegisteredTool {
 #[must_use]
 pub(crate) fn make_read_many_files_tool() -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "read_many_files".into(),
-            description: "Read multiple files at once".into(),
-            parameters:  serde_json::json!({
+        definition: ToolDefinition::function(
+            "read_many_files",
+            "Read multiple files at once",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "paths": {
@@ -547,7 +546,7 @@ pub(crate) fn make_read_many_files_tool() -> RegisteredTool {
                 },
                 "required": ["paths"]
             }),
-        },
+        ),
         executor:   Arc::new(|args, ctx| {
             Box::pin(async move {
                 let paths: Vec<String> = args["paths"]
@@ -594,10 +593,10 @@ pub(crate) fn make_read_many_files_tool() -> RegisteredTool {
 #[must_use]
 pub(crate) fn make_list_dir_tool() -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name:        "list_dir".into(),
-            description: "List directory contents with depth control".into(),
-            parameters:  serde_json::json!({
+        definition: ToolDefinition::function(
+            "list_dir",
+            "List directory contents with depth control",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Directory path to list"},
@@ -605,7 +604,7 @@ pub(crate) fn make_list_dir_tool() -> RegisteredTool {
                 },
                 "required": ["path"]
             }),
-        },
+        ),
         executor:   Arc::new(|args, ctx| {
             Box::pin(async move {
                 let path = required_str(&args, "path")?;
@@ -636,10 +635,10 @@ pub(crate) fn make_list_dir_tool() -> RegisteredTool {
 #[must_use]
 pub(crate) fn make_web_fetch_tool(summarizer: Option<WebFetchSummarizer>) -> RegisteredTool {
     RegisteredTool {
-        definition: ToolDefinition {
-            name: "web_fetch".into(),
-            description: "Fetch content from a URL that starts with http:// or https://. Pass a prompt to extract specific information or summarize the page; omit prompt to return the page content.".into(),
-            parameters: serde_json::json!({
+        definition: ToolDefinition::function(
+            "web_fetch",
+            "Fetch content from a URL that starts with http:// or https://. Pass a prompt to extract specific information or summarize the page; omit prompt to return the page content.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "URL to fetch (must be http:// or https://)"},
@@ -648,8 +647,8 @@ pub(crate) fn make_web_fetch_tool(summarizer: Option<WebFetchSummarizer>) -> Reg
                 },
                 "required": ["url"]
             }),
-        },
-        executor: Arc::new(move |args, ctx| {
+        ),
+        executor:   Arc::new(move |args, ctx| {
             let summarizer = summarizer.clone();
             Box::pin(async move {
                 let url = required_str(&args, "url")?;
@@ -702,36 +701,30 @@ pub(crate) fn make_web_fetch_tool(summarizer: Option<WebFetchSummarizer>) -> Reg
                         let summarization_prompt = format!(
                             "Content from {url}:\n---\n{content}\n---\n\n{user_prompt}\n\nRespond concisely based only on the content above."
                         );
-                        let request = Request {
-                            model: s.model_id.model_id().to_string(),
-                            messages: vec![Message::user(summarization_prompt)],
-                            provider: Some(s.model_id.provider().to_string()),
-                            tools: None,
-                            tool_choice: None,
-                            response_format: None,
-                            temperature: None,
-                            top_p: None,
-                            max_tokens: None,
-                            stop_sequences: None,
-                            reasoning_effort: None,
-                            speed: None,
-                            metadata: None,
-                            provider_options: None,
-                        };
-                        let response = s.client.complete(&request).await.map_err(|e| {
-                            format!("web_fetch summarization (model={}) failed: {e}", s.model_id.model_id())
+                        let request = Request::builder()
+                            .model(s.model_id.to_string())
+                            .user(summarization_prompt)
+                            .build()
+                            .map_err(|e| format!("web_fetch summarization request invalid: {e}"))?;
+                        let response = s.client.complete(request).await.map_err(|e| {
+                            format!(
+                                "web_fetch summarization (model={}) failed: {e}",
+                                s.model_id.model()
+                            )
                         })?;
                         Ok(response.text())
                     }
                     (Some(_), None) => {
                         // Graceful degradation: return content with a note
-                        Ok(format!("[Note: prompt summarization unavailable, returning full content]\n\n{content}"))
+                        Ok(format!(
+                            "[Note: prompt summarization unavailable, returning full content]\n\n{content}"
+                        ))
                     }
                     (None, _) => Ok(content),
                 }
             })
         }),
-        source: ToolSource::Native,
+        source:     ToolSource::Native,
     }
 }
 
@@ -739,9 +732,9 @@ pub(crate) fn make_web_fetch_tool(summarizer: Option<WebFetchSummarizer>) -> Reg
 mod tests {
     use std::collections::HashMap;
 
-    use fabro_llm::provider::ProviderAdapter;
-    use fabro_model::ProviderId;
+    use fabro_llm::adapter::ProviderAdapter;
     use fabro_types::CommandTermination;
+    use lithos_llm::catalog::{ModelId, builtin};
     use tokio::sync::broadcast;
     use tokio_util::sync::CancellationToken;
 
@@ -751,7 +744,7 @@ mod tests {
     use crate::local_sandbox::LocalSandbox;
     use crate::sandbox::*;
     use crate::test_support::MockSandbox;
-    use crate::tool_registry::ToolContext;
+    use crate::tool_registry::{ToolContext, ToolDefinitionExt};
     use crate::truncation;
     use crate::types::SessionEvent;
     use crate::web_search::make_web_search_tool_with_api_key;
@@ -818,7 +811,7 @@ mod tests {
 
         assert_eq!(tool.definition.name, "shell");
         assert_eq!(
-            tool.definition.parameters,
+            *tool.definition.parameters(),
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1987,10 +1980,7 @@ mod tests {
         let client = make_client(provider).await;
         let summarizer = WebFetchSummarizer {
             client,
-            model_id: ModelHandle::ByName {
-                provider: ProviderId::anthropic(),
-                model:    "mock-model".to_string(),
-            },
+            model_id: ModelHandle::new(builtin::anthropic(), ModelId::new("mock-model")),
         };
 
         let tool = make_web_fetch_tool(Some(summarizer));
@@ -2066,40 +2056,28 @@ mod tests {
 
     #[tokio::test]
     async fn web_fetch_summarizer_routes_to_specified_provider() {
-        use fabro_llm::Error as LlmError;
-        use fabro_llm::error::{ProviderErrorDetail, ProviderErrorKind};
+        use fabro_llm::test_support::client_with_adapters;
+        use fabro_llm::{ClientOptions, ErrorKind};
 
         use crate::test_support::{MockErrorProvider, MockLlmProvider, text_response};
 
-        // "other_provider" is the default — it rejects all requests.
-        let default_provider: Arc<dyn ProviderAdapter> = Arc::new(MockErrorProvider {
-            error: LlmError::Provider {
-                kind:   ProviderErrorKind::NotFound,
-                detail: Box::new(ProviderErrorDetail::new(
-                    "model not found",
-                    "other_provider",
-                )),
-            },
-        });
-        // "anthropic" provider has the model we actually want.
+        // OpenAI rejects all requests, so a summary can only come from the
+        // provider the summarizer names.
+        let default_provider: Arc<dyn ProviderAdapter> = Arc::new(MockErrorProvider::new(|| {
+            fabro_llm::Error::new(ErrorKind::NotFound, "model not found")
+        }));
         let target_provider: Arc<dyn ProviderAdapter> =
             Arc::new(MockLlmProvider::new(vec![text_response(
                 "summarized content",
             )]));
-
-        let mut providers = HashMap::new();
-        providers.insert("other_provider".to_string(), default_provider);
-        // Register under "anthropic" so ModelRef { provider: "anthropic", .. } routes
-        // here
-        providers.insert("anthropic".to_string(), target_provider);
-        let client = Client::new(providers, Some("other_provider".into()), vec![]);
+        let client = client_with_adapters(
+            vec![("openai", default_provider), ("anthropic", target_provider)],
+            ClientOptions::default(),
+        );
 
         let summarizer = WebFetchSummarizer {
             client,
-            model_id: ModelHandle::ByName {
-                provider: ProviderId::anthropic(),
-                model:    "target-model".to_string(),
-            },
+            model_id: ModelHandle::new(builtin::anthropic(), ModelId::new("target-model")),
         };
 
         let tool = make_web_fetch_tool(Some(summarizer));
