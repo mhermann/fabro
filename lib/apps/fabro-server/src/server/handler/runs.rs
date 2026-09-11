@@ -29,9 +29,9 @@ use fabro_store::{
 };
 use fabro_types::{
     AutomationRef, ManifestPath, Principal, Run, RunClientProvenance, RunId, RunProvenance,
-    RunServerProvenance, RunStatusKind, RunTarget, SandboxProviderKind, StageContextWindow,
-    StageContextWindowStaleness, StageContextWindowUnavailableReason, StageHandler,
-    StageModelUsage, StageProjection, SystemActorKind, ValidatedRunTarget,
+    RunServerProvenance, RunStatusKind, RunTarget, SandboxProviderKind, ScmProvider,
+    StageContextWindow, StageContextWindowStaleness, StageContextWindowUnavailableReason,
+    StageHandler, StageModelUsage, StageProjection, SystemActorKind, ValidatedRunTarget,
     json_scalar_to_toml_value, parse_blob_ref,
 };
 use fabro_util::error as error_util;
@@ -626,10 +626,40 @@ pub(crate) async fn create_run_from_intent(
     let explicit_title_supplied = intent.title.is_some();
     // Validate the pure, in-memory request facts before paying for
     // blob-store reads and closure lowering.
-    let ValidatedRunTarget { target, git } = match intent.target.validate() {
+    let forgejo_url = state
+        .server_settings()
+        .server
+        .integrations
+        .forgejo
+        .instance_url()
+        .map(str::to_string);
+    let ValidatedRunTarget { target, git } = match intent
+        .target
+        .validate_with_scm(forgejo_url.as_deref())
+    {
         Ok(validated) => validated,
         Err(error) => return run_intent_admission_error(error.into()),
     };
+    // A forgejo target passes grammar validation once the instance URL
+    // exists, but admission must still refuse runs the worker cannot
+    // authenticate.
+    if matches!(&target, RunTarget::Git(git_target) if git_target.provider == ScmProvider::Forgejo)
+    {
+        match state
+            .forgejo_context(&state.server_settings().server.integrations.forgejo)
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => {
+                return intent_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "forgejo runs require the Forgejo integration: set \
+                     server.integrations.forgejo.url and store FORGEJO_TOKEN in the vault",
+                    "forgejo_integration_unconfigured",
+                );
+            }
+        }
+    }
     let environment_id = match select_intent_environment_id(
         &state,
         intent

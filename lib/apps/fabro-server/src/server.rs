@@ -94,7 +94,8 @@ use fabro_types::BlockedReason;
 use fabro_types::settings::RunNamespace;
 use fabro_types::settings::run::{NotificationRouteSettings, RunMode};
 use fabro_types::settings::server::{
-    GithubIntegrationSettings, GithubIntegrationStrategy, LogDestination,
+    ForgejoIntegrationSettings, GithubIntegrationSettings, GithubIntegrationStrategy,
+    LogDestination,
 };
 use fabro_types::{
     AgentBackend, AskFabro, AskFabroUnavailableReason, BlobHash, EventBody,
@@ -1207,8 +1208,15 @@ impl AppState {
             .github_credentials(&settings.server.integrations.github)
             .await
             .map_err(|source| RunMaterializeError::LoadCredentials { source })?;
+        let forgejo_credentials = self
+            .forgejo_context(&settings.server.integrations.forgejo)
+            .await
+            .map_err(|source| RunMaterializeError::LoadCredentials { source })
+            .ok()
+            .flatten();
         ProductionAutomationRunMaterializer::new(
             credentials,
+            forgejo_credentials,
             self.github_api_base_url.clone(),
             self.http_client.clone(),
             Arc::clone(&self.automation_repo_cache),
@@ -1570,6 +1578,32 @@ impl AppState {
     pub(crate) fn session_key(&self) -> Option<Key> {
         self.server_secret(EnvVars::SESSION_SECRET)
             .and_then(|value| auth::derive_cookie_key(value.as_bytes()).ok())
+    }
+
+    /// Resolves the Forgejo runtime credential bundle from settings plus the
+    /// vault PAT. `Ok(None)` when the integration is disabled or its URL is
+    /// not configured; the PAT is required when it is.
+    pub(crate) async fn forgejo_context(
+        &self,
+        settings: &ForgejoIntegrationSettings,
+    ) -> anyhow::Result<Option<fabro_forgejo::ForgejoContext>> {
+        let Some(url) = settings.instance_url() else {
+            return Ok(None);
+        };
+        let token = self
+            .vault_secret(EnvVars::FORGEJO_TOKEN)
+            .await
+            .map_err(anyhow::Error::new)?
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string);
+        match token {
+            Some(token) => Ok(Some(fabro_forgejo::ForgejoContext::new(token, url))),
+            None => anyhow::bail!(
+                "FORGEJO_TOKEN not configured -- run fabro install or run fabro secret set FORGEJO_TOKEN"
+            ),
+        }
     }
 
     pub(crate) async fn github_credentials(
@@ -4130,8 +4164,7 @@ async fn execute_run_in_process(state: Arc<AppState>, run_id: RunId) {
         .integrations
         .github
         .resolve_integration()
-    {
-        Ok(integration) => integration,
+    {Ok(integration) => integration,
         Err(err) => {
             tracing::error!(
                 run_id = %run_id,
@@ -4146,6 +4179,45 @@ async fn execute_run_in_process(state: Arc<AppState>, run_id: RunId) {
             )
             .await;
             return;
+        }
+    };
+    // Forgejo credentials matter only for runs targeting the configured
+    // instance; resolving them lazily here keeps GitHub-only deployments
+    // unaffected. A missing token fails the run with the remediation message.
+    let forgejo = {
+        let run_spec = persisted.run_spec();
+        let targets_forgejo = run_spec
+            .repo_origin_url()
+            .is_some_and(|origin| fabro_types::origin_matches_instance(
+                origin,
+                server_settings
+                    .server
+                    .integrations
+                    .forgejo
+                    .url
+                    .as_deref()
+                    .unwrap_or_default(),
+            ));
+        if targets_forgejo {
+            match state
+                .forgejo_context(&server_settings.server.integrations.forgejo)
+                .await
+            {
+                Ok(forgejo) => forgejo,
+                Err(err) => {
+                    tracing::error!(run_id = %run_id, error = %err, "Invalid Forgejo credentials");
+                    fail_run_before_execution(
+                        &state,
+                        run_id,
+                        FailureReason::WorkflowError,
+                        format!("Invalid Forgejo credentials: {err}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        } else {
+            None
         }
     };
     let vault = match state.stores.vault.snapshot().await {
@@ -4173,6 +4245,7 @@ async fn execute_run_in_process(state: Arc<AppState>, run_id: RunId) {
         artifact_sink: Some(ArtifactSink::Store(state.artifact_store.clone())),
         run_control: None,
         github_app,
+        forgejo,
         github_integration,
         vault: Arc::new(AsyncRwLock::new(vault.into_vault())),
         catalog: state.catalog(),

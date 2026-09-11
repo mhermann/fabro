@@ -126,6 +126,7 @@ impl SandboxProvider for DaytonaSandboxProvider {
         let sandbox = DaytonaSandbox::new(
             config.as_ref().clone(),
             github_app,
+            None,
             run_id,
             clone_origin_url,
             clone_branch,

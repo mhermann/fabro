@@ -137,9 +137,15 @@ pub(crate) async fn execute(
         control_manager.wait_for_first_connection().await?;
     }
     let vault = load_worker_vault(&storage_dir).await?;
-    let github_app = {
+    let (github_app, forgejo) = {
         let vault_guard = vault.read().await;
-        maybe_build_github_credentials(&run_spec.settings, &vault_guard)?
+        let forgejo = maybe_build_forgejo_context(&run_spec.settings, &vault_guard)?;
+        let github_app = maybe_build_github_credentials(
+            &run_spec.settings,
+            &vault_guard,
+            forgejo.is_some(),
+        )?;
+        (github_app, forgejo)
     };
     let services = StartServices {
         run_id,
@@ -161,6 +167,7 @@ pub(crate) async fn execute(
         artifact_sink,
         run_control: Some(run_control),
         github_app,
+        forgejo,
         github_integration: run_spec
             .settings
             .run
@@ -1102,6 +1109,7 @@ fn stamp_system_worker(mut event: RunEvent) -> RunEvent {
 fn maybe_build_github_credentials(
     settings: &WorkflowSettings,
     vault: &fabro_vault::Vault,
+    forgejo_run: bool,
 ) -> Result<Option<fabro_github::GitHubCredentials>> {
     let resolved_run = &settings.run;
     let resolved_server = ServerSettingsBuilder::load_default().ok();
@@ -1111,6 +1119,12 @@ fn maybe_build_github_credentials(
         .unwrap_or_default();
     let app_id = server_ns.and_then(|server| server.integrations.github.app_id.clone());
     let app_slug = server_ns.and_then(|server| server.integrations.github.slug.clone());
+
+    // Forgejo-targeted runs authenticate with the instance PAT; GitHub
+    // credentials are neither required nor used.
+    if forgejo_run {
+        return Ok(None);
+    }
 
     if requires_github_credentials(resolved_run) {
         return build_github_credentials(strategy, app_id.as_deref(), app_slug.as_deref(), vault);
@@ -1130,6 +1144,34 @@ fn maybe_build_github_credentials(
     }
 
     Ok(None)
+}
+
+/// Resolves Forgejo credentials when the run targets a forgejo-hosted
+/// repository, mirroring the GitHub credential gate.
+fn maybe_build_forgejo_context(
+    settings: &WorkflowSettings,
+    vault: &fabro_vault::Vault,
+) -> Result<Option<fabro_forgejo::ForgejoContext>> {
+    let resolved_run = &settings.run;
+    let resolved_server = ServerSettingsBuilder::load_default().ok();
+    let forgejo_settings = resolved_server
+        .as_ref()
+        .map(|server| &server.server.integrations.forgejo);
+
+    let Some(forgejo_settings) = forgejo_settings else {
+        return Ok(None);
+    };
+    if !requires_forgejo_credentials(resolved_run) {
+        return Ok(None);
+    }
+    crate::shared::forgejo::build_forgejo_context(forgejo_settings, vault)
+}
+
+/// Hard-gate for the CLI worker path on a forgejo run: a non-dry-run
+/// clone-based sandbox (or any run) whose origin belongs to the configured
+/// instance needs the FORGEJO_TOKEN to pull and push.
+fn requires_forgejo_credentials(run: &RunNamespace) -> bool {
+    run.execution.mode != RunMode::DryRun && run.environment.provider.is_clone_based()
 }
 
 /// Hard-gate for the CLI worker path: a run-level token is requested, or

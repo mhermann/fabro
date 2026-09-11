@@ -4,7 +4,7 @@ use std::sync::Arc;
 use fabro_types::ExecOutputTail;
 
 use super::pull_request::{AutoMergeOptions, OpenPullRequestRequest, open_pull_request};
-use super::types::{Concluded, PublishOptions, PublishOutcome, Published};
+use super::types::{Concluded, PublishOptions, PublishOutcome, Published, ScmTarget};
 use crate::error::{Error, FailureCategory, classify_failure_reason};
 use crate::event::Event;
 use crate::lifecycle::git::push_run_branch;
@@ -160,13 +160,26 @@ impl Concluded {
         let base_branch = self.run_options.base_branch.as_deref().ok_or_else(|| {
             self.pull_request_error("pull request creation requires a base branch")
         })?;
-        let credentials = options.github_app.as_ref().ok_or_else(|| {
-            self.pull_request_error("pull request creation requires GitHub credentials")
+        // Resolve which forge owns the origin before demanding credentials,
+        // so a forgejo-hosted origin never requires a GitHub App.
+        let target = ScmTarget::resolve(origin_url, options.forgejo.as_ref()).ok_or_else(|| {
+            self.pull_request_error(
+                "pull request creation requires a GitHub origin or a configured Forgejo instance",
+            )
         })?;
         let github_base_url = fabro_github::github_api_base_url();
+        let github = options
+            .github_app
+            .as_ref()
+            .map(|credentials| fabro_github::GitHubContext::new(credentials, &github_base_url));
+        if matches!(target, ScmTarget::GitHub { .. }) && github.is_none() {
+            return Err(self
+                .pull_request_error("pull request creation requires GitHub credentials"));
+        }
 
         let created = open_pull_request(OpenPullRequestRequest {
-            github: fabro_github::GitHubContext::new(credentials, &github_base_url),
+            github,
+            forgejo: options.forgejo.as_ref(),
             origin_url,
             base_branch,
             head_branch: run_branch,

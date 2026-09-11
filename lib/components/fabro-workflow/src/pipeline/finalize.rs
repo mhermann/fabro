@@ -768,6 +768,7 @@ mod tests {
         let published = crate::pipeline::publish(concluded, &crate::pipeline::PublishOptions {
             pr_config:  None,
             github_app: None,
+            forgejo:    None,
             origin_url: None,
             model:      "test-model".to_string(),
         })
@@ -1392,6 +1393,7 @@ mod tests {
         let published = crate::pipeline::publish(concluded, &crate::pipeline::PublishOptions {
             pr_config:  None,
             github_app: None,
+            forgejo:    None,
             origin_url: None,
             model:      "test-model".to_string(),
         })
@@ -1446,6 +1448,7 @@ mod tests {
         let published = crate::pipeline::publish(concluded, &crate::pipeline::PublishOptions {
             pr_config:  None,
             github_app: None,
+            forgejo:    None,
             origin_url: Some("https://github.com/owner/repo.git".to_string()),
             model:      "test-model".to_string(),
         })
@@ -1611,6 +1614,7 @@ mod tests {
         let published = crate::pipeline::publish(concluded, &crate::pipeline::PublishOptions {
             pr_config:  None,
             github_app: None,
+            forgejo:    None,
             origin_url: Some("https://github.com/owner/repo.git".to_string()),
             model:      "test-model".to_string(),
         })

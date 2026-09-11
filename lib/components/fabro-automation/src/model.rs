@@ -471,7 +471,8 @@ fn validate_triggers(triggers: &[AutomationTrigger]) -> Result<(), AutomationVal
 #[cfg(test)]
 mod tests {
     use fabro_types::{
-        GitCoordinateValidationError, GitRunTarget, RunTarget, TargetValidationError,
+        GitCoordinateValidationError, GitRunTarget, RunTarget, ScmProvider,
+        TargetValidationError,
     };
 
     use crate::{
@@ -486,6 +487,7 @@ mod tests {
             branch: "main".to_string(),
             tag:    None,
             sha:    None,
+            provider: ScmProvider::Github,
         })
     }
 
@@ -518,6 +520,7 @@ mod tests {
             branch: branch.to_string(),
             tag:    tag.map(str::to_string),
             sha:    sha.map(str::to_string),
+            provider: ScmProvider::Github,
         }
     }
 
@@ -765,6 +768,7 @@ enabled = true
             branch: "main;rm".to_string(),
             tag:    None,
             sha:    None,
+            provider: ScmProvider::Github,
         }))
         .unwrap_err();
 
@@ -805,6 +809,7 @@ enabled = true
                     branch: "main".to_string(),
                     tag:    None,
                     sha:    None,
+            provider: ScmProvider::Github,
                 }),
                 workflow:        "release".to_string(),
                 workflow_source: None,
@@ -819,6 +824,7 @@ enabled = true
                     branch: "main;rm".to_string(),
                     tag:    None,
                     sha:    None,
+            provider: ScmProvider::Github,
                 }),
                 workflow:        "release".to_string(),
                 workflow_source: None,

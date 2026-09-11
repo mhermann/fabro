@@ -115,6 +115,7 @@ fn test_run_options(run_dir: &Path, run_id: &str) -> RunOptions {
         fork_source_ref:  None,
         labels:           HashMap::new(),
         github_app:       None,
+        forgejo:       None,
         base_branch:      None,
         display_base_sha: None,
         workflow_slug:    None,

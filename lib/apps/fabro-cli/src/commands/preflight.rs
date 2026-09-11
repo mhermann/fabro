@@ -31,6 +31,7 @@ pub(crate) async fn execute(
         args:                 preflight_manifest_args(&args),
         environment_defaults: fabro_environment::seeded_catalog_layer(),
         user_settings_path:   Some(active_settings_path(None)),
+        ..ManifestBuildInput::default()
     })?;
 
     let spinner = (!ctx.json_output()).then(|| cyan_spinner("Running checks..."));

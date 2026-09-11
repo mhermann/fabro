@@ -8,6 +8,18 @@ use fabro_types::settings::interp::InterpString;
 
 use crate::manifest_validation;
 
+/// The configured Forgejo instance URL from the local server settings, when
+/// enabled.
+fn forgejo_instance_url_from_settings() -> Option<String> {
+    let resolved = fabro_config::ServerSettingsBuilder::load_default().ok()?;
+    resolved
+        .server
+        .integrations
+        .forgejo
+        .instance_url()
+        .map(str::to_string)
+}
+
 /// Build and validate a run manifest for the `fabro_run_create` tool.
 ///
 /// Validation is structural. The caller is a client — an MCP server or a run
@@ -27,6 +39,9 @@ pub fn build_run_tool_manifest(
         args:                 run_tool_manifest_args(spec),
         environment_defaults: fabro_environment::seeded_catalog_layer(),
         user_settings_path:   Some(user_settings_path.to_path_buf()),
+        // Manifest clients resolve their own server settings; the instance
+        // URL is only needed to expand `provider = "forgejo"` origins.
+        forgejo_instance_url: forgejo_instance_url_from_settings(),
     })
     .map_err(|err| ToolError::from_anyhow(&err))?;
 

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use fabro_types::{
-    GitRunTarget, RunIntent, RunIntentArgs, RunTarget, WorkflowVersionId, normalize_git_commit_sha,
+    GitRunTarget, RunIntent, RunIntentArgs, RunTarget, ScmProvider, WorkflowVersionId,
+    normalize_git_commit_sha,
 };
 use serde_json::json;
 
@@ -19,6 +20,7 @@ fn intent() -> RunIntent {
             branch: "feature/run-intent".to_string(),
             tag:    Some("v1.2.3".to_string()),
             sha:    Some("ABCDEF0123456789ABCDEF0123456789ABCDEF01".to_string()),
+            provider: ScmProvider::Github,
         }),
         args:                RunIntentArgs {
             model:            Some("gpt-5.6".to_string()),
@@ -194,6 +196,7 @@ fn target_validation_normalizes_sha_without_network_resolution() {
         branch: "feature/run-intent".to_string(),
         tag:    Some("release/v1".to_string()),
         sha:    Some("ABCDEF0123456789ABCDEF0123456789ABCDEF01".to_string()),
+        provider: ScmProvider::Github,
     })
     .validate()
     .unwrap();
@@ -209,10 +212,11 @@ fn target_validation_normalizes_sha_without_network_resolution() {
     assert_eq!(
         validated.target,
         RunTarget::Git(GitRunTarget {
-            repo:   "fabro-sh/fabro".to_string(),
-            branch: "feature/run-intent".to_string(),
-            tag:    Some("release/v1".to_string()),
-            sha:    Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+            repo:     "fabro-sh/fabro".to_string(),
+            branch:   "feature/run-intent".to_string(),
+            tag:      Some("release/v1".to_string()),
+            sha:      Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+            provider: ScmProvider::Github,
         })
     );
 }
@@ -224,6 +228,7 @@ fn git_target_validation_carries_the_parsed_repository_proof() {
         branch: "feature/run-intent".to_string(),
         tag:    None,
         sha:    Some("ABCDEF0123456789ABCDEF0123456789ABCDEF01".to_string()),
+        provider: ScmProvider::Github,
     }
     .validate()
     .unwrap();
@@ -265,6 +270,7 @@ fn target_validation_rejects_invalid_grammar() {
             branch: branch.to_string(),
             tag:    tag.map(str::to_string),
             sha:    sha.map(str::to_string),
+            provider: ScmProvider::Github,
         })
         .validate()
     };
@@ -320,24 +326,28 @@ fn git_target_round_trips_all_branch_tag_sha_states() {
             branch: "main".to_string(),
             tag:    None,
             sha:    None,
+            provider: ScmProvider::Github,
         },
         GitRunTarget {
             repo:   "fabro-sh/fabro".to_string(),
             branch: "main".to_string(),
             tag:    None,
             sha:    Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+            provider: ScmProvider::Github,
         },
         GitRunTarget {
             repo:   "fabro-sh/fabro".to_string(),
             branch: "release".to_string(),
             tag:    Some("v1.2.3".to_string()),
             sha:    None,
+            provider: ScmProvider::Github,
         },
         GitRunTarget {
             repo:   "fabro-sh/fabro".to_string(),
             branch: "release".to_string(),
             tag:    Some("v1.2.3".to_string()),
             sha:    Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+            provider: ScmProvider::Github,
         },
     ] {
         let run_target = RunTarget::Git(target);
@@ -347,4 +357,102 @@ fn git_target_round_trips_all_branch_tag_sha_states() {
             run_target
         );
     }
+}
+
+#[test]
+fn git_target_provider_defaults_to_github_on_the_wire() {
+    let value = serde_json::to_value(RunTarget::Git(GitRunTarget {
+        repo:     "fabro-sh/fabro".to_string(),
+        branch:   "main".to_string(),
+        tag:      None,
+        sha:      None,
+        provider: ScmProvider::Github,
+    }))
+    .expect("target should serialize");
+
+    assert!(
+        value.get("provider").is_none(),
+        "github targets omit the provider tag for wire compatibility"
+    );
+    let parsed: RunTarget =
+        serde_json::from_value(value).expect("target should deserialize");
+    assert_eq!(
+        parsed,
+        RunTarget::Git(GitRunTarget {
+            repo:     "fabro-sh/fabro".to_string(),
+            branch:   "main".to_string(),
+            tag:      None,
+            sha:      None,
+            provider: ScmProvider::Github,
+        })
+    );
+
+    // Historical JSON without a provider tag still deserializes.
+    let legacy: RunTarget = serde_json::from_value(json!({
+        "kind": "git",
+        "repo": "fabro-sh/fabro",
+        "branch": "main"
+    }))
+    .expect("legacy target should deserialize");
+    assert_eq!(legacy, parsed);
+}
+
+#[test]
+fn forgejo_targets_validate_against_the_configured_instance() {
+    let target = GitRunTarget {
+        repo:     "fabro-sh/fabro".to_string(),
+        branch:   "main".to_string(),
+        tag:      None,
+        sha:      None,
+        provider: ScmProvider::Forgejo,
+    };
+
+    let validated = RunTarget::Git(target.clone())
+        .validate_with_scm(Some("http://localhost:3001"))
+        .expect("forgejo target should validate with an instance URL");
+    assert_eq!(validated.git.expect("git projection").origin_url, "http://localhost:3001/fabro-sh/fabro");
+
+    let error = target
+        .clone()
+        .validate_with_scm(None)
+        .expect_err("forgejo target without an instance URL should fail");
+    assert_eq!(
+        error,
+        fabro_types::GitCoordinateValidationError::ForgejoUnconfigured
+    );
+
+    // GitHub targets ignore the instance URL and keep the github.com origin.
+    let validated = RunTarget::Git(GitRunTarget {
+        repo:     "fabro-sh/fabro".to_string(),
+        branch:   "main".to_string(),
+        tag:      None,
+        sha:      None,
+        provider: ScmProvider::Github,
+    })
+    .validate_with_scm(Some("http://localhost:3001"))
+    .expect("github target should validate");
+    assert_eq!(
+        validated.git.expect("git projection").origin_url,
+        "https://github.com/fabro-sh/fabro"
+    );
+}
+
+#[test]
+fn run_target_validate_with_scm_surfaces_the_forgejo_error() {
+    let error = RunTarget::Git(GitRunTarget {
+        repo:     "fabro-sh/fabro".to_string(),
+        branch:   "main".to_string(),
+        tag:      None,
+        sha:      None,
+        provider: ScmProvider::Forgejo,
+    })
+    .validate_with_scm(None)
+    .expect_err("forgejo target without an instance URL should fail");
+    assert_eq!(
+        error,
+        fabro_types::TargetValidationError::ForgejoUnconfigured
+    );
+
+    // None targets validate identically with and without a Forgejo URL.
+    assert!(RunTarget::None {}.validate_with_scm(Some("http://localhost:3001")).is_ok());
 }

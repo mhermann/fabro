@@ -40,7 +40,7 @@ fn lookup_github_token(vault: &Vault) -> Option<String> {
     clippy::disallowed_methods,
     reason = "GitHub credential resolution intentionally falls back from vault to documented process-env names."
 )]
-fn lookup_env_or_vault(name: &str, vault: &Vault) -> Option<String> {
+pub(crate) fn lookup_env_or_vault(name: &str, vault: &Vault) -> Option<String> {
     std::env::var(name)
         .ok()
         .or_else(|| vault.get(name).map(str::to_string))

@@ -127,6 +127,10 @@ fn resolved_server_integrations_disable_slack_when_config_is_absent() {
                 "enabled": false,
                 "default_channel": null,
             },
+            "forgejo": {
+                "enabled": false,
+                "url": null,
+            },
         })
     );
 }
@@ -143,6 +147,58 @@ _version = 1
 
     assert!(settings.integrations.slack.enabled);
     assert!(settings.integrations.slack.default_channel.is_none());
+}
+
+#[test]
+fn resolved_forgejo_integration_is_disabled_when_config_is_absent() {
+    let settings = resolve_server(&empty_settings_with_auth_methods());
+    assert!(!settings.integrations.forgejo.enabled);
+    assert!(settings.integrations.forgejo.url.is_none());
+    assert!(settings.integrations.forgejo.instance_url().is_none());
+}
+
+#[test]
+fn resolved_forgejo_integration_normalizes_and_requires_url() {
+    let settings = resolve_server(&parse(
+        r#"
+_version = 1
+
+[server.integrations.forgejo]
+url = "https://git.example.com/"
+"#,
+    ));
+    assert!(settings.integrations.forgejo.enabled);
+    assert_eq!(
+        settings.integrations.forgejo.instance_url(),
+        Some("https://git.example.com")
+    );
+
+    // Loopback instances keep their http scheme.
+    let settings = resolve_server(&parse(
+        r#"
+_version = 1
+
+[server.integrations.forgejo]
+url = "http://localhost:3001"
+"#,
+    ));
+    assert_eq!(
+        settings.integrations.forgejo.instance_url(),
+        Some("http://localhost:3001")
+    );
+
+    // Enabled without a URL is a resolution error.
+    let error = ServerSettingsBuilder::from_layer(&parse(
+        r"
+_version = 1
+
+[server.integrations.forgejo]
+enabled = true
+",
+    ))
+    .expect_err("enabled forgejo without a URL should fail to resolve");
+    let error_lines = render_resolve_error_lines(error);
+    assert!(error_lines.contains("server.integrations.forgejo.url"));
 }
 
 #[test]

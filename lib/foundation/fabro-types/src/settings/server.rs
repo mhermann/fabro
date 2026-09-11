@@ -242,6 +242,30 @@ pub struct ServerLoggingSettings {
 pub struct ServerIntegrationsSettings {
     pub github: GithubIntegrationSettings,
     pub slack:  SlackIntegrationSettings,
+    #[serde(default)]
+    pub forgejo: ForgejoIntegrationSettings,
+}
+
+/// `[server.integrations.forgejo]` — single Forgejo instance.
+///
+/// `url` is the instance base URL without a trailing slash; the PAT lives in
+/// the vault as `FORGEJO_TOKEN`, never in settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForgejoIntegrationSettings {
+    pub enabled: bool,
+    pub url:     Option<String>,
+}
+
+impl ForgejoIntegrationSettings {
+    /// The configured instance base URL when the integration is usable.
+    #[must_use]
+    pub fn instance_url(&self) -> Option<&str> {
+        if self.enabled {
+            self.url.as_deref().filter(|url| !url.trim().is_empty())
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

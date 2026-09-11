@@ -94,9 +94,10 @@ fn validate_session_secret(value: &str) -> Result<(), String> {
 }
 
 pub async fn run_all(state: &AppState) -> DiagnosticsReport {
-    let (llm, github, docker_sandbox, cloud_sandbox, web_search, crypto) = tokio::join!(
+    let (llm, github, forgejo, docker_sandbox, cloud_sandbox, web_search, crypto) = tokio::join!(
         check_llm_providers(state),
         check_github_app(state),
+        check_forgejo_token(state),
         check_docker_sandbox(state),
         check_cloud_sandbox(state),
         check_web_search(state),
@@ -107,14 +108,122 @@ pub async fn run_all(state: &AppState) -> DiagnosticsReport {
         version:  FABRO_VERSION.to_string(),
         sections: vec![
             CheckSection {
-                title:  "Credentials".to_string(),
-                checks: vec![llm, github, docker_sandbox, cloud_sandbox, web_search],
+                title: "Credentials".to_string(),
+                checks: vec![llm, github, forgejo, docker_sandbox, cloud_sandbox, web_search],
             },
             CheckSection {
                 title:  "Configuration".to_string(),
                 checks: vec![crypto, check_storage_dir(state)],
             },
         ],
+    }
+}
+
+/// Probes the configured Forgejo instance with the vault PAT.
+///
+/// Absent entirely when the integration is disabled, so GitHub-only
+/// deployments see no Forgejo diagnostics row.
+async fn check_forgejo_token(state: &AppState) -> CheckResult {
+    let settings = state.server_settings().server.integrations.forgejo.clone();
+    if !settings.enabled {
+        return CheckResult {
+            name:        "Forgejo Token".to_string(),
+            status:      CheckStatus::Pass,
+            summary:     "not configured".to_string(),
+            details:     Vec::new(),
+            remediation: None,
+        };
+    }
+    let Some(instance_url) = settings.instance_url().map(str::to_string) else {
+        return CheckResult {
+            name:        "Forgejo Token".to_string(),
+            status:      CheckStatus::Error,
+            summary:     "missing instance URL".to_string(),
+            details:     Vec::new(),
+            remediation: Some(
+                "Set server.integrations.forgejo.url in the server settings".to_string(),
+            ),
+        };
+    };
+    let Some(token) = state
+        .vault_secret(EnvVars::FORGEJO_TOKEN)
+        .await
+        .ok()
+        .flatten()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+    else {
+        return CheckResult {
+            name:        "Forgejo Token".to_string(),
+            status:      CheckStatus::Error,
+            summary:     "not configured".to_string(),
+            details:     Vec::new(),
+            remediation: Some(
+                "Run fabro install or run `fabro secret set FORGEJO_TOKEN`".to_string(),
+            ),
+        };
+    };
+
+    let http = match http_client_or_check("Forgejo Token", CheckStatus::Error) {
+        Ok(http) => http,
+        Err(result) => return result,
+    };
+    let probe = timeout(
+        EXTERNAL_SERVICE_PROBE_TIMEOUT,
+        http.get(format!("{instance_url}/api/v1/user"))
+            .header("Authorization", format!("token {token}"))
+            .header("Accept", "application/json")
+            .header("User-Agent", "fabro-server")
+            .send(),
+    )
+    .await;
+
+    match probe {
+        Ok(Ok(response)) if response.status().is_success() => CheckResult {
+            name:        "Forgejo Token".to_string(),
+            status:      CheckStatus::Pass,
+            summary:     "configured".to_string(),
+            details:     Vec::new(),
+            remediation: None,
+        },
+        Ok(Ok(response)) if response.status() == fabro_http::StatusCode::UNAUTHORIZED => {
+            CheckResult {
+                name:        "Forgejo Token".to_string(),
+                status:      CheckStatus::Error,
+                summary:     "token invalid".to_string(),
+                details:     vec![CheckDetail::new(format!(
+                    "Forgejo returned {}",
+                    response.status()
+                ))],
+                remediation: Some(
+                    "Run fabro install or run `fabro secret set FORGEJO_TOKEN`".to_string(),
+                ),
+            }
+        }
+        Ok(Ok(response)) => CheckResult {
+            name:        "Forgejo Token".to_string(),
+            status:      CheckStatus::Error,
+            summary:     "connectivity error".to_string(),
+            details:     vec![CheckDetail::new(format!(
+                "Forgejo returned {}",
+                response.status()
+            ))],
+            remediation: Some("Check connectivity to the configured Forgejo instance".to_string()),
+        },
+        Ok(Err(err)) => CheckResult {
+            name:        "Forgejo Token".to_string(),
+            status:      CheckStatus::Error,
+            summary:     "connectivity error".to_string(),
+            details:     vec![CheckDetail::new(err.to_string())],
+            remediation: Some("Check connectivity to the configured Forgejo instance".to_string()),
+        },
+        Err(_) => CheckResult {
+            name:        "Forgejo Token".to_string(),
+            status:      CheckStatus::Error,
+            summary:     "probe timed out".to_string(),
+            details:     Vec::new(),
+            remediation: Some("Check connectivity to the configured Forgejo instance".to_string()),
+        },
     }
 }
 

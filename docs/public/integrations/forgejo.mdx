@@ -1,0 +1,91 @@
+---
+title: "Forgejo"
+description: "Integrate Fabro with a self-hosted Forgejo (Gitea-compatible) instance for repository access and pull request automation"
+---
+
+Fabro can run workflows against repositories hosted on a [Forgejo](https://forgejo.org) instance (the forge behind Codeberg, and API-compatible with Gitea). Forgejo support is an addition to — not a replacement for — the [GitHub integration](/integrations/github): both can be configured on the same deployment.
+
+## Scope
+
+| Capability | Forgejo | Notes |
+|---|---|---|
+| Run targets on Forgejo repos | Yes | Set `provider = "forgejo"` on the run target |
+| Clone-based sandboxes (Docker, Daytona) | Yes | Clones use the instance PAT |
+| CLI pull requests | Yes | Drafts use the `WIP: ` title prefix |
+| Server-side runs & preflight | Yes | Repository access verified against the instance API |
+| Checkpoint / metadata branch push | Yes | Pushes with the static instance PAT |
+| Auto-merge | No | Forgejo's merge semantics differ; Fabro warns and skips |
+| Browser OAuth login | No | No Forgejo equivalent in v1 |
+| Webhooks | No | No inbound webhook support |
+
+## Setup
+
+### 1. Configure the instance URL
+
+Add the instance to the server settings:
+
+```toml
+[server.integrations.forgejo]
+enabled = true
+url = "https://git.example.com"
+```
+
+`http://` is accepted only for loopback hosts (`localhost`, `127.0.0.1`), which covers local development instances. One instance is supported per deployment.
+
+### 2. Create a personal access token
+
+Create a PAT on the instance with at least:
+
+- `write:repository` — clone, push the run branch, and create pull requests
+- `write:issue` — close pull requests through the issues endpoint
+
+### 3. Store the token in the vault
+
+```sh
+fabro secret set FORGEJO_TOKEN
+```
+
+Run `fabro doctor` to confirm the integration resolves.
+
+## Targeting a Forgejo repository
+
+Run targets name the forge explicitly with a `provider` tag; targets without a tag default to `github`, so every existing coordinate stays valid:
+
+```json
+{
+  "kind": "git",
+  "provider": "forgejo",
+  "repo": "acme/my-app",
+  "branch": "main"
+}
+```
+
+In project settings, `[run.scm]` accepts `provider = "forgejo"`:
+
+```toml
+[run.scm]
+provider = "forgejo"
+owner = "acme"
+repository = "my-app"
+```
+
+`fabro repo init` writes this block automatically when it detects a checkout of the configured instance.
+
+## Drafts and merge behavior
+
+Forgejo's pull request API has no draft flag and no auto-merge toggle:
+
+- `draft = true` maps to the conventional `WIP: ` title prefix; Forgejo treats `WIP:`/`Draft:` prefixed titles as drafts.
+- `auto_merge = true` is not applied. The run logs a warning and leaves the pull request open for a manual merge.
+
+## Security notes
+
+- The PAT is stored in the server vault and never appears in settings files, run records, or logs. Clone URLs embed the token only for the duration of the clone, and recorded origins are scrubbed.
+- The PAT is instance-wide for the deployment: every run that targets the instance uses the same token. Scope it to the repositories it needs.
+- Connections use the system CA trust store; custom CA bundles are not supported. The instance must present a certificate your system trusts (or run on `http://localhost` for development).
+
+## Limitations
+
+- One Forgejo instance per deployment.
+- Additional declared repositories (`[run.integrations.github.permissions]`) are a GitHub-only feature; Forgejo runs cannot declare extra repositories.
+- Forgejo's PR payload has no diff stats (`additions`/`deletions`/`changed_files` are reported as 0 in run detail).

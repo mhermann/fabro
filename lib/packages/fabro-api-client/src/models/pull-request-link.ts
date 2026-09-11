@@ -13,16 +13,24 @@
  */
 
 
+// May contain unused imports in some cases
+// @ts-ignore
+import type { ScmProvider } from './scm-provider';
 
 /**
- * Minimal GitHub pull request link associated with a run.
+ * Minimal pull request link associated with a run. GitHub links carry `owner/repo/number`; Forgejo links additionally carry `provider: forgejo` and the instance `origin` they were created on.
  */
 export interface PullRequestLink {
     'owner': string;
     'repo': string;
     'number': number;
     /**
-     * Computed GitHub web URL for the pull request.
+     * Computed web URL for the pull request.
      */
     'html_url': string;
+    'provider'?: ScmProvider;
+    /**
+     * Forgejo instance base URL the pull request was created on. Required for `forgejo` links and absent for GitHub links.
+     */
+    'origin'?: string;
 }

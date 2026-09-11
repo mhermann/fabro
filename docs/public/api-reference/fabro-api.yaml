@@ -5646,6 +5646,30 @@ paths:
               schema:
                 $ref: "#/components/schemas/RepoCheckResponse"
 
+  /api/v1/repos/forgejo/{owner}/{name}:
+    get:
+      operationId: getForgejoRepo
+      tags: [Repos]
+      summary: Check server access to a Forgejo repository
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Repository access details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RepoCheckResponse"
+
   # ── Models ───────────────────────────────────────────────────────────
 
   /api/v1/models:
@@ -9443,9 +9467,11 @@ components:
 
     GitRunTarget:
       description: >-
-        Public github.com repository target. The branch names the attached
-        working branch. An optional tag selects a release at worker start, and
-        an optional exact SHA is authoritative when both are present.
+        Repository target. The branch names the attached working branch. An
+        optional tag selects a release at worker start, and an optional exact
+        SHA is authoritative when both are present. The provider names the
+        forge hosting the repository; it defaults to `github`, and `forgejo`
+        targets resolve against the configured Forgejo instance.
       type: object
       additionalProperties: false
       required:
@@ -9458,7 +9484,7 @@ components:
           enum: [git]
         repo:
           type: string
-          description: GitHub repository slug in `owner/name` form.
+          description: Repository slug in `owner/name` form.
           example: acme/my-app
         branch:
           type: string
@@ -9479,6 +9505,8 @@ components:
             Optional exact commit. The server lowercase-normalizes its syntax
             but does not resolve it, prove branch ancestry, or prove that it
             matches an accompanying tag. When present, this exact commit wins.
+        provider:
+          $ref: "#/components/schemas/ScmProvider"
 
     NoneRunTarget:
       description: >-
@@ -12574,7 +12602,10 @@ components:
           example: "Stage 'apply-changes' exceeded maximum retries."
 
     PullRequestLink:
-      description: Minimal GitHub pull request link associated with a run.
+      description: >-
+        Minimal pull request link associated with a run. GitHub links carry
+        `owner/repo/number`; Forgejo links additionally carry `provider:
+        forgejo` and the instance `origin` they were created on.
       type: object
       required:
         - owner
@@ -12594,8 +12625,21 @@ components:
         html_url:
           type: string
           format: uri
-          description: Computed GitHub web URL for the pull request.
+          description: Computed web URL for the pull request.
           example: https://github.com/fabro-sh/fabro/pull/123
+        provider:
+          $ref: "#/components/schemas/ScmProvider"
+        origin:
+          type: string
+          description: >-
+            Forgejo instance base URL the pull request was created on.
+            Required for `forgejo` links and absent for GitHub links.
+          example: https://git.example.com
+
+    ScmProvider:
+      description: The forge a Git coordinate belongs to. Absent tags mean `github`.
+      type: string
+      enum: [github, forgejo]
 
     PullRequest:
       description: Stored pull request link plus optional live GitHub details.
@@ -15480,7 +15524,7 @@ components:
     IntegrationProvider:
       description: Server integration provider.
       type: string
-      enum: [github, slack]
+      enum: [github, forgejo, slack]
 
     IntegrationStatus:
       description: Computed runtime integration status.

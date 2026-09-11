@@ -3,6 +3,7 @@ use serde::de::Error as DeError;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::ScmProvider;
 use crate::id::ulid_id;
 
 ulid_id!(PullRequestCreationId);
@@ -57,25 +58,82 @@ impl PullRequestCreation {
     }
 }
 
-/// Minimal GitHub pull request reference stored on a workflow run.
+/// Minimal pull request reference stored on a workflow run.
+///
+/// GitHub links carry only `owner/repo/number`; Forgejo links additionally
+/// carry the instance `origin` they were created on, because the instance is
+/// deployment-specific. The provider tag defaults to GitHub on the wire so
+/// every link persisted before Forgejo existed deserializes unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequestLink {
-    pub owner:  String,
-    pub repo:   String,
-    pub number: u64,
+    pub owner:    String,
+    pub repo:     String,
+    pub number:   u64,
+    pub provider: ScmProvider,
+    /// Forgejo instance base URL; always `None` for GitHub links.
+    pub origin:   Option<String>,
 }
 
 impl PullRequestLink {
     #[must_use]
+    pub fn github(owner: impl Into<String>, repo: impl Into<String>, number: u64) -> Self {
+        Self {
+            owner: owner.into(),
+            repo: repo.into(),
+            number,
+            provider: ScmProvider::Github,
+            origin: None,
+        }
+    }
+
+    /// A pull request on the Forgejo instance published at `origin`.
+    #[must_use]
+    pub fn forgejo(
+        origin: impl Into<String>,
+        owner: impl Into<String>,
+        repo: impl Into<String>,
+        number: u64,
+    ) -> Self {
+        Self {
+            owner: owner.into(),
+            repo: repo.into(),
+            number,
+            provider: ScmProvider::Forgejo,
+            origin: Some(origin.into()),
+        }
+    }
+
+    #[must_use]
     pub fn html_url(&self) -> String {
-        format!(
-            "https://github.com/{}/{}/pull/{}",
-            self.owner, self.repo, self.number
-        )
+        match self.provider {
+            ScmProvider::Github => format!(
+                "https://github.com/{}/{}/pull/{}",
+                self.owner, self.repo, self.number
+            ),
+            ScmProvider::Forgejo => format!(
+                "{}/{}/{}/pulls/{}",
+                self.origin.as_deref().unwrap_or(""),
+                self.owner,
+                self.repo,
+                self.number
+            ),
+        }
     }
 
     pub fn from_github_url(url: &str) -> Result<Self, String> {
         github_pull_request_link_from_url(url)
+    }
+
+    /// Parses a pull request URL from either supported forge: github.com
+    /// (`/pull/`) or a Forgejo instance (`/pulls/`).
+    pub fn from_url(url: &str) -> Result<Self, String> {
+        pull_request_link_from_url(url)
+    }
+
+    /// Parses a Forgejo pull request URL of the form
+    /// `{origin}/{owner}/{repo}/pulls/{number}`.
+    pub fn from_forgejo_url(url: &str) -> Result<Self, String> {
+        forgejo_pull_request_link_from_url(url)
     }
 }
 
@@ -84,11 +142,24 @@ impl Serialize for PullRequestLink {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("PullRequestLink", 4)?;
+        // GitHub links keep their historical four-field shape so old readers
+        // continue to accept them.
+        let mut state = serializer.serialize_struct(
+            "PullRequestLink",
+            if self.provider == ScmProvider::Github {
+                4
+            } else {
+                6
+            },
+        )?;
         state.serialize_field("owner", &self.owner)?;
         state.serialize_field("repo", &self.repo)?;
         state.serialize_field("number", &self.number)?;
         state.serialize_field("html_url", &self.html_url())?;
+        if self.provider != ScmProvider::Github {
+            state.serialize_field("provider", &self.provider)?;
+            state.serialize_field("origin", &self.origin)?;
+        }
         state.end()
     }
 }
@@ -109,21 +180,39 @@ impl<'de> Deserialize<'de> for PullRequestLink {
             repo:     Option<String>,
             #[serde(default)]
             number:   Option<u64>,
+            #[serde(default)]
+            provider: Option<ScmProvider>,
+            #[serde(default)]
+            origin:   Option<String>,
         }
 
         let wire = Wire::deserialize(deserializer)?;
         let (Some(owner), Some(repo), Some(number)) = (wire.owner, wire.repo, wire.number) else {
             return Err(D::Error::custom("missing pull request owner/repo/number"));
         };
+        let provider = wire.provider.unwrap_or_default();
+        if provider == ScmProvider::Github && wire.origin.is_some() {
+            return Err(D::Error::custom(
+                "github pull request link must not carry an origin",
+            ));
+        }
+        if provider == ScmProvider::Forgejo && wire.origin.as_deref().map(str::trim).is_none() {
+            return Err(D::Error::custom(
+                "forgejo pull request link requires the instance origin",
+            ));
+        }
         let link = Self {
             owner,
             repo,
             number,
+            provider,
+            origin: wire
+                .origin
+                .map(|origin| origin.trim_end_matches('/').to_string()),
         };
 
         if let Some(html_url) = wire.html_url {
-            let url_link =
-                github_pull_request_link_from_url(&html_url).map_err(D::Error::custom)?;
+            let url_link = pull_request_link_from_url(&html_url).map_err(D::Error::custom)?;
             if url_link != link {
                 return Err(D::Error::custom(
                     "pull request html_url does not match owner/repo/number",
@@ -132,6 +221,19 @@ impl<'de> Deserialize<'de> for PullRequestLink {
         }
 
         Ok(link)
+    }
+}
+
+#[expect(
+    clippy::disallowed_types,
+    reason = "Pull request links are public URLs stored for display and coordinate inference."
+)]
+fn pull_request_link_from_url(raw_url: &str) -> Result<PullRequestLink, String> {
+    let parsed = url::Url::parse(raw_url).map_err(|err| format!("Invalid pull request URL: {err}"))?;
+    if parsed.host_str() == Some("github.com") {
+        github_pull_request_link_from_url(raw_url)
+    } else {
+        forgejo_pull_request_link_from_url(raw_url)
     }
 }
 
@@ -164,11 +266,54 @@ fn github_pull_request_link_from_url(raw_url: &str) -> Result<PullRequestLink, S
     let number = number
         .parse()
         .map_err(|_| "Pull request URL number must be an unsigned integer.".to_string())?;
-    Ok(PullRequestLink {
-        owner: (*owner).to_string(),
-        repo: (*repo).to_string(),
+    Ok(PullRequestLink::github(
+        (*owner).to_string(),
+        (*repo).to_string(),
         number,
-    })
+    ))
+}
+
+#[expect(
+    clippy::disallowed_types,
+    reason = "Pull request links are instance URLs stored for display and coordinate inference."
+)]
+fn forgejo_pull_request_link_from_url(raw_url: &str) -> Result<PullRequestLink, String> {
+    let parsed =
+        url::Url::parse(raw_url).map_err(|err| format!("Invalid pull request URL: {err}"))?;
+    if parsed.scheme() != "https" && parsed.scheme() != "http" {
+        return Err(
+            "Forgejo pull request link must use <origin>/owner/repo/pulls/123.".to_string(),
+        );
+    }
+    let segments = parsed
+        .path_segments()
+        .map(|segments| {
+            segments
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let [owner, repo, "pulls", number] = segments.as_slice() else {
+        return Err(
+            "Forgejo pull request link must use <origin>/owner/repo/pulls/123.".to_string(),
+        );
+    };
+    let number = number
+        .parse()
+        .map_err(|_| "Pull request URL number must be an unsigned integer.".to_string())?;
+    // Rebuild the credential-free origin from the parsed URL so links carrying
+    // embedded tokens still round-trip without leaking them into state.
+    let mut origin = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or_default());
+    if let Some(port) = parsed.port() {
+        origin.push(':');
+        origin.push_str(&port.to_string());
+    }
+    Ok(PullRequestLink::forgejo(
+        origin,
+        (*owner).to_string(),
+        (*repo).to_string(),
+        number,
+    ))
 }
 
 /// Stored pull request link plus optional live GitHub details.
@@ -326,11 +471,7 @@ mod tests {
 
     #[test]
     fn pull_request_link_serializes_computed_html_url() {
-        let link = PullRequestLink {
-            owner:  "fabro-sh".to_string(),
-            repo:   "fabro".to_string(),
-            number: 270,
-        };
+        let link = PullRequestLink::github("fabro-sh", "fabro", 270);
 
         assert_eq!(
             serde_json::to_value(link).unwrap(),
@@ -340,6 +481,98 @@ mod tests {
                 "number": 270,
                 "html_url": "https://github.com/fabro-sh/fabro/pull/270"
             })
+        );
+    }
+
+    #[test]
+    fn forgejo_pull_request_link_serializes_provider_and_origin() {
+        let link = PullRequestLink::forgejo("https://git.example.com", "fabro-sh", "fabro", 12);
+
+        assert_eq!(
+            serde_json::to_value(&link).unwrap(),
+            json!({
+                "owner": "fabro-sh",
+                "repo": "fabro",
+                "number": 12,
+                "html_url": "https://git.example.com/fabro-sh/fabro/pulls/12",
+                "provider": "forgejo",
+                "origin": "https://git.example.com"
+            })
+        );
+        assert_eq!(link.html_url(), "https://git.example.com/fabro-sh/fabro/pulls/12");
+    }
+
+    #[test]
+    fn forgejo_pull_request_link_round_trips() {
+        let link = PullRequestLink::forgejo("https://git.example.com", "fabro-sh", "fabro", 12);
+        let parsed: PullRequestLink =
+            serde_json::from_value(serde_json::to_value(&link).unwrap()).unwrap();
+        assert_eq!(parsed, link);
+
+        let from_url = PullRequestLink::from_forgejo_url(
+            "https://git.example.com/fabro-sh/fabro/pulls/12",
+        )
+        .unwrap();
+        assert_eq!(from_url, link);
+    }
+
+    #[test]
+    fn legacy_github_links_deserialize_without_provider_tag() {
+        let parsed: PullRequestLink = serde_json::from_value(json!({
+            "owner": "fabro-sh",
+            "repo": "fabro",
+            "number": 270,
+            "html_url": "https://github.com/fabro-sh/fabro/pull/270"
+        }))
+        .unwrap();
+        assert_eq!(parsed, PullRequestLink::github("fabro-sh", "fabro", 270));
+        assert_eq!(parsed.provider, ScmProvider::Github);
+        assert_eq!(parsed.origin, None);
+    }
+
+    #[test]
+    fn forgejo_links_require_origin_and_pulls_path() {
+        // Missing origin.
+        let result = serde_json::from_value::<PullRequestLink>(json!({
+            "owner": "fabro-sh",
+            "repo": "fabro",
+            "number": 12,
+            "provider": "forgejo"
+        }));
+        assert!(result.is_err());
+
+        // GitHub URL shape with a forgejo tag fails the html_url cross-check.
+        let result = serde_json::from_value::<PullRequestLink>(json!({
+            "owner": "fabro-sh",
+            "repo": "fabro",
+            "number": 12,
+            "provider": "forgejo",
+            "origin": "https://git.example.com",
+            "html_url": "https://git.example.com/fabro-sh/fabro/pull/12"
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn github_links_reject_an_origin_field() {
+        let result = serde_json::from_value::<PullRequestLink>(json!({
+            "owner": "fabro-sh",
+            "repo": "fabro",
+            "number": 270,
+            "origin": "https://git.example.com"
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn forgejo_link_from_url_strips_embedded_credentials() {
+        let parsed = PullRequestLink::from_forgejo_url(
+            "https://fabro:token@git.example.com/fabro-sh/fabro/pulls/12",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            PullRequestLink::forgejo("https://git.example.com", "fabro-sh", "fabro", 12)
         );
     }
 

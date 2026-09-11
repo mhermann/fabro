@@ -38,12 +38,12 @@ pub use run::{
     StringOrSplice,
 };
 pub use server::{
-    GithubIntegrationLayer, IntegrationWebhooksLayer, ObjectStoreLocalLayer, ObjectStoreS3Layer,
-    ServerApiLayer, ServerArtifactsLayer, ServerAuthGithubLayer, ServerAuthLayer,
-    ServerIntegrationsLayer, ServerLayer, ServerListenLayer, ServerLoggingLayer,
-    ServerSandboxLayer, ServerSandboxProviderLayer, ServerSandboxProvidersLayer,
-    ServerSchedulerLayer, ServerSlateDbLayer, ServerStorageLayer, ServerWebLayer,
-    SlackIntegrationLayer,
+    ForgejoIntegrationLayer, GithubIntegrationLayer, IntegrationWebhooksLayer,
+    ObjectStoreLocalLayer, ObjectStoreS3Layer, ServerApiLayer, ServerArtifactsLayer,
+    ServerAuthGithubLayer, ServerAuthLayer, ServerIntegrationsLayer, ServerLayer,
+    ServerListenLayer, ServerLoggingLayer, ServerSandboxLayer, ServerSandboxProviderLayer,
+    ServerSandboxProvidersLayer, ServerSchedulerLayer, ServerSlateDbLayer, ServerStorageLayer,
+    ServerWebLayer, SlackIntegrationLayer,
 };
 pub use settings::SettingsLayer;
 pub use workflow::WorkflowLayer;

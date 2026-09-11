@@ -265,6 +265,7 @@ async fn initialized(
             artifact_sink: Some(ArtifactSink::Store(artifact_store)),
             run_control:   None,
             engine:        Arc::new(EngineServices {
+                forgejo_token: None,
                 run:             RunServices::new(
                     run_store.into(),
                     emitter,

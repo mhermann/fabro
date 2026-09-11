@@ -1,0 +1,27 @@
+---
+title: "Forgejo support"
+date: "2026-09-10"
+---
+
+## Forgejo
+
+Fabro can now run workflows against repositories hosted on a [Forgejo](https://forgejo.org) instance — the forge behind Codeberg, API-compatible with Gitea. Configure the instance URL and a PAT, then target Forgejo repositories with `provider = "forgejo"` on run targets or `[run.scm]`:
+
+```toml
+[server.integrations.forgejo]
+enabled = true
+url = "https://git.example.com"
+```
+
+```json
+{
+  "kind": "git",
+  "provider": "forgejo",
+  "repo": "acme/my-app",
+  "branch": "main"
+}
+```
+
+Clone-based sandboxes (Docker and Daytona) clone and push with the instance token, and pull-request automation works end to end — drafts use the conventional `WIP: ` title prefix, and auto-merge is a warn-and-skip since Forgejo's merge semantics differ. GitHub remains the default provider everywhere; existing targets, links, and automations are unchanged.
+
+See the [Forgejo integration guide](/integrations/forgejo) for setup and limitations.

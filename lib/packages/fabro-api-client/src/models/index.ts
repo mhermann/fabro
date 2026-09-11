@@ -416,6 +416,7 @@ export * from './sandbox-state';
 export * from './sandbox-timestamps';
 export * from './save-query-request';
 export * from './saved-query';
+export * from './scm-provider';
 export * from './secret-list-response';
 export * from './secret-metadata';
 export * from './secret-type';

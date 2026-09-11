@@ -260,19 +260,106 @@ fn has_lock_suffix(value: &str) -> bool {
 #[serde(rename_all = "snake_case")]
 pub enum RepositoryProvider {
     Github,
+    Forgejo,
     Git,
     Unknown,
 }
 
+/// The SCM forge a Git coordinate belongs to.
+///
+/// Run targets and pull request links carry this tag so that GitHub and a
+/// configured Forgejo instance can coexist on one deployment. Absent tags
+/// deserialize as [`ScmProvider::Github`], which keeps every existing
+/// serialized coordinate on the GitHub path.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    strum::Display,
+    strum::EnumString,
+    strum::IntoStaticStr,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum ScmProvider {
+    #[default]
+    Github,
+    Forgejo,
+}
+
 fn repository_provider(origin_url: Option<&str>) -> RepositoryProvider {
+    repository_provider_with(origin_url, None)
+}
+
+/// Classifies an origin URL, optionally recognizing a configured Forgejo
+/// instance by host.
+///
+/// Without `forgejo_url` this behaves exactly like the historical GitHub
+/// classification.
+#[must_use]
+pub fn repository_provider_with(
+    origin_url: Option<&str>,
+    forgejo_url: Option<&str>,
+) -> RepositoryProvider {
     let Some(origin) = origin_url.filter(|origin| !origin.trim().is_empty()) else {
         return RepositoryProvider::Unknown;
     };
     if is_github_origin(origin) {
-        RepositoryProvider::Github
-    } else {
-        RepositoryProvider::Git
+        return RepositoryProvider::Github;
     }
+    if forgejo_url.is_some_and(|url| origin_matches_instance(origin, url)) {
+        return RepositoryProvider::Forgejo;
+    }
+    RepositoryProvider::Git
+}
+
+/// Whether `origin` points at the Forgejo instance published at
+/// `instance_url`.
+///
+/// Hosts are compared case-insensitively. SSH remotes (`git@host:owner/repo`,
+/// `ssh://git@host/owner/repo`) match by host alone, while HTTP(S) origins
+/// must agree on the explicit or scheme-default port, so
+/// `https://host:8443/…` does not match an instance published at
+/// `https://host`.
+#[must_use]
+pub fn origin_matches_instance(origin: &str, instance_url: &str) -> bool {
+    let Some((origin_host, origin_port)) = url_host_port(origin.trim()) else {
+        return false;
+    };
+    let Some((instance_host, instance_port)) = url_host_port(instance_url.trim()) else {
+        return false;
+    };
+    if !origin_host.eq_ignore_ascii_case(&instance_host) {
+        return false;
+    }
+    match (origin_port, instance_port) {
+        // SSH spellings identify the deployment by host alone.
+        (None, _) | (_, None) => true,
+        (Some(origin_port), Some(instance_port)) => origin_port == instance_port,
+    }
+}
+
+/// Host and effective port from an HTTPS/HTTP/SSH URL or an SCP-like
+/// `git@host:path` spelling. SSH spellings yield `None` for the port because
+/// they identify the deployment by host alone; HTTP(S) URLs yield the
+/// explicit or scheme-default port.
+fn url_host_port(value: &str) -> Option<(String, Option<u16>)> {
+    if let Some(rest) = value.strip_prefix("git@") {
+        let (host, _) = rest.split_once(':')?;
+        return Some((host.to_string(), None));
+    }
+    let parsed = url::Url::parse(value).ok()?;
+    let host = parsed.host_str()?.to_string();
+    if parsed.scheme() == "ssh" {
+        return Some((host, None));
+    }
+    Some((host, parsed.port_or_known_default()))
 }
 
 fn is_github_origin(origin: &str) -> bool {
@@ -447,6 +534,86 @@ mod tests {
 
         let err = serde_json::from_str::<GitHubRepositorySlug>("\"not a slug\"").unwrap_err();
         assert!(err.to_string().contains("owner/repository"), "{err}");
+    }
+
+    #[test]
+    fn scm_provider_serde_and_display_use_snake_case() {
+        assert_eq!(serde_json::to_value(ScmProvider::Github).unwrap(), "github");
+        assert_eq!(
+            serde_json::to_value(ScmProvider::Forgejo).unwrap(),
+            "forgejo"
+        );
+        assert_eq!(ScmProvider::Forgejo.to_string(), "forgejo");
+        assert_eq!(
+            serde_json::from_str::<ScmProvider>("\"github\"").unwrap(),
+            ScmProvider::Github
+        );
+    }
+
+    #[test]
+    fn repository_provider_recognizes_forgejo_instances() {
+        let instance = "https://git.example.com";
+        let cases = [
+            ("https://git.example.com/owner/repo.git", true),
+            ("https://git.example.com/owner/repo", true),
+            ("git@git.example.com:owner/repo.git", true),
+            ("ssh://git@git.example.com/owner/repo", true),
+            ("https://GIT.EXAMPLE.COM/owner/repo.git", true),
+        ];
+        for (origin, expected) in cases {
+            assert_eq!(
+                repository_provider_with(Some(origin), Some(instance)),
+                if expected {
+                    RepositoryProvider::Forgejo
+                } else {
+                    RepositoryProvider::Git
+                },
+                "{origin}"
+            );
+        }
+
+        // Different hosts and ports stay plain Git origins.
+        for origin in [
+            "https://other.example.com/owner/repo.git",
+            "https://git.example.com:8443/owner/repo.git",
+            "git@other.example.com:owner/repo.git",
+        ] {
+            assert_eq!(
+                repository_provider_with(Some(origin), Some(instance)),
+                RepositoryProvider::Git,
+                "{origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn repository_provider_matches_localhost_instance_ports() {
+        let instance = "http://localhost:3001";
+        assert_eq!(
+            repository_provider_with(Some("http://localhost:3001/owner/repo"), Some(instance)),
+            RepositoryProvider::Forgejo
+        );
+        assert_eq!(
+            repository_provider_with(Some("git@localhost:owner/repo.git"), Some(instance)),
+            RepositoryProvider::Forgejo
+        );
+        assert_eq!(
+            repository_provider_with(Some("http://localhost:3000/owner/repo"), Some(instance)),
+            RepositoryProvider::Git
+        );
+    }
+
+    #[test]
+    fn repository_provider_without_instance_keeps_github_classification() {
+        assert_eq!(
+            repository_provider_with(Some("https://github.com/owner/repo"), None),
+            RepositoryProvider::Github
+        );
+        assert_eq!(
+            repository_provider_with(Some("https://git.example.com/owner/repo"), None),
+            RepositoryProvider::Git
+        );
+        assert_eq!(repository_provider_with(None, None), RepositoryProvider::Unknown);
     }
 
     #[test]

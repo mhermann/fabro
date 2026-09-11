@@ -5,7 +5,7 @@ import { ChevronRightIcon } from "@heroicons/react/20/solid";
 import type { Automation, Environment } from "@qltysh/fabro-api-client";
 
 import { ApiError, apiData, automationsApi } from "../lib/api-client";
-import { useAutomation, useEnvironments } from "../lib/queries";
+import { useAutomation, useEnvironments, useSystemIntegrations } from "../lib/queries";
 import { queryKeys } from "../lib/query-keys";
 import {
   AutomationFormFields,
@@ -34,6 +34,10 @@ export default function AutomationsEdit() {
   const { id } = useParams<{ id: string }>();
   const query = useAutomation(id);
   const environmentsQuery = useEnvironments();
+  const integrationsQuery = useSystemIntegrations();
+  const forgejoConfigured = integrationsQuery.data?.data?.some(
+    (status) => status.provider === "forgejo" && status.status === "configured",
+  ) ?? false;
 
   return (
     <div className="space-y-6">
@@ -42,6 +46,7 @@ export default function AutomationsEdit() {
         <EditAutomationForm
           key={query.data.id}
           automation={query.data}
+          forgejoConfigured={forgejoConfigured}
           environments={environmentsQuery.data?.data}
           environmentsLoading={environmentsQuery.isLoading && !environmentsQuery.data}
           environmentsError={Boolean(environmentsQuery.error)}
@@ -73,11 +78,13 @@ function PageHeader({ id, name }: { id: string; name: string | undefined }) {
 
 function EditAutomationForm({
   automation,
+  forgejoConfigured = false,
   environments = [],
   environmentsLoading,
   environmentsError,
 }: {
   automation: Automation;
+  forgejoConfigured?: boolean;
   environments?: Environment[];
   environmentsLoading: boolean;
   environmentsError: boolean;
@@ -134,6 +141,7 @@ function EditAutomationForm({
         values={values}
         onChange={setValues}
         lockIdAndTarget
+        forgejoConfigured={forgejoConfigured}
         environments={environments}
         environmentsLoading={environmentsLoading}
         environmentsError={environmentsError}

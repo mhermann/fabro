@@ -27,6 +27,7 @@ export interface AutomationFormValues {
   name: string;
   description: string;
   environmentId: string;
+  targetProvider: "github" | "forgejo";
   targetRepository: string;
   targetBranch: string;
   targetTag: string;
@@ -47,6 +48,7 @@ export const EMPTY_AUTOMATION_FORM: AutomationFormValues = {
   name:                       "",
   description:                "",
   environmentId:   "",
+  targetProvider:             "github",
   targetRepository:           "",
   targetBranch:               "main",
   targetTag:                  "",
@@ -79,6 +81,7 @@ export function automationToFormValues(automation: Automation): AutomationFormVa
     name:                       automation.name,
     description:                automation.description ?? "",
     environmentId:   automation.environment_id ?? "",
+    targetProvider:             target?.provider ?? "github",
     targetRepository:           target?.repo ?? "",
     targetBranch:               target?.branch ?? EMPTY_AUTOMATION_FORM.targetBranch,
     targetTag:                  target?.tag ?? "",
@@ -182,11 +185,12 @@ function isOptionalShaValid(sha: string): boolean {
 /** Canonical Git target sent in create/replace requests. */
 export function targetFromFormValues(values: AutomationFormValues): GitRunTarget {
   return {
-    kind:   "git",
-    repo:   values.targetRepository.trim(),
-    branch: values.targetBranch.trim(),
-    tag:    values.targetTag.trim() || undefined,
-    sha:    values.targetSha.trim().toLowerCase() || undefined,
+    kind:     "git",
+    repo:     values.targetRepository.trim(),
+    branch:   values.targetBranch.trim(),
+    tag:      values.targetTag.trim() || undefined,
+    sha:      values.targetSha.trim().toLowerCase() || undefined,
+    provider: values.targetProvider,
   };
 }
 
@@ -284,6 +288,8 @@ interface AutomationFormFieldsProps {
   environments?: Environment[];
   environmentsLoading?: boolean;
   environmentsError?: boolean;
+  /** Shown only when the server reports the Forgejo integration configured. */
+  forgejoConfigured?: boolean;
 }
 
 export function AutomationFormFields({
@@ -293,6 +299,7 @@ export function AutomationFormFields({
   environments = [],
   environmentsLoading = false,
   environmentsError = false,
+  forgejoConfigured = false,
 }: AutomationFormFieldsProps) {
   const slugTouchedRef = useRef(values.id.length > 0);
   const shaValid = isOptionalShaValid(values.targetSha);
@@ -421,9 +428,31 @@ export function AutomationFormFields({
       </Panel>
 
       <Panel title="Run target">
+        {forgejoConfigured ? (
+          <Row
+            title={<Label required>Provider</Label>}
+            help="The forge hosting the run repository. Forgejo targets use the server's configured instance."
+          >
+            <select
+              name="target_provider"
+              aria-label="Run target provider"
+              value={values.targetProvider}
+              onChange={(e) =>
+                patch({ targetProvider: e.target.value as AutomationFormValues["targetProvider"] })}
+              className={INPUT_CLASS}
+            >
+              <option value="github">GitHub</option>
+              <option value="forgejo">Forgejo</option>
+            </select>
+          </Row>
+        ) : null}
         <Row
           title={<Label required>Repository</Label>}
-          help="GitHub repository whose workspace the run changes, in owner/repo form."
+          help={
+            values.targetProvider === "forgejo"
+              ? "Repository on the configured Forgejo instance, in owner/repo form."
+              : "GitHub repository whose workspace the run changes, in owner/repo form."
+          }
         >
           <input
             type="text"

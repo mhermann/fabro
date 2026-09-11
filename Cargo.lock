@@ -2440,6 +2440,7 @@ dependencies = [
  "fabro-config",
  "fabro-dump",
  "fabro-environment",
+ "fabro-forgejo",
  "fabro-github",
  "fabro-graphviz",
  "fabro-hooks",
@@ -2656,6 +2657,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fabro-forgejo"
+version = "0.345.0-nightly.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fabro-http",
+ "fabro-macros",
+ "fabro-redact",
+ "fabro-static",
+ "fabro-test",
+ "fabro-types",
+ "httpmock",
+ "serde",
+ "serde_json",
+ "strum 0.28.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fabro-github"
 version = "0.345.0-nightly.0"
 dependencies = [
@@ -2822,6 +2845,7 @@ dependencies = [
  "anyhow",
  "fabro-api",
  "fabro-config",
+ "fabro-forgejo",
  "fabro-github",
  "fabro-graphviz",
  "fabro-template",
@@ -2989,6 +3013,7 @@ dependencies = [
  "daytona-api-client",
  "daytona-sdk",
  "fabro-config",
+ "fabro-forgejo",
  "fabro-github",
  "fabro-http",
  "fabro-proc",
@@ -3046,6 +3071,7 @@ dependencies = [
  "fabro-config",
  "fabro-db",
  "fabro-environment",
+ "fabro-forgejo",
  "fabro-github",
  "fabro-graphviz",
  "fabro-hooks",
@@ -3396,6 +3422,7 @@ dependencies = [
  "fabro-core",
  "fabro-dump",
  "fabro-environment",
+ "fabro-forgejo",
  "fabro-github",
  "fabro-graphviz",
  "fabro-hooks",

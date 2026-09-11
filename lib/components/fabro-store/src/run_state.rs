@@ -12,14 +12,14 @@ use fabro_types::{
     ActivatedSkill, AgentControlState, AskFabro, BilledModelUsage, BilledTokenCounts, Checkpoint,
     CheckpointRecord, CommandTermination, Conclusion, EventBody, FailureCategory, FailureSignature,
     InterviewQuestionRecord, McpServerProjection, McpServerStatus, Outcome, PendingInterviewRecord,
-    PendingReason, PullRequestCreation, PullRequestCreationStatus, PullRequestLink, RepositoryRef,
-    Run, RunApproval, RunApprovalState, RunBillingSummary, RunControlAction, RunDiff, RunEvent,
-    RunId, RunLifecycle, RunLinks, RunModel, RunOrigin, RunProjection, RunSandbox,
-    RunSandboxFailure, RunSandboxInstance, RunSandboxPlan, RunSandboxRuntime, RunSize, RunSpec,
-    RunStatus, RunTimestamps, SandboxProviderKind, StageCompletion, StageHandler, StageId,
-    StageInferenceProjection, StageModelUsage, StageOutcome, StageProjection, StageState,
-    StartRecord, SubAgentProjection, SubAgentStatus, TodoListKind, TodoListProjection,
-    TodoProjection, WorkflowRef, first_event_seq, timing,
+    PendingReason, PullRequestCreation, PullRequestCreationStatus, PullRequestLink,
+    RepositoryRef, Run, RunApproval, RunApprovalState, RunBillingSummary, RunControlAction,
+    RunDiff, RunEvent, RunId, RunLifecycle, RunLinks, RunModel, RunOrigin, RunProjection,
+    RunSandbox, RunSandboxFailure, RunSandboxInstance, RunSandboxPlan, RunSandboxRuntime, RunSize,
+    RunSpec, RunStatus, RunTimestamps, SandboxProviderKind, ScmProvider, StageCompletion,
+    StageHandler, StageId, StageInferenceProjection, StageModelUsage, StageOutcome,
+    StageProjection, StageState, StartRecord, SubAgentProjection, SubAgentStatus, TodoListKind,
+    TodoListProjection, TodoProjection, WorkflowRef, first_event_seq, timing,
 };
 use fabro_util::error::render_compact_with_causes;
 
@@ -384,10 +384,16 @@ impl RunProjectionReducer for RunProjection {
                 });
             }
             EventBody::PullRequestCreated(props) => {
-                let pull_request = PullRequestLink {
-                    owner:  props.owner.clone(),
-                    repo:   props.repo.clone(),
-                    number: props.pr_number,
+                let pull_request = match props.provider.unwrap_or_default() {
+                    ScmProvider::Github => {
+                        PullRequestLink::github(props.owner.clone(), props.repo.clone(), props.pr_number)
+                    }
+                    ScmProvider::Forgejo => PullRequestLink::forgejo(
+                        props.origin.clone().unwrap_or_default(),
+                        props.owner.clone(),
+                        props.repo.clone(),
+                        props.pr_number,
+                    ),
                 };
                 self.pull_request = Some(pull_request.clone());
                 if let Some(creation) = self
@@ -4777,6 +4783,8 @@ mod tests {
                     head_sha:    Some("final-sha".to_string()),
                     title:       "Add run PR chip".to_string(),
                     draft:       false,
+                    provider:    None,
+                    origin:      None,
                 }),
                 None,
             ))
@@ -4873,6 +4881,8 @@ mod tests {
                     head_sha:    Some("final-sha".to_string()),
                     title:       "Create asynchronously".to_string(),
                     draft:       true,
+                    provider:    None,
+                    origin:      None,
                 }),
                 None,
             ))
@@ -4891,16 +4901,8 @@ mod tests {
         };
 
         let mut state = running_projection();
-        let github_pull_request = PullRequestLink {
-            owner:  "fabro-sh".to_string(),
-            repo:   "fabro".to_string(),
-            number: 123,
-        };
-        let replacement_pull_request = PullRequestLink {
-            owner:  "acme".to_string(),
-            repo:   "widgets".to_string(),
-            number: 42,
-        };
+        let github_pull_request = PullRequestLink::github("fabro-sh", "fabro", 123);
+        let replacement_pull_request = PullRequestLink::github("acme", "widgets", 42);
 
         state
             .apply_event(&test_event(
@@ -4915,6 +4917,8 @@ mod tests {
                     head_sha:    Some("final-sha".to_string()),
                     title:       "Add run PR chip".to_string(),
                     draft:       false,
+                    provider:    None,
+                    origin:      None,
                 }),
                 None,
             ))

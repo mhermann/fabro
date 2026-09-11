@@ -158,6 +158,9 @@ pub struct DockerSandbox {
     clone_branch:      Option<String>,
     clone_tag:         Option<String>,
     clone_commit_sha:  Option<String>,
+    /// Base URL of the configured Forgejo instance when the run targets it;
+    /// drives origin classification and the forgejo checkout layout.
+    forgejo_instance_url: Option<String>,
     container_id:      OnceCell<String>,
     repo_cloned:       OnceCell<bool>,
     working_directory: OnceCell<String>,
@@ -185,6 +188,7 @@ impl DockerSandbox {
     pub fn new(
         config: DockerSandboxOptions,
         github_app: Option<&GitHubCredentials>,
+        forgejo: Option<&fabro_forgejo::ForgejoContext>,
         run_id: Option<RunId>,
         clone_origin_url: Option<String>,
         clone_branch: Option<String>,
@@ -198,6 +202,7 @@ impl DockerSandbox {
                 clone_branch.as_deref(),
                 clone_tag.as_deref(),
                 clone_commit_sha.as_deref(),
+                forgejo.map(fabro_forgejo::ForgejoContext::base_url),
             )?;
         }
         let docker = Docker::connect_with_local_defaults().map_err(crate::Error::docker_connect)?;
@@ -205,6 +210,7 @@ impl DockerSandbox {
             docker,
             config,
             github_app,
+            forgejo,
             run_id,
             clone_origin_url,
             clone_branch,
@@ -217,6 +223,7 @@ impl DockerSandbox {
         docker: Docker,
         config: DockerSandboxOptions,
         github_app: Option<&GitHubCredentials>,
+        forgejo: Option<&fabro_forgejo::ForgejoContext>,
         run_id: Option<RunId>,
         clone_origin_url: Option<String>,
         clone_branch: Option<String>,
@@ -225,6 +232,7 @@ impl DockerSandbox {
     ) -> crate::Result<Self> {
         let push_credentials = PushCredentialState::new(push_credentials::build_token_source(
             github_app,
+            forgejo,
             clone_origin_url.as_deref(),
         )?);
         Ok(Self {
@@ -235,6 +243,7 @@ impl DockerSandbox {
             clone_origin_url,
             clone_branch,
             clone_tag,
+            forgejo_instance_url: forgejo.map(|ctx| ctx.base_url().to_string()),
             clone_commit_sha,
             container_id: OnceCell::new(),
             repo_cloned: OnceCell::new(),
@@ -257,6 +266,7 @@ impl DockerSandbox {
     ) -> crate::Result<Self> {
         let sandbox = Self::new(
             DockerSandboxOptions::default(),
+            None,
             None,
             run_id,
             clone_origin_url.clone(),
@@ -906,7 +916,14 @@ impl DockerSandbox {
         .await
     }
 
-    async fn clone_github_repo(
+    /// Clones the run repository for either forge.
+    ///
+    /// GitHub origins derive the checkout layout from github.com and mint
+    /// App-backed credentials; Forgejo origins use the configured instance
+    /// layout and embed the static instance PAT. Everything after
+    /// authentication — prepare, pinned fetch or branch clone, symlink, and
+    /// the post-clone `set-url` — is shared.
+    async fn clone_repo(
         &self,
         origin_url: String,
         branch: Option<String>,
@@ -914,13 +931,25 @@ impl DockerSandbox {
         commit_sha: Option<String>,
     ) -> crate::Result<()> {
         self.verify_git_available().await?;
-        let layout = clone_source::github_repo_layout(&origin_url, WORKING_DIRECTORY, REPOS_ROOT)?;
+        let is_forgejo = self.forgejo_instance_url.as_deref().is_some_and(|instance| {
+            fabro_types::origin_matches_instance(&origin_url, instance)
+        });
+        let layout = if is_forgejo {
+            clone_source::forgejo_repo_layout(
+                &origin_url,
+                self.forgejo_instance_url.as_deref().unwrap_or_default(),
+                WORKING_DIRECTORY,
+                REPOS_ROOT,
+            )?
+        } else {
+            clone_source::github_repo_layout(&origin_url, WORKING_DIRECTORY, REPOS_ROOT)?
+        };
         // The clone mints its own token (never a warm-cache reuse) and seeds
         // the shared source, so the first refresh compares against the clone
         // token instead of believing nothing was ever embedded.
         let resolved_token = match self.push_credentials.source() {
             Some(source) => Some(source.mint_for_clone().await.map_err(|err| {
-                crate::Error::context_anyhow("Failed to get GitHub App credentials for clone", err)
+                crate::Error::context_anyhow("Failed to get clone credentials", err)
             })?),
             None => None,
         };
@@ -930,17 +959,21 @@ impl DockerSandbox {
         let clone_credential_context =
             CredentialContext::from_snapshot(resolved_token.as_ref().map(|token| &token.snapshot));
 
+        let embed = |token: &str| {
+            if is_forgejo {
+                fabro_forgejo::embed_token_in_url(&origin_url, token)
+            } else {
+                fabro_github::embed_token_in_url(&origin_url, token)
+            }
+            .map_err(|err| {
+                crate::Error::context_anyhow(
+                    "Failed to build authenticated clone URL",
+                    err,
+                )
+            })
+        };
         let auth_url = match &resolved_token {
-            Some(token) => Some(
-                fabro_github::embed_token_in_url(&origin_url, token.token.expose()).map_err(
-                    |err| {
-                        crate::Error::context_anyhow(
-                            "Failed to build authenticated GitHub clone URL",
-                            err,
-                        )
-                    },
-                )?,
-            ),
+            Some(token) => Some(embed(token.token.expose())?),
             None => None,
         };
         let clone_url = auth_url
@@ -1838,6 +1871,7 @@ impl Sandbox for DockerSandbox {
             self.clone_branch.as_deref(),
             self.clone_tag.as_deref(),
             self.clone_commit_sha.as_deref(),
+            self.forgejo_instance_url.as_deref(),
         )
         .map_err(|e| self.fail_init(init_start, e))?;
 
@@ -1860,11 +1894,14 @@ impl Sandbox for DockerSandbox {
                 branch,
                 tag,
                 commit_sha,
+            }
+            | CloneDecision::Forgejo {
+                origin_url,
+                branch,
+                tag,
+                commit_sha,
             } => {
-                if let Err(e) = self
-                    .clone_github_repo(origin_url, branch, tag, commit_sha)
-                    .await
-                {
+                if let Err(e) = self.clone_repo(origin_url, branch, tag, commit_sha).await {
                     return Err(self.fail_init(init_start, e));
                 }
             }
@@ -2447,7 +2484,7 @@ impl Sandbox for DockerSandbox {
     }
 
     fn push_token_source(&self) -> Option<Arc<InstallationTokenSource>> {
-        self.push_credentials.source().cloned()
+        self.push_credentials.github_source().cloned()
     }
 }
 

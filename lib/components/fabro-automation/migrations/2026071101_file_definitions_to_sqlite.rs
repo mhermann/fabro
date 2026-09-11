@@ -141,6 +141,7 @@ fn legacy_target(
         branch,
         tag,
         sha,
+        provider: fabro_types::ScmProvider::Github,
     })
     .validate()
     .map(|validated| validated.target)

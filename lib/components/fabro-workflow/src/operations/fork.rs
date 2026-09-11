@@ -405,10 +405,11 @@ mod tests {
             workflow_slug:       Some("fork-source".to_string()),
             workflow_version_id: Some(workflow_version_id),
             target:              Some(fabro_types::RunTarget::Git(fabro_types::GitRunTarget {
-                repo:   "example/repo".to_string(),
-                branch: "main".to_string(),
-                tag:    None,
-                sha:    None,
+                repo:     "example/repo".to_string(),
+                branch:   "main".to_string(),
+                tag:      None,
+                sha:      None,
+                provider: fabro_types::ScmProvider::Github,
             })),
             automation:          None,
             provenance:          test_support::test_run_provenance(),
@@ -499,10 +500,11 @@ mod tests {
         assert_eq!(
             forked_state.spec.target,
             Some(fabro_types::RunTarget::Git(fabro_types::GitRunTarget {
-                repo:   "example/repo".to_string(),
-                branch: "main".to_string(),
-                tag:    None,
-                sha:    None,
+                repo:     "example/repo".to_string(),
+                branch:   "main".to_string(),
+                tag:      None,
+                sha:      None,
+                provider: fabro_types::ScmProvider::Github,
             }))
         );
         assert_eq!(

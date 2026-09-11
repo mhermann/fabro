@@ -670,6 +670,8 @@ mod tests {
             head_sha:    Some("final-sha".to_string()),
             title:       "Ship the server-side PR".into(),
             draft:       true,
+            provider:    None,
+            origin:      None,
         };
 
         let stored = to_run_event(&fixtures::RUN_1, &event);

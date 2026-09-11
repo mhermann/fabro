@@ -17,7 +17,7 @@ use fabro_sandbox::from_environment::{
 use fabro_sandbox::{DockerSandboxOptions, SandboxSpec};
 use fabro_static::EnvVars;
 #[cfg(test)]
-use fabro_types::GitRunTarget;
+use fabro_types::{GitRunTarget, ScmProvider};
 use fabro_types::settings::run::{
     ApprovalMode, McpServerSettings as ResolvedMcpServerSettings, PullRequestSettings,
     ResolvedGithubIntegration, ResolvedMcpEntry, RunMode, RunNamespace as ResolvedRunSettings,
@@ -80,11 +80,13 @@ struct RunSession {
     artifact_sink:     Option<ArtifactSink>,
     git:               Option<GitCheckpointOptions>,
     github_app:        Option<fabro_github::GitHubCredentials>,
+    forgejo:           Option<fabro_forgejo::ForgejoContext>,
     registry_override: Option<Arc<HandlerRegistry>>,
     preserve_sandbox:  bool,
     stop_on_terminal:  bool,
     pr_config:         Option<PullRequestSettings>,
     pr_github_app:     Option<fabro_github::GitHubCredentials>,
+    pr_forgejo:        Option<fabro_forgejo::ForgejoContext>,
     pr_origin_url:     Option<String>,
     pr_model:          String,
     workflow_path:     Option<ManifestPath>,
@@ -112,6 +114,9 @@ pub struct StartServices {
     pub artifact_sink:      Option<ArtifactSink>,
     pub run_control:        Option<Arc<RunControlState>>,
     pub github_app:         Option<fabro_github::GitHubCredentials>,
+    /// Forgejo credentials for the configured instance. Required for runs
+    /// targeting a forgejo repository; runtime-only, never persisted.
+    pub forgejo:            Option<fabro_forgejo::ForgejoContext>,
     /// The resolved GitHub integration request (interpolated permissions
     /// plus declared additional repositories) to inject into the sandbox
     /// env. Empty when the github integration requests no token.
@@ -436,7 +441,9 @@ impl RunSession {
                 skip_clone: true,
             }
         } else {
-            clone_source_for_run(record)?
+            clone_source_for_run(record, services.forgejo.as_ref().map(
+                fabro_forgejo::ForgejoContext::base_url,
+            ))?
         };
         // Clone avoidance and repository identity are independent for Local
         // folder targets: their files are already present, but GitHub tokens
@@ -535,6 +542,7 @@ impl RunSession {
                 SandboxSpec::Docker {
                     config,
                     github_app: services.github_app.clone(),
+                    forgejo: services.forgejo.clone(),
                     run_id: Some(record.run_id),
                     clone_origin_url: clone_source.origin_url,
                     clone_branch: clone_source.branch,
@@ -551,6 +559,7 @@ impl RunSession {
                 SandboxSpec::Daytona {
                     config: Box::new(config),
                     github_app: services.github_app.clone(),
+                    forgejo: services.forgejo.clone(),
                     run_id: Some(record.run_id),
                     clone_origin_url: clone_source.origin_url,
                     clone_branch: clone_source.branch,
@@ -617,11 +626,13 @@ impl RunSession {
             artifact_sink: services.artifact_sink,
             git,
             github_app: services.github_app.clone(),
+            forgejo: services.forgejo.clone(),
             registry_override: services.registry_override,
             preserve_sandbox: resolved.environment.lifecycle.preserve,
             stop_on_terminal: resolved.environment.lifecycle.stop_on_terminal,
             pr_config,
             pr_github_app: services.github_app,
+            pr_forgejo: services.forgejo,
             pr_origin_url: runtime_origin_url,
             pr_model: llm.model,
             workflow_path,
@@ -696,7 +707,10 @@ async fn dry_run_workspace_for_target(persisted: &Persisted) -> Result<PathBuf, 
     })
 }
 
-fn clone_source_for_run(record: &RunSpec) -> Result<CloneSourceForRun, Error> {
+fn clone_source_for_run(
+    record: &RunSpec,
+    forgejo_url: Option<&str>,
+) -> Result<CloneSourceForRun, Error> {
     let Some(target) = &record.target else {
         return Ok(CloneSourceForRun {
             origin_url: record.repo_origin_url().map(str::to_string),
@@ -712,16 +726,23 @@ fn clone_source_for_run(record: &RunSpec) -> Result<CloneSourceForRun, Error> {
     // re-derives the clone source from the persisted target alone. The
     // persisted `git` projection is display metadata, never a clone input, so
     // writers cannot break starts by letting the pair drift.
-    let validated = target.clone().validate().map_err(|error| {
-        Error::engine(match error {
-            TargetValidationError::Repository => {
-                "persisted Git run target has an invalid repository slug"
-            }
-            TargetValidationError::Branch => "persisted Git run target has an invalid branch",
-            TargetValidationError::Tag => "persisted Git run target has an invalid tag",
-            TargetValidationError::Sha => "persisted Git run target has an invalid SHA",
-        })
-    })?;
+    let validated = target.clone().validate_with_scm(forgejo_url)
+        .map_err(|error| {
+            Error::engine(match error {
+                TargetValidationError::Repository => {
+                    "persisted Git run target has an invalid repository slug"
+                }
+                TargetValidationError::Branch => {
+                    "persisted Git run target has an invalid branch"
+                }
+                TargetValidationError::Tag => "persisted Git run target has an invalid tag",
+                TargetValidationError::Sha => "persisted Git run target has an invalid SHA",
+                TargetValidationError::ForgejoUnconfigured => {
+                    "persisted Git run target names a Forgejo repository but no Forgejo \
+                     instance is configured (server.integrations.forgejo.url + FORGEJO_TOKEN)"
+                }
+            })
+        })?;
     // A target with no Git projection (`none` or `folder`) supplies no clone
     // source. Folder targets only reach the Local provider, where `skip_clone`
     // is unused.
@@ -927,6 +948,7 @@ impl RunSession {
             labels:           record.labels.clone(),
             workflow_slug:    record.workflow_slug.clone(),
             github_app:       self.github_app.clone(),
+            forgejo:          self.forgejo.clone(),
             pre_run_git:      record.git.clone(),
             fork_source_ref:  record.fork_source_ref.clone(),
             base_branch:      record.base_branch().map(str::to_string),
@@ -1065,6 +1087,7 @@ impl RunSession {
         let publish_opts = PublishOptions {
             pr_config:  self.pr_config,
             github_app: self.pr_github_app,
+            forgejo:    self.pr_forgejo,
             origin_url: self.pr_origin_url,
             model:      self.pr_model,
         };
@@ -2069,6 +2092,7 @@ reasoning = false
                 branch: "main".to_string(),
                 tag:    None,
                 sha:    Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+provider: ScmProvider::Github,
             }),
         ] {
             let temp = tempfile::tempdir().unwrap();
@@ -2577,6 +2601,7 @@ reasoning = false
             artifact_sink: None,
             run_control: None,
             github_app: None,
+                forgejo: None,
             github_integration: ResolvedGithubIntegration::default(),
             vault: Arc::new(AsyncRwLock::new(start_vault(&[]))),
             catalog: test_catalog(),
@@ -3331,7 +3356,7 @@ reasoning = false
             dirty:      fabro_types::DirtyStatus::Clean,
         });
 
-        let source = clone_source_for_run(&spec).unwrap();
+        let source = clone_source_for_run(&spec, None).unwrap();
 
         assert_eq!(source.commit_sha, None);
         assert_eq!(source.branch.as_deref(), Some("main"));
@@ -3348,7 +3373,7 @@ reasoning = false
             dirty:      fabro_types::DirtyStatus::Clean,
         });
 
-        let source = clone_source_for_run(&spec).unwrap();
+        let source = clone_source_for_run(&spec, None).unwrap();
 
         assert_eq!(source.origin_url, None);
         assert_eq!(source.branch, None);
@@ -3366,6 +3391,7 @@ reasoning = false
             branch: "feature/run-intent".to_string(),
             tag:    Some("v1.2.3".to_string()),
             sha:    Some(submitted_sha.to_string()),
+provider: ScmProvider::Github,
         }));
         spec.git = Some(fabro_types::GitContext {
             origin_url: "https://github.com/fabro-sh/fabro".to_string(),
@@ -3374,7 +3400,7 @@ reasoning = false
             dirty:      fabro_types::DirtyStatus::Clean,
         });
 
-        let source = clone_source_for_run(&spec).unwrap();
+        let source = clone_source_for_run(&spec, None).unwrap();
 
         assert_eq!(
             source.origin_url.as_deref(),
@@ -3393,6 +3419,7 @@ reasoning = false
             branch: "feature/run-intent".to_string(),
             tag:    None,
             sha:    None,
+provider: ScmProvider::Github,
         }));
         spec.git = Some(fabro_types::GitContext {
             origin_url: "https://github.com/fabro-sh/fabro".to_string(),
@@ -3401,7 +3428,7 @@ reasoning = false
             dirty:      fabro_types::DirtyStatus::Clean,
         });
 
-        let source = clone_source_for_run(&spec).unwrap();
+        let source = clone_source_for_run(&spec, None).unwrap();
 
         assert_eq!(source.branch.as_deref(), Some("feature/run-intent"));
         assert_eq!(source.commit_sha, None);
@@ -3415,9 +3442,10 @@ reasoning = false
             branch: "release-work".to_string(),
             tag:    Some("v1.2.3".to_string()),
             sha:    None,
+provider: ScmProvider::Github,
         }));
 
-        let source = clone_source_for_run(&spec).unwrap();
+        let source = clone_source_for_run(&spec, None).unwrap();
 
         assert_eq!(source.branch.as_deref(), Some("release-work"));
         assert_eq!(source.tag.as_deref(), Some("v1.2.3"));
@@ -3432,6 +3460,7 @@ reasoning = false
             branch: "main".to_string(),
             tag:    None,
             sha:    None,
+provider: ScmProvider::Github,
         }));
         // A drifted (or absent) projection never feeds the clone source: the
         // validated target alone does.
@@ -3442,7 +3471,7 @@ reasoning = false
             dirty:      fabro_types::DirtyStatus::Clean,
         });
 
-        let source = clone_source_for_run(&spec).unwrap();
+        let source = clone_source_for_run(&spec, None).unwrap();
 
         assert_eq!(
             source.origin_url.as_deref(),
@@ -3452,7 +3481,7 @@ reasoning = false
         assert_eq!(source.commit_sha, None);
 
         spec.git = None;
-        let source = clone_source_for_run(&spec).unwrap();
+        let source = clone_source_for_run(&spec, None).unwrap();
         assert_eq!(source.branch.as_deref(), Some("main"));
     }
 }

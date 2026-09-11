@@ -28,18 +28,21 @@ export default function SettingsIntegrations() {
   const integrationsQuery = useSystemIntegrations();
   const integrations = integrationsQuery.data?.data;
   const github = integrations?.find((status) => status.provider === "github");
+  const forgejo = integrations?.find((status) => status.provider === "forgejo");
   const slack = integrations?.find((status) => status.provider === "slack");
 
   return (
     <div className="space-y-6">
       <SettingsPageIntro description={DESCRIPTION} />
-      {github && slack ? (
+      {github && forgejo && slack ? (
         <>
           <GithubPanel status={github} />
+          <ForgejoPanel status={forgejo} />
           <SlackPanel status={slack} />
         </>
       ) : (
         <>
+          <PanelSkeleton />
           <PanelSkeleton />
           <PanelSkeleton />
         </>
@@ -47,6 +50,26 @@ export default function SettingsIntegrations() {
       <ProjectManagementPanel />
     </div>
   );
+}
+
+function ForgejoPanel({ status }: { status: SystemIntegrationStatus }) {
+  return (
+    <Panel title="Version Control">
+      <IntegrationRow
+        slug="forgejo"
+        name="Forgejo"
+        help="Self-hosted forge for repo access and PR automation."
+      >
+        <IntegrationValue status={status} detail={forgejoDetail(status)} />
+      </IntegrationRow>
+    </Panel>
+  );
+}
+
+function forgejoDetail(status: SystemIntegrationStatus): string | undefined {
+  const metadata = status.metadata ?? {};
+  if (metadata.url) return `instance: ${metadata.url}`;
+  return missingCredentialsDetail(status);
 }
 
 function ProjectManagementPanel() {

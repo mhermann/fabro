@@ -1,13 +1,13 @@
 use std::path::Path;
 
 use fabro_types::settings::server::{
-    GithubIntegrationSettings, GithubIntegrationStrategy, IntegrationWebhooksSettings,
-    ObjectStoreProvider, ObjectStoreSettings, ServerApiSettings, ServerArtifactsSettings,
-    ServerAuthGithubSettings, ServerAuthMethod, ServerAuthSettings, ServerIntegrationsSettings,
-    ServerListenSettings, ServerLoggingSettings, ServerNamespace, ServerSandboxProviderSettings,
-    ServerSandboxProvidersSettings, ServerSandboxSettings, ServerSchedulerSettings,
-    ServerSlateDbSettings, ServerStorageSettings, ServerWebSettings, SlackIntegrationSettings,
-    WebhookStrategy,
+    ForgejoIntegrationSettings, GithubIntegrationSettings, GithubIntegrationStrategy,
+    IntegrationWebhooksSettings, ObjectStoreProvider, ObjectStoreSettings, ServerApiSettings,
+    ServerArtifactsSettings, ServerAuthGithubSettings, ServerAuthMethod, ServerAuthSettings,
+    ServerIntegrationsSettings, ServerListenSettings, ServerLoggingSettings, ServerNamespace,
+    ServerSandboxProviderSettings, ServerSandboxProvidersSettings, ServerSandboxSettings,
+    ServerSchedulerSettings, ServerSlateDbSettings, ServerStorageSettings, ServerWebSettings,
+    SlackIntegrationSettings, WebhookStrategy,
 };
 use fabro_util::Home;
 
@@ -17,10 +17,10 @@ use super::{
 };
 use crate::user::default_storage_dir;
 use crate::{
-    IntegrationWebhooksLayer, ObjectStoreLocalLayer, ObjectStoreS3Layer, ServerApiLayer,
-    ServerArtifactsLayer, ServerAuthLayer, ServerIntegrationsLayer, ServerLayer, ServerListenLayer,
-    ServerSandboxLayer, ServerSandboxProviderLayer, ServerSlateDbLayer, ServerStorageLayer,
-    ServerWebLayer,
+    ForgejoIntegrationLayer, IntegrationWebhooksLayer, ObjectStoreLocalLayer, ObjectStoreS3Layer,
+    ServerApiLayer, ServerArtifactsLayer, ServerAuthLayer, ServerIntegrationsLayer, ServerLayer,
+    ServerListenLayer, ServerSandboxLayer, ServerSandboxProviderLayer, ServerSlateDbLayer,
+    ServerStorageLayer, ServerWebLayer,
 };
 
 pub fn resolve_server(layer: &ServerLayer, errors: &mut Vec<ResolveError>) -> ServerNamespace {
@@ -28,7 +28,7 @@ pub fn resolve_server(layer: &ServerLayer, errors: &mut Vec<ResolveError>) -> Se
     let listen = resolve_listen(layer.listen.as_ref(), errors);
     let web = resolve_web(layer.web.as_ref());
     let auth = resolve_auth(layer.auth.as_ref(), errors);
-    let integrations = resolve_integrations(layer.integrations.as_ref());
+    let integrations = resolve_integrations(layer.integrations.as_ref(), errors);
     validate_github_webhook_strategy(&integrations, layer.api.as_ref(), errors);
 
     let api_url = layer.api.as_ref().and_then(|api| api.url.clone());
@@ -333,7 +333,10 @@ fn object_store_default_root(storage_root: &str, domain: &str) -> String {
         .into_owned()
 }
 
-fn resolve_integrations(layer: Option<&ServerIntegrationsLayer>) -> ServerIntegrationsSettings {
+fn resolve_integrations(
+    layer: Option<&ServerIntegrationsLayer>,
+    errors: &mut Vec<ResolveError>,
+) -> ServerIntegrationsSettings {
     ServerIntegrationsSettings {
         github: layer
             .and_then(|integrations| integrations.github.as_ref())
@@ -375,7 +378,67 @@ fn resolve_integrations(layer: Option<&ServerIntegrationsLayer>) -> ServerIntegr
                     }
                 },
             ),
+        forgejo: resolve_forgejo(
+            layer.and_then(|integrations| integrations.forgejo.as_ref()),
+            errors,
+        ),
     }
+}
+
+fn resolve_forgejo(
+    layer: Option<&ForgejoIntegrationLayer>,
+    errors: &mut Vec<ResolveError>,
+) -> ForgejoIntegrationSettings {
+    let Some(forgejo) = layer else {
+        return ForgejoIntegrationSettings::default();
+    };
+    let enabled = forgejo.enabled.unwrap_or(true);
+    warn_if_demoted_template("server.integrations.forgejo.url", forgejo.url.as_deref());
+    let url = forgejo
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(normalize_forgejo_instance_url);
+    if enabled && url.is_none() {
+        errors.push(ResolveError::Invalid {
+            path:   "server.integrations.forgejo.url".to_string(),
+            reason: "must be set to the Forgejo instance base URL when the forgejo integration \
+                     is enabled"
+                .to_string(),
+        });
+    }
+    ForgejoIntegrationSettings {
+        enabled,
+        url,
+    }
+}
+
+/// Trims the trailing slash and requires `https` except for loopback hosts,
+/// where `http` is accepted for local Forgejo development instances.
+fn normalize_forgejo_instance_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    if is_loopback_instance_url(trimmed) {
+        return trimmed.to_string();
+    }
+    match trimmed.strip_prefix("http://") {
+        Some(rest) => format!("https://{rest}"),
+        None => trimmed.to_string(),
+    }
+}
+
+/// Whether the URL points at a loopback host, optionally with a port.
+fn is_loopback_instance_url(url: &str) -> bool {
+    let authority = url.split("://").nth(1).unwrap_or(url);
+    let host_with_port = authority.split('/').next().unwrap_or_default();
+    // Strip an all-digit port suffix; bracketed IPv6 literals pass through
+    // intact because their closing bracket makes the suffix non-digit.
+    let host = host_with_port
+        .rsplit_once(':')
+        .filter(|(_, port)| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
+        .map_or(host_with_port, |(host, _)| host);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
 }
 
 fn resolve_github_webhooks(layer: &IntegrationWebhooksLayer) -> IntegrationWebhooksSettings {

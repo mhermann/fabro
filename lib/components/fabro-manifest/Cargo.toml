@@ -16,6 +16,7 @@ workspace = true
 anyhow.workspace = true
 fabro-api = { path = "../../foundation/fabro-api" }
 fabro-config = { path = "../../foundation/fabro-config" }
+fabro-forgejo = { path = "../fabro-forgejo" }
 fabro-github = { path = "../fabro-github" }
 fabro-graphviz = { path = "../fabro-graphviz" }
 fabro-template = { path = "../../foundation/fabro-template" }

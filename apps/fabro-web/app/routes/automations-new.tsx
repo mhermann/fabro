@@ -6,7 +6,13 @@ import type { Environment } from "@qltysh/fabro-api-client";
 
 import { ApiError, apiData, automationsApi } from "../lib/api-client";
 import { queryKeys } from "../lib/query-keys";
-import { useEnvironments, useRun, useRunSettings, useRunState } from "../lib/queries";
+import {
+  useEnvironments,
+  useRun,
+  useRunSettings,
+  useRunState,
+  useSystemIntegrations,
+} from "../lib/queries";
 import {
   AutomationFormFields,
   EMPTY_AUTOMATION_FORM,
@@ -37,6 +43,7 @@ export default function AutomationsNew() {
   const runStateQuery = useRunState(fromRunId);
   const settingsQuery = useRunSettings(fromRunId);
   const environmentsQuery = useEnvironments();
+  const forgejoConfigured = useForgejoConfigured();
   const environments = environmentsQuery.data?.data;
   const environmentsPending = environmentsQuery.isLoading && !environmentsQuery.data;
   const environmentsError = Boolean(environmentsQuery.error);
@@ -46,6 +53,7 @@ export default function AutomationsNew() {
       <AutomationCreateForm
         key="blank"
         initialValues={EMPTY_AUTOMATION_FORM}
+        forgejoConfigured={forgejoConfigured}
         environments={environments}
         environmentsLoading={environmentsPending}
         environmentsError={environmentsError}
@@ -74,6 +82,7 @@ export default function AutomationsNew() {
       <AutomationCreateForm
         key={`missing:${fromRunId}`}
         initialValues={EMPTY_AUTOMATION_FORM}
+        forgejoConfigured={forgejoConfigured}
         environments={environments}
         environmentsError={environmentsError}
         sourceError="The source run could not be loaded. You can still fill it out manually."
@@ -92,6 +101,7 @@ export default function AutomationsNew() {
     <AutomationCreateForm
       key={`from-run:${fromRunId}`}
       initialValues={initialValues}
+      forgejoConfigured={forgejoConfigured}
       environments={environments}
       environmentsError={environmentsError}
     />
@@ -100,12 +110,14 @@ export default function AutomationsNew() {
 
 function AutomationCreateForm({
   initialValues,
+  forgejoConfigured = false,
   environments = [],
   environmentsLoading = false,
   environmentsError = false,
   sourceError = null,
 }: {
   initialValues: AutomationFormValues;
+  forgejoConfigured?: boolean;
   environments?: Environment[];
   environmentsLoading?: boolean;
   environmentsError?: boolean;
@@ -162,6 +174,7 @@ function AutomationCreateForm({
       <AutomationFormFields
         values={values}
         onChange={setValues}
+        forgejoConfigured={forgejoConfigured}
         environments={environments}
         environmentsLoading={environmentsLoading}
         environmentsError={environmentsError}
@@ -222,4 +235,13 @@ function FormFooter({
       </button>
     </div>
   );
+}
+
+/** True when the server reports the Forgejo integration fully configured. */
+function useForgejoConfigured(): boolean {
+  const integrationsQuery = useSystemIntegrations();
+  const integrations = integrationsQuery.data?.data;
+  return integrations?.some(
+    (status) => status.provider === "forgejo" && status.status === "configured",
+  ) ?? false;
 }

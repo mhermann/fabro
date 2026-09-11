@@ -1,0 +1,37 @@
+[package]
+name = "fabro-forgejo"
+edition.workspace = true
+version.workspace = true
+publish = false
+license.workspace = true
+description = "Forgejo (Gitea-compatible) API helpers for Fabro"
+
+[lib]
+doctest = false
+
+[features]
+test-support = []
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+strum.workspace = true
+serde_json.workspace = true
+fabro-http.workspace = true
+fabro-redact.workspace = true
+fabro-static.workspace = true
+fabro-types = { path = "../../foundation/fabro-types" }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+fabro-macros = { path = "../../foundation/fabro-macros" }
+fabro-test = { workspace = true }
+fabro-http.workspace = true
+httpmock = "0.8"
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tracing-subscriber.workspace = true

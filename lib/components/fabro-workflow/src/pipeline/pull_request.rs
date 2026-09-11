@@ -9,11 +9,13 @@ use fabro_llm::client::Client;
 use fabro_llm::generate::{GenerateParams, generate_object};
 use fabro_model::{Catalog, ProviderId};
 use fabro_store::RunProjection;
-use fabro_types::PullRequestLink;
+use fabro_types::{ScmProvider, PullRequestLink};
 use fabro_types::settings::run::MergeStrategy;
 use fabro_util::text::strip_goal_decoration;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
+
+use super::types::ScmTarget;
 
 use crate::outcome::format_cost as outcome_format_cost;
 use crate::records::{Conclusion, RunSpec};
@@ -445,7 +447,12 @@ pub struct AutoMergeOptions {
 
 /// Inputs for [`open_pull_request`].
 pub struct OpenPullRequestRequest<'a> {
-    pub github:            github_app::GitHubContext<'a>,
+    /// GitHub credentials for GitHub-hosted origins. `None` for forgejo
+    /// origins, which never need them.
+    pub github:            Option<github_app::GitHubContext<'a>>,
+    /// Forgejo credentials for the configured instance. Required when the
+    /// origin is a forgejo repository; ignored for GitHub origins.
+    pub forgejo:           Option<&'a fabro_forgejo::ForgejoContext>,
     pub origin_url:        &'a str,
     pub base_branch:       &'a str,
     pub head_branch:       &'a str,
@@ -472,42 +479,37 @@ pub struct CreatedPullRequest {
     pub head_branch: String,
 }
 
+/// Forge-agnostic view of an existing open pull request found by
+/// reconciliation. `node_id` is only present for GitHub, whose auto-merge
+/// API is keyed on it.
+struct ReconciledPullRequest {
+    html_url: String,
+    number:   u64,
+    title:    String,
+    node_id:  Option<String>,
+}
+
 /// Adopt an open pull request that already exists for the head branch at the
-/// expected commit, e.g. when GitHub created the pull request but the caller
-/// stopped before persisting the result.
+/// expected commit, e.g. when the forge created the pull request but the
+/// caller stopped before persisting the result.
 async fn reconcile_existing_pull_request(
     req: &OpenPullRequestRequest<'_>,
-    owner: &str,
-    repo: &str,
+    target: &ScmTarget,
     context: &'static str,
 ) -> anyhow::Result<Option<CreatedPullRequest>> {
-    let Some(existing) = github_app::find_open_pull_request(
-        &req.github,
-        owner,
-        repo,
-        req.base_branch,
-        req.head_branch,
-        req.expected_head_sha,
-    )
-    .await?
-    else {
+    let (owner, repo) = target.slug();
+    let Some(existing) = find_open_pull_request(req, target).await? else {
         return Ok(None);
     };
     info!(pr_url = %existing.html_url, pr_number = existing.number, context, "Existing pull request reconciled");
-    enable_auto_merge_if_requested(
-        &req.github,
-        owner,
-        repo,
-        &existing.node_id,
-        existing.number,
-        req.auto_merge.as_ref(),
-    )
-    .await;
+    enable_auto_merge_if_requested(req, target, &existing).await;
     Ok(Some(CreatedPullRequest {
         link:        PullRequestLink {
-            owner:  owner.to_string(),
-            repo:   repo.to_string(),
-            number: existing.number,
+            owner:    owner.to_string(),
+            repo:     repo.to_string(),
+            number:   existing.number,
+            provider: link_provider(target),
+            origin:   link_origin(target),
         },
         title:       existing.title,
         base_branch: req.base_branch.to_string(),
@@ -515,24 +517,120 @@ async fn reconcile_existing_pull_request(
     }))
 }
 
+/// The provider tag a created link carries for the target forge.
+fn link_provider(target: &ScmTarget) -> ScmProvider {
+    match target {
+        ScmTarget::GitHub { .. } => ScmProvider::Github,
+        ScmTarget::Forgejo { .. } => ScmProvider::Forgejo,
+    }
+}
+
+/// The instance origin a created link carries; GitHub links carry none.
+fn link_origin(target: &ScmTarget) -> Option<String> {
+    match target {
+        ScmTarget::GitHub { .. } => None,
+        ScmTarget::Forgejo { origin, .. } => Some(origin.clone()),
+    }
+}
+
+/// Look up an open pull request for the head branch at the expected commit.
+async fn find_open_pull_request(
+    req: &OpenPullRequestRequest<'_>,
+    target: &ScmTarget,
+) -> anyhow::Result<Option<ReconciledPullRequest>> {
+    let (owner, repo) = target.slug();
+    match target {
+        ScmTarget::GitHub { .. } => {
+            let github = req.github.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("pull request creation requires GitHub credentials")
+            })?;
+            let existing = github_app::find_open_pull_request(
+                github,
+                owner,
+                repo,
+                req.base_branch,
+                req.head_branch,
+                req.expected_head_sha,
+            )
+            .await?;
+            Ok(existing.map(|existing| ReconciledPullRequest {
+                html_url: existing.html_url,
+                number:   existing.number,
+                title:    existing.title,
+                node_id:  Some(existing.node_id),
+            }))
+        }
+        ScmTarget::Forgejo { .. } => {
+            let ctx = req.forgejo.ok_or_else(|| {
+                anyhow::anyhow!("pull request creation requires a configured Forgejo instance")
+            })?;
+            let client = fabro_http::http_client()?;
+            let existing = fabro_forgejo::find_open_pull_request(
+                &client,
+                ctx,
+                owner,
+                repo,
+                req.base_branch,
+                req.head_branch,
+                req.expected_head_sha,
+            )
+            .await?;
+            Ok(existing.map(|existing| ReconciledPullRequest {
+                html_url: existing.html_url,
+                number:   existing.number,
+                title:    existing.title,
+                node_id:  None,
+            }))
+        }
+    }
+}
+
+/// Apply requested auto-merge. GitHub re-syncs the merge state; Forgejo has
+/// no equivalent API, so a request there is a warn-and-skip.
 async fn enable_auto_merge_if_requested(
-    github: &github_app::GitHubContext<'_>,
-    owner: &str,
-    repo: &str,
-    node_id: &str,
-    number: u64,
-    options: Option<&AutoMergeOptions>,
+    req: &OpenPullRequestRequest<'_>,
+    target: &ScmTarget,
+    existing: &ReconciledPullRequest,
 ) {
-    let Some(options) = options else {
+    let Some(options) = req.auto_merge.as_ref() else {
         return;
     };
-    match github_app::enable_auto_merge(github, owner, repo, node_id, options.merge_strategy).await
-    {
-        Ok(()) => info!(pr_number = number, "Auto-merge enabled"),
-        Err(err) => warn!(
-            pr_number = number,
-            error = %err,
-            "Failed to enable auto-merge (repo may not have auto-merge enabled in settings)"
+    match target {
+        ScmTarget::GitHub { owner, repo } => {
+            let Some(node_id) = existing.node_id.as_deref() else {
+                warn!(
+                    pr_number = existing.number,
+                    "Auto-merge requested without a GitHub node id; skipping"
+                );
+                return;
+            };
+            let Some(github) = req.github.as_ref() else {
+                warn!(
+                    pr_number = existing.number,
+                    "Auto-merge requested without GitHub credentials; skipping"
+                );
+                return;
+            };
+            match github_app::enable_auto_merge(
+                github,
+                owner,
+                repo,
+                node_id,
+                options.merge_strategy,
+            )
+            .await
+            {
+                Ok(()) => info!(pr_number = existing.number, "Auto-merge enabled"),
+                Err(err) => warn!(
+                    pr_number = existing.number,
+                    error = %err,
+                    "Failed to enable auto-merge (repo may not have auto-merge enabled in settings)"
+                ),
+            }
+        }
+        ScmTarget::Forgejo { .. } => warn!(
+            pr_number = existing.number,
+            "Auto-merge is not supported on Forgejo; merge the pull request manually"
         ),
     }
 }
@@ -551,12 +649,11 @@ const BRANCH_HEAD_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// not be mistaken for a genuinely stale branch.
 async fn verify_remote_head(
     req: &OpenPullRequestRequest<'_>,
-    owner: &str,
-    repo: &str,
+    target: &ScmTarget,
 ) -> Result<(), String> {
     let mut last_seen = Ok(None);
     for attempt in 1..=BRANCH_HEAD_ATTEMPTS {
-        last_seen = github_app::branch_head_sha(&req.github, owner, repo, req.head_branch).await;
+        last_seen = branch_head_sha(req, target).await;
         match &last_seen {
             Ok(Some(head)) if head == req.expected_head_sha => return Ok(()),
             Ok(head) => debug!(
@@ -585,6 +682,29 @@ async fn verify_remote_head(
     })
 }
 
+/// Read the head SHA of the run branch on the target forge.
+async fn branch_head_sha(
+    req: &OpenPullRequestRequest<'_>,
+    target: &ScmTarget,
+) -> anyhow::Result<Option<String>> {
+    let (owner, repo) = target.slug();
+    match target {
+        ScmTarget::GitHub { .. } => {
+            let github = req.github.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("pull request creation requires GitHub credentials")
+            })?;
+            github_app::branch_head_sha(github, owner, repo, req.head_branch).await
+        }
+        ScmTarget::Forgejo { .. } => {
+            let ctx = req
+                .forgejo
+                .ok_or_else(|| anyhow::anyhow!("no configured Forgejo instance"))?;
+            let client = fabro_http::http_client()?;
+            fabro_forgejo::branch_head_sha(&client, ctx, owner, repo, req.head_branch).await
+        }
+    }
+}
+
 /// Open a pull request for a completed run.
 ///
 /// Callers are responsible for skipping runs with an empty diff; reaching here
@@ -592,15 +712,19 @@ async fn verify_remote_head(
 pub async fn open_pull_request(
     req: OpenPullRequestRequest<'_>,
 ) -> Result<CreatedPullRequest, String> {
-    let https_url = ssh_url_to_https(req.origin_url);
-    let (owner, repo) =
-        github_app::parse_github_owner_repo(&https_url).map_err(|err| format!("{err:#}"))?;
+    let target = ScmTarget::resolve(req.origin_url, req.forgejo)
+        .ok_or_else(|| {
+            format!(
+                "origin '{}' is not a GitHub repository and no configured Forgejo instance matches it",
+                ssh_url_to_https(req.origin_url)
+            )
+        })?;
 
     // Verify before generating content: this is the cheap check, and a stale
     // branch would otherwise cost a full LLM call before failing.
-    verify_remote_head(&req, &owner, &repo).await?;
+    verify_remote_head(&req, &target).await?;
 
-    if let Some(existing) = reconcile_existing_pull_request(&req, &owner, &repo, "before creation")
+    if let Some(existing) = reconcile_existing_pull_request(&req, &target, "before creation")
         .await
         .map_err(|err| format!("failed to reconcile an existing pull request: {err:#}"))?
     {
@@ -622,23 +746,10 @@ pub async fn open_pull_request(
     let body = truncate_pr_body(&content.body);
     let title = content.title;
 
-    let created = match github_app::create_pull_request(
-        &req.github,
-        &owner,
-        &repo,
-        req.base_branch,
-        req.head_branch,
-        &title,
-        &body,
-        req.draft,
-    )
-    .await
-    {
+    let created = match create_pull_request_on_forge(&req, &target, &title, &body).await {
         Ok(created) => created,
         Err(create_err) => {
-            match reconcile_existing_pull_request(&req, &owner, &repo, "after a failed create")
-                .await
-            {
+            match reconcile_existing_pull_request(&req, &target, "after a failed create").await {
                 Ok(Some(existing)) => return Ok(existing),
                 Ok(None) => return Err(format!("{create_err:#}")),
                 Err(reconcile_err) => {
@@ -651,20 +762,14 @@ pub async fn open_pull_request(
     };
 
     info!(pr_url = %created.html_url, created.number, "Pull request created");
-    enable_auto_merge_if_requested(
-        &req.github,
-        &owner,
-        &repo,
-        &created.node_id,
-        created.number,
-        req.auto_merge.as_ref(),
-    )
-    .await;
+    enable_auto_merge_if_requested(&req, &target, &created).await;
 
     let link = PullRequestLink {
-        owner,
-        repo,
-        number: created.number,
+        owner:    target.slug().0.to_string(),
+        repo:     target.slug().1.to_string(),
+        number:   created.number,
+        provider: link_provider(&target),
+        origin:   link_origin(&target),
     };
 
     Ok(CreatedPullRequest {
@@ -673,6 +778,67 @@ pub async fn open_pull_request(
         base_branch: req.base_branch.to_string(),
         head_branch: req.head_branch.to_string(),
     })
+}
+
+/// Create the pull request on the target forge.
+///
+/// GitHub's create returns the GraphQL node id used by auto-merge; Forgejo
+/// has no draft flag (drafts become `WIP: ` title prefixes) and no node id.
+async fn create_pull_request_on_forge(
+    req: &OpenPullRequestRequest<'_>,
+    target: &ScmTarget,
+    title: &str,
+    body: &str,
+) -> anyhow::Result<ReconciledPullRequest> {
+    let (owner, repo) = target.slug();
+    match target {
+        ScmTarget::GitHub { .. } => {
+            let github = req.github.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("pull request creation requires GitHub credentials")
+            })?;
+            let created = github_app::create_pull_request(
+                github,
+                owner,
+                repo,
+                req.base_branch,
+                req.head_branch,
+                title,
+                body,
+                req.draft,
+            )
+            .await?;
+            Ok(ReconciledPullRequest {
+                html_url: created.html_url,
+                number:   created.number,
+                title:    created.title,
+                node_id:  Some(created.node_id),
+            })
+        }
+        ScmTarget::Forgejo { .. } => {
+            let ctx = req.forgejo.ok_or_else(|| {
+                anyhow::anyhow!("pull request creation requires a configured Forgejo instance")
+            })?;
+            let client = fabro_http::http_client()?;
+            let created = fabro_forgejo::create_pull_request(
+                &client,
+                ctx,
+                owner,
+                repo,
+                req.base_branch,
+                req.head_branch,
+                title,
+                body,
+                req.draft,
+            )
+            .await?;
+            Ok(ReconciledPullRequest {
+                html_url: created.html_url,
+                number:   created.number,
+                title:    created.title,
+                node_id:  None,
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1506,7 +1672,8 @@ mod tests {
         let harness = setup_fallback_test_harness_with_branch_sha(&payload, "stale-sha").await;
         let github_base_url = harness.github_server.url("");
         let error = open_pull_request(OpenPullRequestRequest {
-            github:            fabro_github::GitHubContext::new(&harness.creds, &github_base_url),
+            github:            Some(fabro_github::GitHubContext::new(&harness.creds, &github_base_url)),
+            forgejo:           None,
             origin_url:        "https://github.com/owner/repo.git",
             base_branch:       "main",
             head_branch:       "fabro/run/123",

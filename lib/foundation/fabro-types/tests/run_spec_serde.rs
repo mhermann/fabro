@@ -26,10 +26,11 @@ fn run_spec_round_trips_templated_settings() {
         workflow_slug:       Some("demo".to_string()),
         workflow_version_id: Some(test_workflow_version_id()),
         target:              Some(RunTarget::Git(GitRunTarget {
-            repo:   "fabro-sh/fabro".to_string(),
-            branch: "main".to_string(),
-            tag:    None,
-            sha:    Some("abc123".to_string()),
+            repo:     "fabro-sh/fabro".to_string(),
+            branch:   "main".to_string(),
+            tag:      None,
+            sha:      Some("abc123".to_string()),
+            provider: fabro_types::ScmProvider::Github,
         })),
         automation:          Some(AutomationRef {
             id:              "nightly".to_string(),

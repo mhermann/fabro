@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{DirtyStatus, GitContext, GitHubRepositorySlug, RunId, WorkflowVersionId, repository};
+use crate::{DirtyStatus, GitContext, GitHubRepositorySlug, RunId, ScmProvider, WorkflowVersionId, repository};
 
 /// A request to create a run from an immutable workflow version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,15 +61,26 @@ pub enum RunTarget {
 /// `branch` is always the attached working branch. When present, `tag` names
 /// the requested release identity. An exact `sha` is authoritative over both
 /// selectors while preserving the tag in durable state.
+///
+/// `provider` names the forge hosting `repo`. It defaults to
+/// [`ScmProvider::Github`] on the wire, so every coordinate written before
+/// Forgejo existed still deserializes unchanged; forgejo targets additionally
+/// require a configured instance URL at validation time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitRunTarget {
-    pub repo:   String,
-    pub branch: String,
+    pub repo:     String,
+    pub branch:   String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tag:    Option<String>,
+    pub tag:      Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sha:    Option<String>,
+    pub sha:      Option<String>,
+    #[serde(default, skip_serializing_if = "is_github_provider")]
+    pub provider: ScmProvider,
+}
+
+fn is_github_provider(provider: &ScmProvider) -> bool {
+    *provider == ScmProvider::Github
 }
 
 impl GitRunTarget {
@@ -81,11 +92,32 @@ impl GitRunTarget {
     /// Returns an error when the repository slug, branch, tag, or exact commit
     /// does not use the canonical grammar accepted for Git-backed runs.
     pub fn validate(self) -> Result<ValidatedGitRunTarget, GitCoordinateValidationError> {
+        self.validate_with_scm(None)
+    }
+
+    /// Validates this Git coordinate against an optionally configured Forgejo
+    /// instance.
+    ///
+    /// Forgejo targets resolve their origin from `forgejo_url`; GitHub targets
+    /// ignore it and keep the github.com origin. Callers without a Forgejo
+    /// deployment pass `None`, which makes this behave exactly like
+    /// [`GitRunTarget::validate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the repository slug, branch, tag, or exact commit
+    /// does not use the canonical grammar accepted for Git-backed runs, or
+    /// when a forgejo target has no configured instance URL.
+    pub fn validate_with_scm(
+        self,
+        forgejo_url: Option<&str>,
+    ) -> Result<ValidatedGitRunTarget, GitCoordinateValidationError> {
         let Self {
             repo,
             branch,
             tag,
             sha,
+            provider,
         } = self;
         let repository =
             GitHubRepositorySlug::try_new(&repo).ok_or(GitCoordinateValidationError::Repository)?;
@@ -103,8 +135,17 @@ impl GitRunTarget {
                 repository::normalize_git_commit_sha(&sha).ok_or(GitCoordinateValidationError::Sha)
             })
             .transpose()?;
+        let origin_url = match provider {
+            ScmProvider::Github => repository.https_url(),
+            ScmProvider::Forgejo => {
+                let forgejo_url = forgejo_url
+                    .filter(|url| !url.trim().is_empty())
+                    .ok_or(GitCoordinateValidationError::ForgejoUnconfigured)?;
+                format!("{forgejo_url}/{repository}")
+            }
+        };
         let git = GitContext {
-            origin_url: repository.https_url(),
+            origin_url,
             branch:     branch.clone(),
             sha:        sha.clone(),
             dirty:      DirtyStatus::Clean,
@@ -115,6 +156,7 @@ impl GitRunTarget {
                 branch,
                 tag,
                 sha,
+                provider,
             },
             repository,
             git,
@@ -140,9 +182,25 @@ impl RunTarget {
     /// Returns an error when a Git target's repository slug, branch, tag, or
     /// exact commit does not use the canonical grammar accepted for runs.
     pub fn validate(self) -> Result<ValidatedRunTarget, TargetValidationError> {
+        self.validate_with_scm(None)
+    }
+
+    /// Validates the target against an optionally configured Forgejo instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a Git target's repository slug, branch, tag, or
+    /// exact commit does not use the canonical grammar accepted for runs, or
+    /// when a forgejo target has no configured instance URL.
+    pub fn validate_with_scm(
+        self,
+        forgejo_url: Option<&str>,
+    ) -> Result<ValidatedRunTarget, TargetValidationError> {
         match self {
             Self::Git(target) => {
-                let validated = target.validate().map_err(TargetValidationError::from)?;
+                let validated = target
+                    .validate_with_scm(forgejo_url)
+                    .map_err(TargetValidationError::from)?;
                 Ok(ValidatedRunTarget {
                     target: Self::Git(validated.target),
                     git:    Some(validated.git),
@@ -168,6 +226,7 @@ pub struct ValidatedGitRunTarget {
     git:        GitContext,
 }
 
+/// A [`ValidatedGitRunTarget`] that also knows which forge it targets.
 impl ValidatedGitRunTarget {
     /// The canonical Git target coordinate.
     #[must_use]
@@ -175,10 +234,16 @@ impl ValidatedGitRunTarget {
         &self.target
     }
 
-    /// The parsed GitHub repository named by the target.
+    /// The parsed repository named by the target.
     #[must_use]
     pub fn repository(&self) -> &GitHubRepositorySlug {
         &self.repository
+    }
+
+    /// The forge this target runs against.
+    #[must_use]
+    pub fn provider(&self) -> ScmProvider {
+        self.target.provider
     }
 
     /// Consume the validation proof and return the canonical Git target.
@@ -199,7 +264,7 @@ pub struct ValidatedRunTarget {
 /// A Git coordinate that failed local grammar validation.
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
 pub enum GitCoordinateValidationError {
-    #[error("repository must be a valid GitHub owner/name slug")]
+    #[error("repository must be a valid owner/name slug")]
     Repository,
     #[error("branch must be a non-empty branch name, not a ref or commit selector")]
     Branch,
@@ -207,12 +272,14 @@ pub enum GitCoordinateValidationError {
     Tag,
     #[error("SHA must be exactly 40 ASCII hexadecimal characters")]
     Sha,
+    #[error("forgejo targets require a configured Forgejo instance URL")]
+    ForgejoUnconfigured,
 }
 
 /// A [`RunTarget`] that failed grammar validation.
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
 pub enum TargetValidationError {
-    #[error("target repository must be a valid GitHub owner/name slug")]
+    #[error("target repository must be a valid owner/name slug")]
     Repository,
     #[error("target branch must be a non-empty branch name, not a ref or commit selector")]
     Branch,
@@ -220,6 +287,8 @@ pub enum TargetValidationError {
     Tag,
     #[error("target SHA must be exactly 40 ASCII hexadecimal characters")]
     Sha,
+    #[error("target forgejo runs require a configured Forgejo instance URL")]
+    ForgejoUnconfigured,
 }
 
 impl From<GitCoordinateValidationError> for TargetValidationError {
@@ -229,6 +298,7 @@ impl From<GitCoordinateValidationError> for TargetValidationError {
             GitCoordinateValidationError::Branch => Self::Branch,
             GitCoordinateValidationError::Tag => Self::Tag,
             GitCoordinateValidationError::Sha => Self::Sha,
+            GitCoordinateValidationError::ForgejoUnconfigured => Self::ForgejoUnconfigured,
         }
     }
 }

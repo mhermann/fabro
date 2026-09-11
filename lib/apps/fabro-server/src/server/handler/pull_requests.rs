@@ -6,9 +6,10 @@ use axum::http::{HeaderValue, header};
 use super::super::{
     ApiError, AppState, CloseRunPullRequestResponse, CreateRunPullRequestRequest, IntoResponse,
     Json, LinkRunPullRequestRequest, MergeRunPullRequestRequest, MergeRunPullRequestResponse,
-    PullRequestLink, RequireRunScoped, Response, Router, RunId, State, StatusCode, get, post, warn,
-    workflow_event,
+    PullRequestLink, RequireRunScoped, Response, Router, RunId, State, StatusCode, get, post,
+    warn, workflow_event,
 };
+use fabro_types::ScmProvider;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -67,7 +68,7 @@ fn parse_github_owner_repo_from_url(url: &str, kind: &str) -> Result<(String, St
 fn pull_request_record_from_link_request(
     body: &LinkRunPullRequestRequest,
 ) -> Result<PullRequestLink, ApiError> {
-    PullRequestLink::from_github_url(body.html_url.trim()).map_err(|err| {
+    PullRequestLink::from_url(body.html_url.trim()).map_err(|err| {
         let code = if err.contains("GitHub pull request URL") {
             "unsupported_pull_request_provider"
         } else {
@@ -179,6 +180,54 @@ async fn load_pull_request_github_context(
         number,
         creds,
     })
+}
+
+/// A stored forgejo pull request plus the resolved instance credentials.
+struct PullRequestForgejoContext {
+    record: PullRequestLink,
+    ctx:    fabro_forgejo::ForgejoContext,
+}
+
+async fn load_pull_request_forgejo_context(
+    state: &Arc<AppState>,
+    id: &RunId,
+) -> Result<PullRequestForgejoContext, ApiError> {
+    let record = load_pull_request_record(state, id).await?;
+    if record.provider != ScmProvider::Forgejo {
+        return Err(ApiError::with_code(
+            StatusCode::BAD_REQUEST,
+            "Pull request is not a Forgejo pull request.",
+            "unsupported_pull_request_provider",
+        ));
+    }
+    let settings = state
+        .server_settings()
+        .server
+        .integrations
+        .forgejo
+        .clone();
+    let origin_matches = record
+        .origin
+        .as_deref()
+        .is_some_and(|origin| fabro_types::origin_matches_instance(origin, settings.instance_url().unwrap_or_default()));
+    if !origin_matches {
+        return Err(ApiError::with_code(
+            StatusCode::BAD_REQUEST,
+            "Pull request origin does not match the configured Forgejo instance.",
+            "unsupported_pull_request_provider",
+        ));
+    }
+    let ctx = state
+        .forgejo_context(&settings)
+        .await
+        .map_err(|err| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, err.to_string()))?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Forgejo integration is not configured",
+            )
+        })?;
+    Ok(PullRequestForgejoContext { record, ctx })
 }
 
 pub(in crate::server) struct RunPrInputs<'a> {
@@ -503,6 +552,9 @@ async fn get_run_pull_request(
         Ok(record) => record,
         Err(err) => return err.into_response(),
     };
+    if record.provider == ScmProvider::Forgejo {
+        return get_forgejo_pull_request_details(&state, &id, record).await;
+    }
     let (owner, repo, number) = github_coordinates_for_record(&record);
     let creds = match load_server_github_credentials(state.as_ref()).await {
         Ok(creds) => creds,
@@ -548,11 +600,78 @@ async fn get_run_pull_request(
     }
 }
 
+/// Live detail for a stored Forgejo pull request.
+async fn get_forgejo_pull_request_details(
+    state: &Arc<AppState>,
+    id: &RunId,
+    record: PullRequestLink,
+) -> Response {
+    let forgejo_ctx = match load_pull_request_forgejo_context(state, id).await {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            warn!(error = ?err, "Returning stored pull request without live Forgejo details");
+            return Json(unavailable_pull_request_response(
+                record,
+                fabro_types::PullRequestDetailsUnavailableReason::IntegrationUnavailable,
+            ))
+            .into_response();
+        }
+    };
+    let client = match state.http_client() {
+        Ok(client) => client,
+        Err(_) => {
+            return Json(unavailable_pull_request_response(
+                record,
+                fabro_types::PullRequestDetailsUnavailableReason::FetchFailed,
+            ))
+            .into_response();
+        }
+    };
+    match fabro_forgejo::get_pull_request(
+        &client,
+        &forgejo_ctx.ctx,
+        &forgejo_ctx.record.owner,
+        &forgejo_ctx.record.repo,
+        forgejo_ctx.record.number,
+    )
+    .await
+    {
+        Ok(detail) => {
+            Json(available_pull_request_response(record, detail.into())).into_response()
+        }
+        Err(fabro_forgejo::PullRequestApiError::NotFound { .. }) => {
+            warn!("Returning stored pull request because Forgejo no longer has the PR");
+            Json(unavailable_pull_request_response(
+                record,
+                fabro_types::PullRequestDetailsUnavailableReason::NotFound,
+            ))
+            .into_response()
+        }
+        Err(err) => {
+            warn!(error = %err, "Returning stored pull request without live Forgejo details");
+            Json(unavailable_pull_request_response(
+                record,
+                fabro_types::PullRequestDetailsUnavailableReason::FetchFailed,
+            ))
+            .into_response()
+        }
+    }
+}
+
 async fn merge_run_pull_request(
     RequireRunScoped(id): RequireRunScoped,
     State(state): State<Arc<AppState>>,
     Json(body): Json<MergeRunPullRequestRequest>,
 ) -> Response {
+    if state
+        .load_run_projection(&id)
+        .await
+        .ok()
+        .and_then(|projection| projection.pull_request.clone())
+        .is_some_and(|record| record.provider == ScmProvider::Forgejo)
+    {
+        return merge_forgejo_run_pull_request(&state, &id, body).await;
+    }
     let ctx = match load_pull_request_github_context(&state, &id).await {
         Ok(ctx) => ctx,
         Err(err) => return err.into_response(),
@@ -579,10 +698,87 @@ async fn merge_run_pull_request(
     }
 }
 
+async fn merge_forgejo_run_pull_request(
+    state: &Arc<AppState>,
+    id: &RunId,
+    body: MergeRunPullRequestRequest,
+) -> Response {
+    let forgejo_ctx = match load_pull_request_forgejo_context(state, id).await {
+        Ok(ctx) => ctx,
+        Err(err) => return err.into_response(),
+    };
+    let client = match state.http_client() {
+        Ok(client) => client,
+        Err(err) => return ApiError::new(StatusCode::SERVICE_UNAVAILABLE, err.to_string()).into_response(),
+    };
+    let number = forgejo_ctx.record.number;
+    match fabro_forgejo::merge_pull_request(
+        &client,
+        &forgejo_ctx.ctx,
+        &forgejo_ctx.record.owner,
+        &forgejo_ctx.record.repo,
+        number,
+        body.method,
+    )
+    .await
+    {
+        Ok(()) => Json(MergeRunPullRequestResponse {
+            number: i64::try_from(number).expect("stored pull request number should fit in i64"),
+            html_url: forgejo_ctx.record.html_url(),
+            method: body.method,
+        })
+        .into_response(),
+        Err(fabro_forgejo::PullRequestApiError::NotFound { .. }) => {
+            github_pull_request_not_found_error(number).into_response()
+        }
+        Err(err) => ApiError::new(StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+    }
+}
+
+async fn close_forgejo_run_pull_request(state: &Arc<AppState>, id: &RunId) -> Response {
+    let forgejo_ctx = match load_pull_request_forgejo_context(state, id).await {
+        Ok(ctx) => ctx,
+        Err(err) => return err.into_response(),
+    };
+    let client = match state.http_client() {
+        Ok(client) => client,
+        Err(err) => return ApiError::new(StatusCode::SERVICE_UNAVAILABLE, err.to_string()).into_response(),
+    };
+    let number = forgejo_ctx.record.number;
+    match fabro_forgejo::close_pull_request(
+        &client,
+        &forgejo_ctx.ctx,
+        &forgejo_ctx.record.owner,
+        &forgejo_ctx.record.repo,
+        number,
+    )
+    .await
+    {
+        Ok(()) => Json(CloseRunPullRequestResponse {
+            number: i64::try_from(number).expect("stored pull request number should fit in i64"),
+            html_url: forgejo_ctx.record.html_url(),
+        })
+        .into_response(),
+        Err(fabro_forgejo::PullRequestApiError::NotFound { .. }) => {
+            github_pull_request_not_found_error(number).into_response()
+        }
+        Err(err) => ApiError::new(StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+    }
+}
+
 async fn close_run_pull_request(
     RequireRunScoped(id): RequireRunScoped,
     State(state): State<Arc<AppState>>,
 ) -> Response {
+    if state
+        .load_run_projection(&id)
+        .await
+        .ok()
+        .and_then(|projection| projection.pull_request.clone())
+        .is_some_and(|record| record.provider == ScmProvider::Forgejo)
+    {
+        return close_forgejo_run_pull_request(&state, &id).await;
+    }
     let ctx = match load_pull_request_github_context(&state, &id).await {
         Ok(ctx) => ctx,
         Err(err) => return err.into_response(),

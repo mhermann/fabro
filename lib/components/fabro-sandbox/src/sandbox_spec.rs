@@ -29,6 +29,9 @@ pub enum SandboxSpec {
     Docker {
         config:           DockerSandboxOptions,
         github_app:       Option<GitHubCredentials>,
+        /// Runtime Forgejo credentials for clone/push on the configured
+        /// instance. Never serialized: records only carry scrubbed origins.
+        forgejo:          Option<fabro_forgejo::ForgejoContext>,
         run_id:           Option<RunId>,
         clone_origin_url: Option<String>,
         clone_branch:     Option<String>,
@@ -39,6 +42,8 @@ pub enum SandboxSpec {
     Daytona {
         config:           Box<DaytonaConfig>,
         github_app:       Option<GitHubCredentials>,
+        /// Runtime Forgejo credentials; see the Docker variant note.
+        forgejo:          Option<fabro_forgejo::ForgejoContext>,
         run_id:           Option<RunId>,
         clone_origin_url: Option<String>,
         clone_branch:     Option<String>,
@@ -87,6 +92,7 @@ impl SandboxSpec {
             #[cfg(feature = "docker")]
             Self::Docker {
                 config,
+                forgejo,
                 clone_origin_url,
                 clone_branch,
                 ..
@@ -94,6 +100,7 @@ impl SandboxSpec {
                 let repo_cloned = clone_source::repo_cloned_for_record(
                     config.skip_clone,
                     clone_origin_url.as_deref(),
+                    forgejo.as_ref().map(|ctx| ctx.base_url()),
                 );
                 let layout = runtime_layout_metadata(
                     repo_cloned,
@@ -127,6 +134,7 @@ impl SandboxSpec {
             #[cfg(feature = "daytona")]
             Self::Daytona {
                 config,
+                forgejo,
                 clone_origin_url,
                 clone_branch,
                 ..
@@ -134,6 +142,7 @@ impl SandboxSpec {
                 let repo_cloned = clone_source::repo_cloned_for_record(
                     config.skip_clone,
                     clone_origin_url.as_deref(),
+                    forgejo.as_ref().map(|ctx| ctx.base_url()),
                 );
                 let layout = runtime_layout_metadata(
                     repo_cloned,
@@ -203,6 +212,7 @@ impl SandboxSpec {
             Self::Docker {
                 config,
                 github_app,
+                forgejo,
                 run_id,
                 clone_origin_url,
                 clone_branch,
@@ -212,6 +222,7 @@ impl SandboxSpec {
                 let mut sandbox = DockerSandbox::new(
                     config.clone(),
                     github_app.as_ref(),
+                    forgejo.as_ref(),
                     *run_id,
                     clone_origin_url.clone(),
                     clone_branch.clone(),
@@ -228,6 +239,7 @@ impl SandboxSpec {
             Self::Daytona {
                 config,
                 github_app,
+                forgejo,
                 run_id,
                 clone_origin_url,
                 clone_branch,
@@ -238,6 +250,7 @@ impl SandboxSpec {
                 let mut sandbox = DaytonaSandbox::new(
                     config.as_ref().clone(),
                     github_app.clone(),
+                    forgejo.clone(),
                     *run_id,
                     clone_origin_url.clone(),
                     clone_branch.clone(),
@@ -262,7 +275,7 @@ fn runtime_layout_metadata(
     clone_origin_url: Option<&str>,
     workspace_root: &str,
     repos_root: &str,
-) -> Option<clone_source::GitHubRepoLayout> {
+) -> Option<clone_source::RepoLayout> {
     if repo_cloned != Some(true) {
         return None;
     }

@@ -9,7 +9,7 @@ use fabro_server::test_support::{
     TestAppStateBuilder, TestAutomationRunMaterializer, build_test_router, test_auth_mode,
 };
 use fabro_static::EnvVars;
-use fabro_types::GitRunTarget;
+use fabro_types::{GitRunTarget, ScmProvider};
 use serde_json::{Value, json};
 use sqlx::Row as _;
 use tower::ServiceExt;
@@ -83,6 +83,7 @@ fn automation_app_with_fake_materializer() -> (axum::Router, tempfile::TempDir, 
         branch: "main".to_string(),
         tag:    None,
         sha:    Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+provider: ScmProvider::Github,
     }))
 }
 
@@ -1042,6 +1043,7 @@ async fn api_triggered_run_passes_saved_workflow_source_to_materialization() {
         branch: "main".to_string(),
         tag:    None,
         sha:    Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+provider: ScmProvider::Github,
     });
     let (app, _temp_dir, _automation_dir) = automation_app_with_materializer(materializer.clone());
     let mut body = automation_body("nightly", "Nightly");
@@ -1063,6 +1065,7 @@ async fn api_triggered_run_passes_saved_workflow_source_to_materialization() {
             branch: "main".to_string(),
             tag:    Some("release-v1".to_string()),
             sha:    None,
+            provider: ScmProvider::Github,
         })
     );
     assert_eq!(
@@ -1083,6 +1086,7 @@ async fn api_triggered_automation_with_missing_version_does_not_create_or_start_
         branch: "main".to_string(),
         tag:    None,
         sha:    Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+provider: ScmProvider::Github,
     });
     let (app, _temp_dir, _automation_dir) = automation_app_with_materializer(materializer);
     create_automation(&app, "nightly", "Nightly").await;

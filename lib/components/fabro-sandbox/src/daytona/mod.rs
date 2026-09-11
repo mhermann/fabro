@@ -514,6 +514,8 @@ pub struct DaytonaSandbox {
     clone_branch:      Option<String>,
     clone_tag:         Option<String>,
     clone_commit_sha:  Option<String>,
+    /// Base URL of the configured Forgejo instance when the run targets it.
+    forgejo_instance_url: Option<String>,
 }
 
 impl DaytonaSandbox {
@@ -524,6 +526,7 @@ impl DaytonaSandbox {
     pub async fn new(
         config: DaytonaConfig,
         github_app: Option<GitHubCredentials>,
+        forgejo: Option<fabro_forgejo::ForgejoContext>,
         run_id: Option<RunId>,
         clone_origin_url: Option<String>,
         clone_branch: Option<String>,
@@ -538,14 +541,17 @@ impl DaytonaSandbox {
                 clone_branch.as_deref(),
                 clone_tag.as_deref(),
                 clone_commit_sha.as_deref(),
+                forgejo.as_ref().map(|ctx| ctx.base_url()),
             )?;
         }
+        let forgejo_instance_url = forgejo.as_ref().map(|ctx| ctx.base_url().to_string());
         let api_key = resolve_daytona_api_key(api_key);
         let client = build_daytona_client(api_key.clone())
             .await
             .map_err(|e| crate::Error::context("Failed to create Daytona client", e))?;
         let push_credentials = PushCredentialState::new(push_credentials::build_token_source(
             github_app.as_ref(),
+            forgejo.as_ref(),
             clone_origin_url.as_deref(),
         )?);
         Ok(Self {
@@ -565,6 +571,7 @@ impl DaytonaSandbox {
             clone_branch,
             clone_tag,
             clone_commit_sha,
+            forgejo_instance_url,
         })
     }
 
@@ -619,7 +626,22 @@ impl DaytonaSandbox {
             clone_branch,
             clone_tag: None,
             clone_commit_sha: None,
+            forgejo_instance_url: None,
         })
+    }
+
+    fn daytona_repo_layout(&self, origin_url: &str) -> crate::Result<clone_source::RepoLayout> {
+        if let Some(instance_url) = self.forgejo_instance_url.as_deref() {
+            if fabro_types::origin_matches_instance(origin_url, instance_url) {
+                return clone_source::forgejo_repo_layout(
+                    origin_url,
+                    instance_url,
+                    WORKING_DIRECTORY,
+                    REPOS_ROOT,
+                );
+            }
+        }
+        clone_source::github_repo_layout(origin_url, WORKING_DIRECTORY, REPOS_ROOT)
     }
 
     pub fn set_event_callback(&mut self, cb: SandboxEventCallback) {
@@ -1550,6 +1572,7 @@ impl Sandbox for DaytonaSandbox {
             self.clone_branch.as_deref(),
             self.clone_tag.as_deref(),
             self.clone_commit_sha.as_deref(),
+            self.forgejo_instance_url.as_deref(),
         )
         .map_err(|e| self.fail_init(init_start, e))?;
 
@@ -1579,10 +1602,15 @@ impl Sandbox for DaytonaSandbox {
                 branch,
                 tag,
                 commit_sha,
+            }
+            | CloneDecision::Forgejo {
+                origin_url,
+                branch,
+                tag,
+                commit_sha,
             } => {
-                let layout =
-                    clone_source::github_repo_layout(&origin_url, WORKING_DIRECTORY, REPOS_ROOT)
-                        .map_err(|err| self.fail_init(init_start, err))?;
+                let layout = self.daytona_repo_layout(&origin_url)
+                    .map_err(|err| self.fail_init(init_start, err))?;
                 self.emit(SandboxEvent::GitCloneStarted {
                     url:    origin_url.clone(),
                     branch: branch.clone(),
@@ -2056,7 +2084,7 @@ impl Sandbox for DaytonaSandbox {
     }
 
     fn push_token_source(&self) -> Option<Arc<InstallationTokenSource>> {
-        self.push_credentials.source().cloned()
+        self.push_credentials.github_source().cloned()
     }
 
     async fn set_autostop_interval(&self, minutes: i32) -> crate::Result<()> {

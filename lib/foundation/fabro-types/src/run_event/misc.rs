@@ -373,6 +373,10 @@ pub struct PullRequestCreatedProps {
     pub head_sha:    Option<String>,
     pub title:       String,
     pub draft:       bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider:    Option<crate::ScmProvider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin:      Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

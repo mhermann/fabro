@@ -1,7 +1,7 @@
 use std::str::FromStr as _;
 
 use fabro_db::DbPool;
-use fabro_types::{GitRunTarget, RunTarget};
+use fabro_types::{GitRunTarget, RunTarget, ScmProvider};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row as _, Sqlite, Transaction};
 
@@ -28,11 +28,13 @@ macro_rules! select_automations_sql {
                 a.target_branch,
                 a.target_tag,
                 a.target_sha,
+                a.target_provider,
                 a.target_workflow,
                 a.workflow_source_repository,
                 a.workflow_source_branch,
                 a.workflow_source_tag,
                 a.workflow_source_sha,
+                a.workflow_source_provider,
                 t.id AS trigger_id,
                 t.enabled AS trigger_enabled,
                 t.expression AS trigger_expression
@@ -130,6 +132,7 @@ impl AutomationStore {
     ) -> Result<Automation, AutomationStoreError> {
         let (automation, _) = Automation::from_replace(id.clone(), draft)?;
         let target = stored_git_target(&automation);
+        let target_provider: &'static str = target.provider.into();
         let workflow_source = automation.workflow_source.as_ref();
         let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
@@ -145,11 +148,13 @@ impl AutomationStore {
                 target_branch = ?,
                 target_tag = ?,
                 target_sha = ?,
+                target_provider = ?,
                 target_workflow = ?,
                 workflow_source_repository = ?,
                 workflow_source_branch = ?,
                 workflow_source_tag = ?,
-                workflow_source_sha = ?
+                workflow_source_sha = ?,
+                workflow_source_provider = ?
             WHERE id = ? AND revision = ?
             ",
         )
@@ -162,11 +167,16 @@ impl AutomationStore {
         .bind(&target.branch)
         .bind(target.tag.as_deref())
         .bind(target.sha.as_deref())
+        .bind(target_provider)
         .bind(&automation.workflow)
         .bind(workflow_source.map(|source| source.repo.as_str()))
         .bind(workflow_source.map(|source| source.branch.as_str()))
         .bind(workflow_source.and_then(|source| source.tag.as_deref()))
         .bind(workflow_source.and_then(|source| source.sha.as_deref()))
+        .bind(workflow_source.map(|source| {
+            let provider: &'static str = source.provider.into();
+            provider
+        }))
         .bind(id.as_str())
         .bind(expected.as_str())
         .execute(&mut *transaction)
@@ -241,10 +251,15 @@ impl StoredAutomation {
             last_error: row.try_get("last_error")?,
             api_enabled: row.try_get("api_enabled")?,
             target: RunTarget::Git(GitRunTarget {
-                repo:   row.try_get("target_repository")?,
-                branch: row.try_get("target_branch")?,
-                tag:    row.try_get("target_tag")?,
-                sha:    row.try_get("target_sha")?,
+                repo:     row.try_get("target_repository")?,
+                branch:   row.try_get("target_branch")?,
+                tag:      row.try_get("target_tag")?,
+                sha:      row.try_get("target_sha")?,
+                // Legacy rows predate the provider column and are GitHub.
+                provider: row
+                    .try_get::<Option<String>, _>("target_provider")?
+                    .and_then(|provider| ScmProvider::from_str(&provider).ok())
+                    .unwrap_or_default(),
             }),
             workflow: row.try_get("target_workflow")?,
             workflow_source,
@@ -404,6 +419,11 @@ fn stored_workflow_source(
             branch,
             tag,
             sha,
+            // Legacy rows predate the provider column and are GitHub.
+            provider: row
+                .try_get::<Option<String>, _>("workflow_source_provider")?
+                .and_then(|provider| ScmProvider::from_str(&provider).ok())
+                .unwrap_or_default(),
         })),
         _ => Err(AutomationStoreError::StoredWorkflowSourceShape { id: id.clone() }),
     }

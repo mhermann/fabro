@@ -198,7 +198,7 @@ pub struct ServerLoggingLayer {
 }
 
 /// `[server.integrations.<provider>]` — cohesive integration surface for Slack
-/// and git providers (GitHub App, webhooks, etc.).
+/// and git providers (GitHub App, Forgejo instance, webhooks, etc.).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, fabro_macros::Combine)]
 #[serde(deny_unknown_fields)]
 pub struct ServerIntegrationsLayer {
@@ -206,6 +206,8 @@ pub struct ServerIntegrationsLayer {
     pub github: Option<GithubIntegrationLayer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slack:  Option<SlackIntegrationLayer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forgejo: Option<ForgejoIntegrationLayer>,
 }
 
 /// `[server.integrations.github]` — GitHub App, credentials, and inbound
@@ -235,6 +237,16 @@ pub struct SlackIntegrationLayer {
     pub enabled:         Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_channel: Option<String>,
+}
+
+/// `[server.integrations.forgejo]` — single Forgejo instance.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, fabro_macros::Combine)]
+#[serde(deny_unknown_fields)]
+pub struct ForgejoIntegrationLayer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url:     Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, fabro_macros::Combine)]

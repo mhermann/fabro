@@ -22,6 +22,9 @@ import type { GitRunTarget } from './git-run-target';
 // May contain unused imports in some cases
 // @ts-ignore
 import type { NoneRunTarget } from './none-run-target';
+// May contain unused imports in some cases
+// @ts-ignore
+import type { ScmProvider } from './scm-provider';
 
 /**
  * @type RunTarget

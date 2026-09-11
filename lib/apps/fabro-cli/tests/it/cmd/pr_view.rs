@@ -88,6 +88,8 @@ fn pr_view_reads_pull_request_from_store_without_pull_request_json() {
                 head_sha:    Some("final-sha".to_string()),
                 title:       "Map the constellations".to_string(),
                 draft:       false,
+                provider:    None,
+                origin:      None,
             }),
         };
         client

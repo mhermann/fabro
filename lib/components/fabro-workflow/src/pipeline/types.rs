@@ -414,6 +414,64 @@ pub struct FinalizeOptions {
 pub struct PublishOptions {
     pub pr_config:  Option<PullRequestSettings>,
     pub github_app: Option<fabro_github::GitHubCredentials>,
+    /// Forgejo credentials for pull request creation on a forgejo-hosted
+    /// origin. Carries the instance PAT at runtime only; it never enters a
+    /// persisted record.
+    pub forgejo:    Option<fabro_forgejo::ForgejoContext>,
     pub origin_url: Option<String>,
     pub model:      String,
+}
+
+/// The resolved forge behind a run's origin URL.
+///
+/// Classification is exact: GitHub origins are the historical
+/// `github.com` spellings; a Forgejo origin must match the configured
+/// instance host. Unrecognized origins produce `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ScmTarget {
+    GitHub {
+        owner: String,
+        repo:  String,
+    },
+    Forgejo {
+        owner:  String,
+        repo:   String,
+        origin: String,
+    },
+}
+
+impl ScmTarget {
+    /// Resolves the forge behind `origin_url`.
+    ///
+    /// GitHub wins classification because a GitHub origin is unambiguous;
+    /// everything else is checked against the configured Forgejo instance.
+    /// `forgejo` is the runtime credential bundle; only its base URL is read
+    /// here.
+    pub(crate) fn resolve(
+        origin_url: &str,
+        forgejo: Option<&fabro_forgejo::ForgejoContext>,
+    ) -> Option<Self> {
+        let https = fabro_github::ssh_url_to_https(origin_url);
+        if let Ok((owner, repo)) = fabro_github::parse_github_owner_repo(&https) {
+            return Some(Self::GitHub { owner, repo });
+        }
+        let forgejo = forgejo?;
+        let (owner, repo) =
+            fabro_forgejo::parse_owner_repo(forgejo.base_url(), origin_url).ok()?;
+        Some(Self::Forgejo {
+            owner,
+            repo,
+            origin: forgejo.base_url().to_string(),
+        })
+    }
+
+    /// The `owner/repo` coordinate.
+    #[must_use]
+    pub fn slug(&self) -> (&str, &str) {
+        match self {
+            Self::GitHub { owner, repo } | Self::Forgejo { owner, repo, .. } => {
+                (owner, repo)
+            }
+        }
+    }
 }

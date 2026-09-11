@@ -6,8 +6,8 @@ use ::fabro_types::{
     PairTarget, ParallelBranchId, ParallelBranchResult, PendingReason, PermissionLevel, Principal,
     PullRequestCreationId, PullRequestLink, ReviewTarget, RunFailure, RunId, RunNoticeLevel,
     RunPairEndedReason, RunPairFailedReason, RunProvenance, RunRunnableSource, RunTarget,
-    RunTiming, SandboxProviderKind, StageId, StageOutcome, StageTiming, SuccessReason,
-    WorkflowVersionId, run_event as fabro_types,
+    RunTiming, SandboxProviderKind, ScmProvider, StageId, StageOutcome, StageTiming,
+    SuccessReason, WorkflowVersionId, run_event as fabro_types,
 };
 use fabro_agent::{AgentEvent, SandboxEvent};
 use fabro_model::{ReasoningEffort, Speed};
@@ -747,6 +747,11 @@ pub enum Event {
         head_sha:    Option<String>,
         title:       String,
         draft:       bool,
+        /// Absent on events written before Forgejo existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider:    Option<ScmProvider>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin:      Option<String>,
     },
     PullRequestLinked {
         pull_request: PullRequestLink,
@@ -801,6 +806,8 @@ impl Event {
             head_sha: Some(head_sha.to_string()),
             title: title.to_string(),
             draft,
+            provider: Some(record.provider),
+            origin: record.origin.clone(),
         }
     }
 

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use fabro_api::types as api_types;
 use fabro_config::user::active_settings_path;
+use fabro_config::{ServerSettingsBuilder, Storage};
 use fabro_types::settings::replace_wildcard_host;
 pub(crate) use fabro_util::check_report::{
     CheckDetail, CheckReport, CheckResult, CheckSection, CheckStatus,
@@ -16,8 +17,56 @@ use crate::args::DoctorArgs;
 use crate::command_context::CommandContext;
 use crate::shared::{cyan_spinner, print_json_pretty};
 
-pub(crate) fn check_config(settings_path: Option<PathBuf>) -> CheckResult {
-    match settings_path {
+/// Offline Forgejo check: absent when the integration is disabled, an error
+/// naming the exact missing piece otherwise. No network.
+fn check_forgejo() -> Option<CheckResult> {
+    let resolved = ServerSettingsBuilder::load_default().ok()?;
+    let settings = &resolved.server.integrations.forgejo;
+    if !settings.enabled {
+        return None;
+    }
+    if settings.url.as_deref().map(str::trim).is_none_or(str::is_empty) {
+        return Some(CheckResult {
+            name:        "Forgejo".to_string(),
+            status:      CheckStatus::Error,
+            summary:     "enabled but no instance URL".to_string(),
+            details:     Vec::new(),
+            remediation: Some(
+                "Set server.integrations.forgejo.url to the Forgejo instance base URL"
+                    .to_string(),
+            ),
+        });
+    }
+    let secrets_path = Storage::new(fabro_config::user::default_storage_dir()).secrets_path();
+    let vault_has_token = fabro_vault::Vault::load(secrets_path)
+        .map(|vault| {
+            vault
+                .get("FORGEJO_TOKEN")
+                .map(str::trim)
+                .is_some_and(|token| !token.is_empty())
+        })
+        .unwrap_or(false);
+    if !vault_has_token {
+        return Some(CheckResult {
+            name:        "Forgejo".to_string(),
+            status:      CheckStatus::Error,
+            summary:     "missing FORGEJO_TOKEN".to_string(),
+            details:     Vec::new(),
+            remediation: Some(
+                "Run fabro install or run `fabro secret set FORGEJO_TOKEN`".to_string(),
+            ),
+        });
+    }
+    Some(CheckResult {
+        name:        "Forgejo".to_string(),
+        status:      CheckStatus::Pass,
+        summary:     "configured".to_string(),
+        details:     Vec::new(),
+        remediation: None,
+    })
+}
+
+pub(crate) fn check_config(settings_path: Option<PathBuf>) -> CheckResult {    match settings_path {
         Some(path) => {
             let display = contract_tilde(&path);
             let wildcard_urls = wildcard_public_url_details(&path);
@@ -254,11 +303,14 @@ pub(crate) async fn run_doctor(
 
     let settings_config_path = active_settings_path(None);
 
-    let local_checks = vec![check_config(
+    let mut local_checks = vec![check_config(
         settings_config_path
             .exists()
             .then_some(settings_config_path),
     )];
+    if let Some(forgejo_check) = check_forgejo() {
+        local_checks.push(forgejo_check);
+    }
 
     let mut report = CheckReport {
         title:    "Fabro Doctor".to_string(),

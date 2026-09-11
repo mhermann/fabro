@@ -8,6 +8,10 @@ use fabro_types::{
 };
 use serde_json::json;
 
+fn assert_same_type<T: 'static, U: 'static>() {
+    assert_eq!(TypeId::of::<T>(), TypeId::of::<U>());
+}
+
 #[test]
 fn pull_request_response_reuses_domain_types() {
     let response: PullRequestResponse = serde_json::from_value(json!({
@@ -173,5 +177,43 @@ fn assert_same_type_as_merge_strategy<T: 'static>(_: &T) {
         "{} should be the same type as {}",
         type_name::<T>(),
         type_name::<MergeStrategy>()
+    );
+}
+
+#[test]
+fn forgejo_pull_request_link_round_trips_the_openapi_shape() {
+    assert_same_type::<fabro_api::types::PullRequestLink, fabro_types::PullRequestLink>();
+
+    let link = fabro_types::PullRequestLink::forgejo(
+        "https://git.example.com",
+        "acme",
+        "my-app",
+        12,
+    );
+
+    let value = serde_json::to_value(&link).unwrap();
+    assert_eq!(value["provider"], "forgejo");
+    assert_eq!(value["origin"], "https://git.example.com");
+    assert_eq!(
+        value["html_url"],
+        "https://git.example.com/acme/my-app/pulls/12"
+    );
+
+    let api: fabro_api::types::PullRequestLink = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(api).unwrap(), value);
+}
+
+#[test]
+fn github_pull_request_link_wire_shape_is_unchanged() {
+    let link = fabro_types::PullRequestLink::github("acme", "my-app", 12);
+    let value = serde_json::to_value(&link).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "owner": "acme",
+            "repo": "my-app",
+            "number": 12,
+            "html_url": "https://github.com/acme/my-app/pull/12"
+        })
     );
 }

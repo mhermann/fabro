@@ -5,7 +5,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use fabro_checkpoint::git::{FileMode, Store, TreeEntries};
 use fabro_dump::RunDump;
-use fabro_github::token_source::{InstallationTokenSource, ResolvedToken, TokenSnapshot};
+use fabro_github::token_source::{
+    InstallationTokenSource, ResolvedToken, TokenProvenance, TokenSnapshot,
+};
 use git2::{
     Cred, Direction, ErrorClass, ErrorCode, FetchOptions, Oid, PushOptions, RemoteCallbacks,
     Repository, Signature,
@@ -148,6 +150,13 @@ impl Default for RunMetadataRuntime {
 #[async_trait]
 pub(crate) trait AuthProvider: Send + Sync {
     async fn token(&self) -> Result<Option<ResolvedToken>, RunMetadataError>;
+
+    /// Git basic-auth username the forge expects alongside the token.
+    /// GitHub uses the `x-access-token` convention; Forgejo accepts any
+    /// non-empty username with the PAT as password.
+    fn username(&self) -> &'static str {
+        "x-access-token"
+    }
 }
 
 struct GitHubAuthProvider {
@@ -168,6 +177,38 @@ impl AuthProvider for GitHubAuthProvider {
             .await
             .map(Some)
             .map_err(RunMetadataError::TokenMint)
+    }
+}
+
+/// Static PAT provider for Forgejo origins: the token never refreshes, so
+/// every snapshot resolves to the same credential.
+struct ForgejoStaticAuthProvider {
+    token: fabro_github::token_source::SecretString,
+}
+
+impl ForgejoStaticAuthProvider {
+    fn new(token: String) -> Self {
+        Self {
+            token: fabro_github::token_source::SecretString::new(token),
+        }
+    }
+}
+
+#[async_trait]
+impl AuthProvider for ForgejoStaticAuthProvider {
+    async fn token(&self) -> Result<Option<ResolvedToken>, RunMetadataError> {
+        Ok(Some(ResolvedToken {
+            token:          self.token.clone(),
+            snapshot: TokenSnapshot {
+                generation: 0,
+                provenance: TokenProvenance::Static,
+            },
+            refresh_failed: false,
+        }))
+    }
+
+    fn username(&self) -> &'static str {
+        "fabro"
     }
 }
 
@@ -251,6 +292,7 @@ impl RunMetadataWriterHandle {
     ) -> Result<MetadataSnapshot, RunMetadataError> {
         let token = self.auth.token().await?;
         let token_snapshot = token.as_ref().map(|token| token.snapshot);
+        let username = self.auth.username();
         let entries = dump
             .git_entries()
             .map_err(RunMetadataError::DumpSerialize)?;
@@ -263,6 +305,7 @@ impl RunMetadataWriterHandle {
                 &entries,
                 &message,
                 token.as_ref().map(|token| token.token.expose()),
+                username,
             )
         })
         .await
@@ -291,6 +334,25 @@ pub(crate) fn build_metadata_writer(
     else {
         return Ok(None);
     };
+
+    // Forgejo origins push with the static instance PAT; no minting source
+    // exists, so the sandbox token source never applies there.
+    if let Some(forgejo) = run_options.forgejo.as_ref().filter(|ctx| {
+        fabro_types::origin_matches_instance(&git.origin_url, ctx.base_url())
+    }) {
+        let normalized_url =
+            fabro_forgejo::normalize_origin_url(forgejo.base_url(), &git.origin_url);
+        let writer = RunMetadataWriter::new(
+            normalized_url,
+            meta_branch.clone(),
+            run_options.git_author(),
+            Some(1),
+            run_options.settings.run.meta_branch.push,
+        )?;
+        let auth = Arc::new(ForgejoStaticAuthProvider::new(forgejo.token().to_string()));
+        return Ok(Some(RunMetadataWriterHandle::new(writer, auth)));
+    }
+
     let Some(creds) = run_options.github_app.as_ref() else {
         return Ok(None);
     };
@@ -370,8 +432,9 @@ impl RunMetadataWriter {
         entries: &[(String, Vec<u8>)],
         message: &str,
         token: Option<&str>,
+        username: &str,
     ) -> Result<MetadataSnapshot, RunMetadataError> {
-        self.discover_parent(token)?;
+        self.discover_parent(token, username)?;
         let entry_count = entries.len();
         let bytes = metadata_entries_bytes(entries);
         for (path, _) in entries {
@@ -404,7 +467,7 @@ impl RunMetadataWriter {
         self.parent_oid = Some(commit_oid);
 
         let push_error = if self.push_enabled {
-            self.push(token).err()
+            self.push(token, username).err()
         } else {
             None
         };
@@ -417,7 +480,7 @@ impl RunMetadataWriter {
         })
     }
 
-    fn discover_parent(&mut self, token: Option<&str>) -> Result<(), RunMetadataError> {
+    fn discover_parent(&mut self, token: Option<&str>, username: &str) -> Result<(), RunMetadataError> {
         if self.discovered {
             return Ok(());
         }
@@ -431,7 +494,7 @@ impl RunMetadataWriter {
                 return Ok(());
             }
             drop(remote_repo);
-            self.fetch_parent(token, &full_ref)?;
+            self.fetch_parent(token, username, &full_ref)?;
             self.discovered = true;
             return Ok(());
         }
@@ -439,7 +502,7 @@ impl RunMetadataWriter {
         let head_match = (|| -> Result<Option<Oid>, git2::Error> {
             let mut remote = self.store.repo().remote_anonymous(&self.remote_url)?;
             let connection =
-                remote.connect_auth(Direction::Fetch, Some(make_callbacks(token)), None)?;
+                remote.connect_auth(Direction::Fetch, Some(make_callbacks(token, username)), None)?;
             let head = connection
                 .list()?
                 .iter()
@@ -450,7 +513,7 @@ impl RunMetadataWriter {
         .map_err(|err| RunMetadataError::Discovery(self.redact(&err)))?;
 
         if head_match.is_some() {
-            self.fetch_parent(token, &full_ref)?;
+            self.fetch_parent(token, username, &full_ref)?;
         }
         self.discovered = true;
         Ok(())
@@ -459,6 +522,7 @@ impl RunMetadataWriter {
     fn fetch_parent(
         &mut self,
         token: Option<&str>,
+        username: &str,
         full_ref: &str,
     ) -> Result<(), RunMetadataError> {
         (|| -> Result<(), git2::Error> {
@@ -468,7 +532,7 @@ impl RunMetadataWriter {
             if let Some(depth) = self.fetch_depth {
                 fetch_opts.depth(depth);
             }
-            fetch_opts.remote_callbacks(make_callbacks(token));
+            fetch_opts.remote_callbacks(make_callbacks(token, username));
             let refspec = format!("+{full_ref}:{full_ref}");
             remote.fetch(&[refspec.as_str()], Some(&mut fetch_opts), None)?;
             let tip = repo.find_reference(full_ref)?.peel_to_commit()?.id();
@@ -478,11 +542,11 @@ impl RunMetadataWriter {
         .map_err(|err| RunMetadataError::Fetch(self.redact(&err)))
     }
 
-    fn push(&self, token: Option<&str>) -> Result<(), String> {
+    fn push(&self, token: Option<&str>, username: &str) -> Result<(), String> {
         (|| -> Result<(), git2::Error> {
             let mut remote = self.store.repo().remote_anonymous(&self.remote_url)?;
             let mut push_opts = PushOptions::new();
-            push_opts.remote_callbacks(make_callbacks(token));
+            push_opts.remote_callbacks(make_callbacks(token, username));
             let full_ref = self.full_ref();
             let refspec = format!("{full_ref}:{full_ref}");
             remote.push(&[refspec.as_str()], Some(&mut push_opts))
@@ -506,10 +570,10 @@ impl RunMetadataWriter {
     }
 }
 
-fn make_callbacks(token: Option<&str>) -> RemoteCallbacks<'_> {
+fn make_callbacks<'a>(token: Option<&'a str>, username: &'a str) -> RemoteCallbacks<'a> {
     let mut callbacks = RemoteCallbacks::new();
     if let Some(token) = token {
-        callbacks.credentials(move |_, _, _| Cred::userpass_plaintext("x-access-token", token));
+        callbacks.credentials(move |_, _, _| Cred::userpass_plaintext(username, token));
     }
     callbacks
 }
@@ -725,6 +789,7 @@ mod tests {
                     expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
                 },
             )),
+            forgejo:          None,
             pre_run_git:      Some(GitContext {
                 origin_url: origin_url.to_string(),
                 branch:     "main".to_string(),

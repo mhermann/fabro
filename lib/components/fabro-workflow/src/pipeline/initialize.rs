@@ -7,7 +7,7 @@ use fabro_agent::{Sandbox, ToolSecrets};
 use fabro_auth::{
     CredentialSource, ExtraHeadersCredentialSource, VaultCredentialSource, auth_issue_message,
 };
-use fabro_github::token_source::InstallationTokenSource;
+use fabro_github::token_source::{InstallationTokenSource, SecretString};
 use fabro_graphviz::graph;
 use fabro_hooks::{HookContext, HookDecision, HookEvent, HookExecutionContext, HookRunner};
 use fabro_model::Catalog;
@@ -527,9 +527,26 @@ pub async fn initialize(
         github_token,
         github_access: _,
     } = built_env;
+    // The forgejo PAT reaches the workflow env only when the run origin
+    // belongs to the configured instance.
+    let forgejo_token = options
+        .run_options
+        .forgejo
+        .as_ref()
+        .filter(|ctx| {
+            options
+                .sandbox_env
+                .origin_url
+                .as_deref()
+                .is_some_and(|origin| {
+                    fabro_types::origin_matches_instance(origin, ctx.base_url())
+                })
+        })
+        .map(|ctx| SecretString::new(ctx.token().to_string()));
     let tool_env_provider = Arc::new(WorkflowToolEnvProvider {
         base_env:     base_env.clone(),
         github_token: github_token.clone(),
+        forgejo_token: forgejo_token.clone(),
     });
     let github_token_refresh_managed = github_token
         .as_deref()
@@ -713,6 +730,7 @@ pub async fn initialize(
         interviewer: Arc::clone(&options.interviewer),
         base_env,
         github_token,
+        forgejo_token,
         inputs: options.run_options.settings.run.inputs.clone(),
         dry_run: options.dry_run,
         workflow_path: options.workflow_path.clone(),
@@ -890,6 +908,7 @@ mod tests {
             labels:           HashMap::new(),
             workflow_slug:    None,
             github_app:       None,
+            forgejo:          None,
             pre_run_git:      None,
             fork_source_ref:  None,
             base_branch:      None,

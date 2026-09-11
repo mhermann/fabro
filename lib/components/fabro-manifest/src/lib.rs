@@ -27,7 +27,7 @@ use fabro_types::settings::interp::InterpString;
 use fabro_types::settings::run::{ApprovalMode, ResolvedGoalSource, ResolvedRunGoal, RunMode};
 use fabro_types::{
     DirtyStatus, GitContext, GitHubRepositorySlug, GitRunTarget, ManifestPath, RunTarget,
-    WorkflowSettings,
+    ScmProvider, WorkflowSettings,
 };
 use fabro_workflow::git::{self, GitSyncStatus};
 
@@ -51,6 +51,16 @@ pub struct ManifestBuildInput {
     /// Path to the user settings file (for inclusion in
     /// `RunManifest.configs`). `None` skips the user config entry.
     pub user_settings_path:   Option<PathBuf>,
+    /// Base URL of the configured Forgejo instance, when the deployment has
+    /// one. Required to resolve `[run.scm] provider = "forgejo"`.
+    pub forgejo_instance_url: Option<String>,
+}
+
+/// A repository origin resolved from `[run.scm]` settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfiguredOrigin {
+    pub url:      String,
+    pub provider: ScmProvider,
 }
 
 #[derive(Debug)]
@@ -214,8 +224,12 @@ pub fn build_run_manifest(input: ManifestBuildInput) -> Result<BuiltManifest> {
         &working_directory,
     )?;
 
-    let configured_repo_origin_url = configured_repo_origin_url(&workflow_settings);
-    let git = build_legacy_git_context(&working_directory, configured_repo_origin_url.as_deref());
+    let configured = configured_repo_origin_url(
+        &workflow_settings,
+        input.forgejo_instance_url.as_deref(),
+    )
+    .map_err(|message| anyhow!("{message}"))?;
+    let git = build_legacy_git_context(&working_directory, configured.as_ref());
     let args = input.args.filter(|args| !manifest_args_is_empty(args));
 
     Ok(BuiltManifest {
@@ -329,21 +343,22 @@ pub struct GitRunTargetObservation {
 #[must_use]
 pub fn observe_git_run_target(
     repo_path: &Path,
-    configured_repo_origin_url: Option<&str>,
+    configured: Option<&ConfiguredOrigin>,
 ) -> Option<GitRunTargetObservation> {
-    let local = inspect_local_git(repo_path, configured_repo_origin_url)?;
+    let local = inspect_local_git(repo_path, configured)?;
     let legacy_git_context = local.legacy_git_context;
-    let mut run_target = github_run_target(
+    let mut run_target = run_target_for_origin(
         &legacy_git_context.origin_url,
         &legacy_git_context.branch,
         None,
+        configured,
     );
     if let Some(target) = run_target.as_mut() {
         let publish_status = publish_manifest_branch_best_effort(
             repo_path,
             &legacy_git_context.branch,
             local.push_origin_url.as_deref(),
-            configured_repo_origin_url,
+            configured.map(|configured| configured.url.as_str()),
         );
         target.sha = remotely_available_sha(
             repo_path,
@@ -366,8 +381,9 @@ struct LocalGitObservation {
 
 fn inspect_local_git(
     repo_path: &Path,
-    configured_repo_origin_url: Option<&str>,
+    configured: Option<&ConfiguredOrigin>,
 ) -> Option<LocalGitObservation> {
+    let configured_repo_origin_url: Option<&str> = configured.map(|origin| origin.url.as_str());
     let ManifestRepoInfo {
         origin_url,
         push_origin_url,
@@ -402,28 +418,55 @@ fn inspect_local_git(
 
 fn build_legacy_git_context(
     repo_path: &Path,
-    configured_repo_origin_url: Option<&str>,
+    configured: Option<&ConfiguredOrigin>,
 ) -> Option<GitContext> {
-    let local = inspect_local_git(repo_path, configured_repo_origin_url)?;
+    let local = inspect_local_git(repo_path, configured)?;
     publish_manifest_branch_best_effort(
         repo_path,
         &local.legacy_git_context.branch,
         local.push_origin_url.as_deref(),
-        configured_repo_origin_url,
+        configured.map(|origin| origin.url.as_str()),
     );
     Some(local.legacy_git_context)
 }
 
-fn github_run_target(origin_url: &str, branch: &str, sha: Option<String>) -> Option<GitRunTarget> {
-    let (owner, repository) = fabro_github::parse_github_owner_repo(origin_url).ok()?;
-    let slug = GitHubRepositorySlug::try_new(&format!("{owner}/{repository}"))?;
+/// Derives a run target from an observed origin URL.
+///
+/// GitHub origins produce GitHub targets; an origin hosted on the configured
+/// Forgejo instance produces a forgejo target. Other origins produce no
+/// target.
+fn run_target_for_origin(
+    origin_url: &str,
+    branch: &str,
+    sha: Option<String>,
+    forgejo: Option<&ConfiguredOrigin>,
+) -> Option<GitRunTarget> {
+    let github = fabro_github::parse_github_owner_repo(
+        &fabro_github::ssh_url_to_https(origin_url),
+    )
+    .ok();
+    let forgejo_match = forgejo.filter(|configured| {
+        configured.provider == ScmProvider::Forgejo
+            && fabro_types::origin_matches_instance(origin_url, &configured.url)
+    });
+    let (slug, provider) = match github {
+        Some((owner, repository)) => (format!("{owner}/{repository}"), ScmProvider::Github),
+        None => {
+            let forgejo = forgejo_match?;
+            let (owner, repository) =
+                fabro_forgejo::parse_owner_repo(&forgejo.url, origin_url).ok()?;
+            (format!("{owner}/{repository}"), ScmProvider::Forgejo)
+        }
+    };
+    let slug = GitHubRepositorySlug::try_new(&slug)?;
     let validated = RunTarget::Git(GitRunTarget {
         repo: slug.to_string(),
         branch: branch.to_owned(),
         tag: None,
         sha,
+        provider,
     })
-    .validate()
+    .validate_with_scm(forgejo.map(|configured| configured.url.as_str()))
     .ok()?;
     let RunTarget::Git(target) = validated.target else {
         unreachable!("a validated Git target must remain a Git target")
@@ -431,23 +474,58 @@ fn github_run_target(origin_url: &str, branch: &str, sha: Option<String>) -> Opt
     Some(target)
 }
 
-fn configured_repo_origin_url(settings: &WorkflowSettings) -> Option<String> {
+/// Resolves the configured repository origin from `[run.scm]` settings.
+///
+/// `provider = "forgejo"` requires a configured instance URL and is an error
+/// (not a silently skipped origin) when none is available.
+fn configured_repo_origin_url(
+    settings: &WorkflowSettings,
+    forgejo_instance_url: Option<&str>,
+) -> Result<Option<ConfiguredOrigin>, String> {
     let scm = &settings.run.scm;
-    if !scm
+    let provider = scm
         .provider
         .as_deref()
-        .is_none_or(|provider| provider.eq_ignore_ascii_case("github"))
-    {
-        return None;
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty());
+    if provider.is_some_and(|provider| provider.eq_ignore_ascii_case("forgejo")) {
+        let (Some(owner), Some(repository)) =
+            (scm.owner.as_deref().map(str::trim), scm.repository.as_deref().map(str::trim))
+        else {
+            return Ok(None);
+        };
+        if owner.is_empty() || repository.is_empty() {
+            return Ok(None);
+        }
+        let instance = forgejo_instance_url
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .ok_or_else(|| {
+                "[run.scm] provider = \"forgejo\" requires a configured Forgejo instance \
+                 (server.integrations.forgejo.url + FORGEJO_TOKEN)"
+                    .to_string()
+            })?;
+        return Ok(Some(ConfiguredOrigin {
+            url: fabro_forgejo::repo_https_url(instance, owner, repository),
+            provider: ScmProvider::Forgejo,
+        }));
     }
-    let owner = scm.owner.as_deref()?;
-    let repository = scm.repository.as_deref()?;
+    if !provider.is_none_or(|provider| provider.eq_ignore_ascii_case("github")) {
+        return Ok(None);
+    }
+    let (Some(owner), Some(repository)) = (scm.owner.as_deref(), scm.repository.as_deref())
+    else {
+        return Ok(None);
+    };
     if owner.trim().is_empty() || repository.trim().is_empty() {
-        return None;
+        return Ok(None);
     }
     let origin = format!("https://github.com/{owner}/{repository}");
     let normalized = fabro_github::normalize_repo_origin_url(&origin);
-    (!normalized.is_empty()).then_some(normalized)
+    Ok((!normalized.is_empty()).then_some(ConfiguredOrigin {
+        url:      normalized,
+        provider: ScmProvider::Github,
+    }))
 }
 
 struct ManifestRepoInfo {
@@ -610,6 +688,14 @@ pub fn manifest_args_is_empty(args: &types::ManifestArgs) -> bool {
         && args.environment.is_none()
         && args.input.is_empty()
         && args.verbose.is_none()
+}
+
+#[cfg(test)]
+fn github_origin(url: &str) -> crate::ConfiguredOrigin {
+    crate::ConfiguredOrigin {
+        url: url.to_string(),
+        provider: ScmProvider::Github,
+    }
 }
 
 #[cfg(test)]
@@ -1812,7 +1898,7 @@ exit 1
         run_git(&workspace, &["push", "origin", "feature"]);
 
         let observation =
-            observe_git_run_target(&workspace, Some("https://github.com/acme/widgets")).unwrap();
+            observe_git_run_target(&workspace, Some(&github_origin("https://github.com/acme/widgets"))).unwrap();
         let target = observation.run_target.as_ref().unwrap();
         let legacy = &observation.legacy_git_context;
 
@@ -1839,7 +1925,7 @@ exit 1
         ]);
 
         let observation =
-            observe_git_run_target(&workspace, Some("https://github.com/acme/widgets")).unwrap();
+            observe_git_run_target(&workspace, Some(&github_origin("https://github.com/acme/widgets"))).unwrap();
         let target = observation.run_target.as_ref().unwrap();
 
         assert_eq!(target.sha, observation.legacy_git_context.sha);
@@ -1874,7 +1960,7 @@ exit 1
         mark_origin_branch_synced(&workspace, "feature");
 
         let observation =
-            observe_git_run_target(&workspace, Some("https://github.com/acme/widgets")).unwrap();
+            observe_git_run_target(&workspace, Some(&github_origin("https://github.com/acme/widgets"))).unwrap();
         let target = observation.run_target.as_ref().unwrap();
 
         assert_eq!(target.sha, None);
@@ -1924,7 +2010,7 @@ exit 1
         ]);
 
         let failed =
-            observe_git_run_target(&failed_workspace, Some("https://github.com/acme/widgets"))
+            observe_git_run_target(&failed_workspace, Some(&github_origin("https://github.com/acme/widgets")))
                 .unwrap();
         assert_eq!(failed.run_target.as_ref().unwrap().sha, None);
         assert!(failed.legacy_git_context.sha.is_some());
@@ -1941,7 +2027,7 @@ exit 1
 
         let mismatched = observe_git_run_target(
             &mismatched_workspace,
-            Some("https://github.com/acme/configured"),
+            Some(&github_origin("https://github.com/acme/configured")),
         )
         .unwrap();
         let target = mismatched.run_target.as_ref().unwrap();

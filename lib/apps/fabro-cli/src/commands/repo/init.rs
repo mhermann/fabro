@@ -64,6 +64,23 @@ _version = 1
 ",
     )
     .with_context(|| format!("failed to write {}", project_toml.display()))?;
+    // GitHub origins are recognized by host; a Forgejo instance is
+    // deployment-specific, so an explicit `[run.scm]` keeps run targets
+    // resolvable in clones of this repository.
+    if let Some(scm_block) = forgejo_scm_block(&repo_root) {
+        let with_scm = format!(
+            "\
+# Fabro project configuration
+# https://docs.fabro.computer/getting-started/quick-start
+
+_version = 1
+
+{scm_block}
+"
+        );
+        std::fs::write(&project_toml, with_scm)
+            .with_context(|| format!("failed to write {}", project_toml.display()))?;
+    }
     created.push(".fabro/project.toml".to_string());
 
     let green = console::Style::new().green();
@@ -157,6 +174,31 @@ draft = true
     }
 
     Ok(created)
+}
+
+/// A `[run.scm]` block for the repo when its origin belongs to the
+/// configured Forgejo instance; `None` otherwise (GitHub origins need no
+/// explicit scm block).
+fn forgejo_scm_block(repo_root: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let remote_url = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    let resolved = fabro_config::ServerSettingsBuilder::load_default().ok()?;
+    let settings = resolved.server.integrations.forgejo;
+    let instance = settings.instance_url()?;
+    if !fabro_types::origin_matches_instance(&remote_url, instance) {
+        return None;
+    }
+    let (owner, repo) = fabro_forgejo::parse_owner_repo(instance, &remote_url).ok()?;
+    Some(format!(
+        "[run.scm]\nprovider = \"forgejo\"\nowner = \"{owner}\"\nrepository = \"{repo}\"\n"
+    ))
 }
 
 async fn check_github_app_installation(target: &ServerTargetArgs, base_ctx: &CommandContext) {

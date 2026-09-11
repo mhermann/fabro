@@ -185,7 +185,8 @@ async fn attempt_pull_request_creation(
     let catalog = state.catalog();
     let run_store_handle = run_store.clone().into();
     let request = pull_request::OpenPullRequestRequest {
-        github,
+        github: Some(github),
+        forgejo: None,
         origin_url: &inputs.normalized_origin,
         base_branch: inputs.base_branch,
         head_branch: inputs.run_branch,

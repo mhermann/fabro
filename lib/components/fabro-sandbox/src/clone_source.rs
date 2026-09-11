@@ -11,10 +11,16 @@ pub(crate) enum CloneDecision {
         tag:        Option<String>,
         commit_sha: Option<String>,
     },
+    Forgejo {
+        origin_url: String,
+        branch:     Option<String>,
+        tag:        Option<String>,
+        commit_sha: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct GitHubRepoLayout {
+pub(crate) struct RepoLayout {
     pub(crate) owner:               String,
     pub(crate) repo:                String,
     pub(crate) repos_owner_path:    String,
@@ -23,17 +29,14 @@ pub(crate) struct GitHubRepoLayout {
     pub(crate) execution_directory: String,
 }
 
-pub(crate) fn github_repo_layout(
-    origin_url: &str,
+/// Maps `owner/repo` onto the sandbox checkout layout shared by every
+/// clone-based provider.
+fn repo_layout(
+    owner: String,
+    repo: String,
     workspace_root: &str,
     repos_root: &str,
-) -> crate::Result<GitHubRepoLayout> {
-    let origin_url = fabro_github::normalize_repo_origin_url(origin_url);
-    let (owner, repo) = fabro_github::parse_github_owner_repo(&origin_url).map_err(|err| {
-        crate::Error::message(format!(
-            "Clone-based sandboxes currently support GitHub repository origins only: {err}"
-        ))
-    })?;
+) -> crate::Result<RepoLayout> {
     validate_path_component("owner", &owner)?;
     validate_path_component("repository", &repo)?;
     let workspace_root = trim_root(workspace_root);
@@ -42,7 +45,7 @@ pub(crate) fn github_repo_layout(
     let primary_repo_path = sandbox::join_sandbox_path(&repos_owner_path, &repo);
     let primary_repo_link = sandbox::join_sandbox_path(workspace_root, &repo);
 
-    Ok(GitHubRepoLayout {
+    Ok(RepoLayout {
         owner,
         repo,
         repos_owner_path,
@@ -50,6 +53,36 @@ pub(crate) fn github_repo_layout(
         execution_directory: primary_repo_link.clone(),
         primary_repo_link,
     })
+}
+
+pub(crate) fn github_repo_layout(
+    origin_url: &str,
+    workspace_root: &str,
+    repos_root: &str,
+) -> crate::Result<RepoLayout> {
+    let origin_url = fabro_github::normalize_repo_origin_url(origin_url);
+    let (owner, repo) = fabro_github::parse_github_owner_repo(&origin_url).map_err(|err| {
+        crate::Error::message(format!(
+            "Clone-based sandboxes currently support GitHub repository origins only: {err}"
+        ))
+    })?;
+    repo_layout(owner, repo, workspace_root, repos_root)
+}
+
+/// Same layout contract as [`github_repo_layout`], for repositories on the
+/// configured Forgejo instance.
+pub(crate) fn forgejo_repo_layout(
+    origin_url: &str,
+    instance_url: &str,
+    workspace_root: &str,
+    repos_root: &str,
+) -> crate::Result<RepoLayout> {
+    let (owner, repo) = fabro_forgejo::parse_owner_repo(instance_url, origin_url).map_err(|err| {
+        crate::Error::message(format!(
+            "Origin is not a repository on the configured Forgejo instance: {err}"
+        ))
+    })?;
+    repo_layout(owner, repo, workspace_root, repos_root)
 }
 
 fn validate_path_component(label: &str, component: &str) -> crate::Result<()> {
@@ -65,7 +98,7 @@ fn validate_path_component(label: &str, component: &str) -> crate::Result<()> {
     Ok(())
 }
 
-pub(crate) fn repo_symlink_command(layout: &GitHubRepoLayout) -> String {
+pub(crate) fn repo_symlink_command(layout: &RepoLayout) -> String {
     format!(
         "ln -s {} {}",
         sandbox::shell_quote(&layout.primary_repo_path),
@@ -269,6 +302,7 @@ pub(crate) fn decide_clone(
     clone_branch: Option<&str>,
     clone_tag: Option<&str>,
     clone_commit_sha: Option<&str>,
+    forgejo_instance_url: Option<&str>,
 ) -> crate::Result<CloneDecision> {
     if clone_tag.is_some_and(|tag| tag.trim().is_empty()) {
         return Err(crate::Error::message(
@@ -315,21 +349,38 @@ pub(crate) fn decide_clone(
         });
     };
 
-    let origin_url = fabro_github::normalize_repo_origin_url(origin_url);
-    if let Err(err) = fabro_github::parse_github_owner_repo(&origin_url) {
-        return Err(crate::Error::message(format!(
-            "Clone-based sandboxes currently support GitHub repository origins only: {err}"
-        )));
+    // GitHub wins classification because a GitHub origin is unambiguous; a
+    // Forgejo origin must match the configured instance host.
+    if fabro_github::parse_github_owner_repo(&fabro_github::ssh_url_to_https(origin_url)).is_ok() {
+        let origin_url = fabro_github::normalize_repo_origin_url(origin_url);
+        return Ok(CloneDecision::GitHub {
+            origin_url,
+            branch: clone_branch
+                .filter(|branch| !branch.trim().is_empty())
+                .map(str::to_string),
+            tag,
+            commit_sha,
+        });
     }
 
-    Ok(CloneDecision::GitHub {
-        origin_url,
-        branch: clone_branch
-            .filter(|branch| !branch.trim().is_empty())
-            .map(str::to_string),
-        tag,
-        commit_sha,
-    })
+    if let Some(instance_url) = forgejo_instance_url.filter(|url| !url.trim().is_empty()) {
+        if fabro_types::origin_matches_instance(origin_url, instance_url) {
+            let origin_url = fabro_forgejo::normalize_origin_url(instance_url, origin_url);
+            return Ok(CloneDecision::Forgejo {
+                origin_url,
+                branch: clone_branch
+                    .filter(|branch| !branch.trim().is_empty())
+                    .map(str::to_string),
+                tag,
+                commit_sha,
+            });
+        }
+    }
+
+    Err(crate::Error::message(
+        "Clone-based sandboxes support GitHub repository origins and repositories on the \
+         configured Forgejo instance; this origin matches neither",
+    ))
 }
 
 fn normalize_exact_commit_sha(commit_sha: &str) -> crate::Result<String> {
@@ -347,11 +398,22 @@ pub(crate) fn clean_clone_origin_for_record(clone_origin_url: Option<&str>) -> O
 pub(crate) fn repo_cloned_for_record(
     skip_clone: bool,
     clone_origin_url: Option<&str>,
+    forgejo_instance_url: Option<&str>,
 ) -> Option<bool> {
-    Some(matches!(
-        decide_clone(skip_clone, clone_origin_url, None, None, None).ok()?,
-        CloneDecision::GitHub { .. }
-    ))
+    Some(
+        matches!(
+            decide_clone(
+                skip_clone,
+                clone_origin_url,
+                None,
+                None,
+                None,
+                forgejo_instance_url,
+            )
+            .ok()?,
+            CloneDecision::GitHub { .. } | CloneDecision::Forgejo { .. }
+        ),
+    )
 }
 
 #[cfg(test)]

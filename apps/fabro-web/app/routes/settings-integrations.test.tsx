@@ -65,6 +65,13 @@ function sampleIntegrations(
         metadata:   { strategy: "app", slug: "fabro-sh" },
       }),
       sampleStatus({
+        provider:   "forgejo",
+        status:     "disabled",
+        configured: false,
+        connection: null,
+        metadata:   {},
+      }),
+      sampleStatus({
         metadata: { default_channel: "#fabro" },
         ...slack,
       }),

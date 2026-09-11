@@ -753,6 +753,7 @@ mod tests {
             labels:           HashMap::new(),
             workflow_slug:    Some("metadata".to_string()),
             github_app:       None,
+            forgejo:          None,
             pre_run_git:      None,
             fork_source_ref:  None,
             base_branch:      None,

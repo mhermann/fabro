@@ -411,6 +411,7 @@ mod tests {
             branch: "main".to_string(),
             tag:    None,
             sha:    None,
+            provider: fabro_types::ScmProvider::Github,
         }
     }
 
@@ -674,6 +675,7 @@ mod tests {
                 branch: "main".to_string(),
                 tag:    None,
                 sha:    Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+            provider: fabro_types::ScmProvider::Github,
             }))
         );
         assert_eq!(
@@ -722,6 +724,7 @@ mod tests {
             branch: "context-only".to_string(),
             tag:    Some("v1".to_string()),
             sha:    Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+            provider: fabro_types::ScmProvider::Github,
         };
         create_automation_with_source(
             state.as_ref(),
@@ -870,6 +873,7 @@ mod tests {
                 branch: "main".to_string(),
                 tag:    None,
                 sha:    None,
+                provider: fabro_types::ScmProvider::Github,
             }),
             vec![schedule_trigger("schedule", "* * * * *", true)],
         )

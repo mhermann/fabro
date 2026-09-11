@@ -98,9 +98,15 @@ impl GitRepoCache {
         }
     }
 
-    fn bare_dir(&self, repo: &GitHubRepositorySlug) -> PathBuf {
-        self.cache_root
-            .join(repo.owner())
+    fn bare_dir(
+        &self,
+        repo: &GitHubRepositorySlug,
+        cache_namespace: Option<&str>,
+    ) -> PathBuf {
+        let base = cache_namespace
+            .map(|namespace| self.cache_root.join(namespace))
+            .unwrap_or_else(|| self.cache_root.clone());
+        base.join(repo.owner())
             .join(format!("{}.git", repo.repo()))
     }
 
@@ -124,7 +130,7 @@ impl GitRepoCache {
             .locks
             .lock((args.repo.owner().to_string(), args.repo.repo().to_string()))
             .await;
-        let bare_dir = self.bare_dir(args.repo);
+        let bare_dir = self.bare_dir(args.repo, args.cache_namespace);
 
         match self.try_prepare_worktree(&bare_dir, &args, clone_url).await {
             Ok(sha) => Ok(sha),
@@ -198,6 +204,10 @@ pub(crate) struct WorktreePrepareInput<'a> {
     pub selector:     GitCheckoutSelector<'a>,
     pub auth:         Option<&'a GitAuthConfig>,
     pub worktree_dir: &'a Path,
+    /// Cache namespace for remotes outside github.com (e.g. a Forgejo
+    /// instance host), so identical slugs on different forges never share a
+    /// bare clone. `None` keeps the historical GitHub-only layout.
+    pub cache_namespace: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -268,6 +278,14 @@ pub(crate) fn github_clone_url(repo: &GitHubRepositorySlug) -> String {
     url
 }
 
+/// Canonical credential-free clone URL for a repository on a Forgejo
+/// instance.
+pub(crate) fn forgejo_clone_url(instance_url: &str, owner: &str, repo: &str) -> String {
+    let mut url = fabro_forgejo::repo_https_url(instance_url, owner, repo);
+    url.push_str(".git");
+    url
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GitAuthConfig {
     extraheader:      String,
@@ -327,6 +345,15 @@ pub(crate) async fn resolve_git_read_auth_config(
         fabro_github::resolve_read_only_clone_credentials(&context, repo.owner(), repo.repo())
             .await?;
     Ok(Some(GitAuthConfig::new(&credentials)))
+}
+
+/// Basic-auth config for a Forgejo instance PAT: the token rides the
+/// `http.<url>.extraheader` git config exactly like GitHub credentials, and
+/// its value is registered as sensitive for redaction. Forgejo accepts any
+/// non-empty username with the PAT as password; `fabro` is the convention
+/// the runtime clone path embeds too.
+pub(crate) fn forgejo_git_auth(token: &str) -> GitAuthConfig {
+    GitAuthConfig::from_parts("fabro", token)
 }
 
 #[cfg(test)]
@@ -563,6 +590,7 @@ mod tests {
             branch: branch.to_string(),
             tag:    tag.map(str::to_string),
             sha:    sha.map(str::to_string),
+            provider: fabro_types::ScmProvider::Github,
         }
     }
 
@@ -572,6 +600,7 @@ mod tests {
             branch: branch.to_string(),
             tag:    tag.map(str::to_string),
             sha:    sha.map(str::to_string),
+            provider: fabro_types::ScmProvider::Github,
         }
     }
 
@@ -864,13 +893,14 @@ mod tests {
                     selector:     GitCheckoutSelector::from(&target),
                     auth:         None,
                     worktree_dir: &worktree_a,
+                    cache_namespace: None,
                 },
                 &upstream_url,
             )
             .await
             .expect("first prepare_worktree");
         assert_eq!(sha_a, expected_sha);
-        let bare_dir = cache.bare_dir(&repo);
+        let bare_dir = cache.bare_dir(&repo, None);
         assert!(bare_dir.join("HEAD").exists(), "bare clone should exist");
         let signature_before = objects_signature(&bare_dir);
         assert!(
@@ -886,6 +916,7 @@ mod tests {
                     selector:     GitCheckoutSelector::from(&target),
                     auth:         None,
                     worktree_dir: &worktree_b,
+                cache_namespace: None,
                 },
                 &upstream_url,
             )
@@ -917,6 +948,7 @@ mod tests {
                     selector:     GitCheckoutSelector::from(&target),
                     auth:         None,
                     worktree_dir: &worktree_a,
+                    cache_namespace: None,
                 },
                 &upstream_url,
             )
@@ -924,7 +956,7 @@ mod tests {
             .expect("first prepare_worktree");
 
         // Simulate corruption by truncating HEAD.
-        let bare_dir = cache.bare_dir(&repo);
+        let bare_dir = cache.bare_dir(&repo, None);
         fs::write(bare_dir.join("HEAD"), "").unwrap();
 
         let worktree_b = temp.path().join("wt-b");
@@ -935,6 +967,7 @@ mod tests {
                     selector:     GitCheckoutSelector::from(&target),
                     auth:         None,
                     worktree_dir: &worktree_b,
+                cache_namespace: None,
                 },
                 &upstream_url,
             )
@@ -973,6 +1006,7 @@ mod tests {
                         selector:     GitCheckoutSelector::from(&target),
                         auth:         None,
                         worktree_dir: &temp.path().join(name),
+                        cache_namespace: None,
                     },
                     &upstream_url,
                 )
@@ -1001,6 +1035,7 @@ mod tests {
                     selector:     GitCheckoutSelector::from(&missing_tag),
                     auth:         None,
                     worktree_dir: &temp.path().join("missing-tag"),
+                    cache_namespace: None,
                 },
                 &upstream_url,
             )
@@ -1018,6 +1053,7 @@ mod tests {
                     selector:     GitCheckoutSelector::from(&unavailable_commit),
                     auth:         None,
                     worktree_dir: &temp.path().join("missing-commit"),
+                    cache_namespace: None,
                 },
                 &upstream_url,
             )

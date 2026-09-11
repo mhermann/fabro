@@ -117,8 +117,9 @@ pub use pull_request::{
 };
 pub use reasoning::ReasoningOutput;
 pub use repository::{
-    GitHubRepositorySlug, GitHubRepositorySlugError, RepositoryProvider, RepositoryRef,
+    GitHubRepositorySlug, GitHubRepositorySlugError, RepositoryProvider, RepositoryRef, ScmProvider,
     is_valid_git_branch_name, is_valid_git_tag_name, normalize_git_commit_sha,
+    origin_matches_instance, repository_provider_with,
 };
 pub use run::{
     DirtyStatus, ForkSourceRef, GitContext, RunClientProvenance, RunProvenance,

@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use fabro_automation::{AutomationGitWorkflowSource, AutomationId};
 use fabro_manifest::WorkflowVersionCollectError;
 use fabro_types::{
-    GitCoordinateValidationError, GitHubRepositorySlug, GitRunTarget,
+    GitCoordinateValidationError, GitHubRepositorySlug, GitRunTarget, ScmProvider,
     ResolvedAutomationGitWorkflowSource, RunId, RunIntent, RunIntentArgs, RunTarget,
     WorkflowVersionId,
 };
@@ -125,6 +125,7 @@ pub(crate) trait AutomationRunMaterializer: Send + Sync {
 
 #[derive(Clone)]
 pub(crate) struct ProductionAutomationRunMaterializer {
+    forgejo_instance_url: Option<String>,
     remote_resolver: Arc<dyn AutomationGitRemoteResolver>,
     repo_cache:      Arc<GitRepoCache>,
     version_store:   WorkflowVersionStore,
@@ -139,18 +140,46 @@ struct GitRemote {
 
 #[async_trait]
 trait AutomationGitRemoteResolver: Send + Sync {
-    async fn resolve(&self, repo: &GitHubRepositorySlug) -> anyhow::Result<GitRemote>;
+    /// Resolves the clone remote for `repo`. `forgejo_origin` is the
+    /// configured instance URL when the repo is forgejo-hosted; GitHub
+    /// otherwise.
+    async fn resolve(
+        &self,
+        repo: &GitHubRepositorySlug,
+        forgejo_origin: Option<&str>,
+    ) -> anyhow::Result<GitRemote>;
 }
 
 struct ServerGitHubRemoteResolver {
     credentials:  Option<fabro_github::GitHubCredentials>,
+    forgejo:      Option<fabro_forgejo::ForgejoContext>,
     api_base_url: String,
     http_client:  Option<fabro_http::HttpClient>,
 }
 
 #[async_trait]
 impl AutomationGitRemoteResolver for ServerGitHubRemoteResolver {
-    async fn resolve(&self, repo: &GitHubRepositorySlug) -> anyhow::Result<GitRemote> {
+    async fn resolve(
+        &self,
+        repo: &GitHubRepositorySlug,
+        forgejo_origin: Option<&str>,
+    ) -> anyhow::Result<GitRemote> {
+        if let Some(origin) = forgejo_origin {
+            let token = self
+                .forgejo
+                .as_ref()
+                .filter(|ctx| ctx.base_url() == origin)
+                .map(|ctx| ctx.token().to_string())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "FORGEJO_TOKEN is not configured for forgejo workflow source {repo}"
+                    )
+                })?;
+            return Ok(GitRemote {
+                clone_url: git_checkout::forgejo_clone_url(origin, repo.owner(), repo.repo()),
+                auth:      Some(git_checkout::forgejo_git_auth(&token)),
+            });
+        }
         let auth = git_checkout::resolve_git_read_auth_config(
             self.credentials.as_ref(),
             repo,
@@ -168,14 +197,17 @@ impl AutomationGitRemoteResolver for ServerGitHubRemoteResolver {
 impl ProductionAutomationRunMaterializer {
     pub(crate) fn new(
         github_credentials: Option<fabro_github::GitHubCredentials>,
+        forgejo: Option<fabro_forgejo::ForgejoContext>,
         github_api_base_url: String,
         http_client: Option<fabro_http::HttpClient>,
         repo_cache: Arc<GitRepoCache>,
         version_store: WorkflowVersionStore,
     ) -> Self {
         Self {
+            forgejo_instance_url: forgejo.as_ref().map(|ctx| ctx.base_url().to_string()),
             remote_resolver: Arc::new(ServerGitHubRemoteResolver {
                 credentials: github_credentials,
+                forgejo,
                 api_base_url: github_api_base_url,
                 http_client,
             }),
@@ -194,9 +226,10 @@ impl ProductionAutomationRunMaterializer {
         &self,
         role: CheckoutRole,
         repo: &GitHubRepositorySlug,
+        forgejo_origin: Option<&str>,
     ) -> Result<GitRemote, RunMaterializeError> {
         self.remote_resolver
-            .resolve(repo)
+            .resolve(repo, forgejo_origin)
             .await
             .map_err(|source| RunMaterializeError::Credentials { role, source })
     }
@@ -208,6 +241,7 @@ impl ProductionAutomationRunMaterializer {
         remote: &GitRemote,
         selector: GitCheckoutSelector<'_>,
         worktree_dir: &Path,
+        cache_namespace: Option<&str>,
     ) -> Result<String, RunMaterializeError> {
         self.repo_cache
             .prepare_worktree(
@@ -216,6 +250,7 @@ impl ProductionAutomationRunMaterializer {
                     selector,
                     auth: remote.auth.as_ref(),
                     worktree_dir,
+                    cache_namespace,
                 },
                 &remote.clone_url,
             )
@@ -224,21 +259,49 @@ impl ProductionAutomationRunMaterializer {
     }
 }
 
+/// On-disk cache namespace for a forgejo-hosted remote: the instance host
+/// (scheme and port stripped) keeps identical slugs on different forges from
+/// sharing a bare clone.
+fn cache_namespace(forgejo_origin: &str) -> String {
+    forgejo_origin
+        .split("://")
+        .nth(1)
+        .unwrap_or(forgejo_origin)
+        .to_string()
+}
+
 #[async_trait]
 impl AutomationRunMaterializer for ProductionAutomationRunMaterializer {
     async fn materialize(
         &self,
         input: AutomationRunMaterializeInput,
     ) -> Result<AutomationRunMaterialized, RunMaterializeError> {
+        let forgejo_origin = self
+            .forgejo_instance_url
+            .as_deref()
+            .filter(|_| input.target.provider == ScmProvider::Forgejo)
+            .map(str::to_string);
+        let cache_namespace_for = |provider: ScmProvider| {
+            forgejo_origin
+                .as_deref()
+                .filter(|_| provider == ScmProvider::Forgejo)
+                .map(cache_namespace)
+        };
         let validated_target = input
             .target
-            .validate()
+            .validate_with_scm(forgejo_origin.as_deref())
             .map_err(|source| RunMaterializeError::InvalidTarget { source })?;
         let target_repo = validated_target.repository().clone();
+        let target_provider = validated_target.provider();
         let mut exact_target = validated_target.into_target();
         let workflow_source = input
             .workflow_source
-            .map(GitRunTarget::validate)
+            .map(|source| {
+                let source_origin = (source.provider == ScmProvider::Forgejo)
+                    .then(|| forgejo_origin.clone())
+                    .flatten();
+                source.validate_with_scm(source_origin.as_deref())
+            })
             .transpose()
             .map_err(|source| RunMaterializeError::InvalidWorkflowSource { source })?;
         // A workflow source naming the target's exact coordinate shares its
@@ -268,8 +331,9 @@ impl AutomationRunMaterializer for ProductionAutomationRunMaterializer {
             })?;
         let target_checkout_dir = temp_dir.path().join("target");
         let target_remote = self
-            .resolve_remote(CheckoutRole::Target, &target_repo)
+            .resolve_remote(CheckoutRole::Target, &target_repo, forgejo_origin.as_deref())
             .await?;
+        let target_namespace = cache_namespace_for(target_provider);
         let checked_out_sha = self
             .prepare_checkout(
                 CheckoutRole::Target,
@@ -277,19 +341,22 @@ impl AutomationRunMaterializer for ProductionAutomationRunMaterializer {
                 &target_remote,
                 GitCheckoutSelector::from(&exact_target),
                 &target_checkout_dir,
+                target_namespace.as_deref(),
             )
             .await?;
         let (workflow_checkout_dir, workflow_checkout_sha) = match separate_source {
             None => (target_checkout_dir, checked_out_sha.clone()),
             Some(source) => {
                 let repo = source.repository();
+                let source_provider = source.provider();
                 let remote = if repo == &target_repo {
                     target_remote
                 } else {
-                    self.resolve_remote(CheckoutRole::WorkflowSource, repo)
+                    self.resolve_remote(CheckoutRole::WorkflowSource, repo, forgejo_origin.as_deref())
                         .await?
                 };
                 let source_checkout_dir = temp_dir.path().join("workflow-source");
+                let source_namespace = cache_namespace_for(source_provider);
                 let source_sha = self
                     .prepare_checkout(
                         CheckoutRole::WorkflowSource,
@@ -297,6 +364,7 @@ impl AutomationRunMaterializer for ProductionAutomationRunMaterializer {
                         &remote,
                         GitCheckoutSelector::from(source.target()),
                         &source_checkout_dir,
+                        source_namespace.as_deref(),
                     )
                     .await?;
                 (source_checkout_dir, source_sha)
@@ -581,7 +649,11 @@ mod tests {
 
     #[async_trait]
     impl AutomationGitRemoteResolver for FixtureRemoteResolver {
-        async fn resolve(&self, repo: &GitHubRepositorySlug) -> anyhow::Result<GitRemote> {
+        async fn resolve(
+            &self,
+            repo: &GitHubRepositorySlug,
+            _forgejo_origin: Option<&str>,
+        ) -> anyhow::Result<GitRemote> {
             let recorder = &self.credentials;
             recorder
                 .repositories
@@ -729,6 +801,7 @@ mod tests {
             branch: "main".to_string(),
             tag:    None,
             sha:    None,
+            provider: fabro_types::ScmProvider::Github,
         }
     }
 
@@ -743,6 +816,7 @@ mod tests {
             branch: branch.to_string(),
             tag:    tag.map(str::to_string),
             sha:    sha.map(str::to_string),
+            provider: fabro_types::ScmProvider::Github,
         }
     }
 
@@ -778,6 +852,7 @@ mod tests {
         clone_urls: HashMap<GitHubRepositorySlug, String>,
     ) -> ProductionAutomationRunMaterializer {
         ProductionAutomationRunMaterializer::new(
+            None,
             None,
             "https://api.github.com".to_string(),
             None,

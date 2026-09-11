@@ -123,8 +123,8 @@ mod tests {
     use fabro_store::{Database, RunProjectionReducer};
     use fabro_types::{
         AuthMethod, BlobHash, DirtyStatus, FailureReason, ForkSourceRef, GitContext, Graph,
-        IdpIdentity, Principal, PullRequestLink, RunRunnableSource, RunServerProvenance, RunTarget,
-        RunTiming, WorkflowSettings, fixtures, test_support,
+        IdpIdentity, Principal, PullRequestLink, RunRunnableSource, RunServerProvenance,
+        RunTarget, RunTiming, ScmProvider, WorkflowSettings, fixtures, test_support,
     };
     use object_store::memory::InMemory;
 
@@ -172,6 +172,7 @@ mod tests {
             branch: "main".to_string(),
             tag:    None,
             sha:    Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+provider: ScmProvider::Github,
         })
     }
 
@@ -349,11 +350,7 @@ mod tests {
         .await
         .unwrap();
         event::append_event(&source_store, &source_run_id, &Event::PullRequestLinked {
-            pull_request: PullRequestLink {
-                owner:  "fabro-sh".to_string(),
-                repo:   "fabro".to_string(),
-                number: 42,
-            },
+            pull_request: PullRequestLink::github("fabro-sh", "fabro", 42),
         })
         .await
         .unwrap();

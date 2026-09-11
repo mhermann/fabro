@@ -18,10 +18,11 @@ fn run_intent_round_trips_the_openapi_shape() {
     let intent = RunIntent {
         workflow_version_id: test_support::test_workflow_version_id(),
         target:              RunTarget::Git(GitRunTarget {
-            repo:   "fabro-sh/fabro".to_string(),
-            branch: "feature/run-intent".to_string(),
-            tag:    Some("v1.2.3".to_string()),
-            sha:    Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+            repo:     "fabro-sh/fabro".to_string(),
+            branch:   "feature/run-intent".to_string(),
+            tag:      Some("v1.2.3".to_string()),
+            sha:      Some("abcdef0123456789abcdef0123456789abcdef01".to_string()),
+            provider: fabro_types::ScmProvider::Github,
         }),
         args:                RunIntentArgs {
             model:            Some("gpt-5.6-sol".to_string()),
@@ -104,4 +105,29 @@ fn assert_same_type<T: 'static, U: 'static>() {
         type_name::<T>(),
         type_name::<U>()
     );
+}
+
+#[test]
+fn forgejo_run_target_round_trips_the_openapi_shape() {
+    let intent = RunIntent {
+        workflow_version_id: test_support::test_workflow_version_id(),
+        target:              RunTarget::Git(GitRunTarget {
+            repo:     "acme/my-app".to_string(),
+            branch:   "feature/forgejo".to_string(),
+            tag:      None,
+            sha:      None,
+            provider: fabro_types::ScmProvider::Forgejo,
+        }),
+        args:                RunIntentArgs::default(),
+        environment_id:      None,
+        parent_id:           None,
+        title:               None,
+        goal:                None,
+    };
+
+    let value = serde_json::to_value(&intent).unwrap();
+    assert_eq!(value["target"]["provider"], "forgejo");
+
+    let api: ApiRunIntent = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(api).unwrap(), value);
 }
