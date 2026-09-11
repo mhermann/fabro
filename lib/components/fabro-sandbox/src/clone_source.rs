@@ -70,13 +70,16 @@ pub(crate) fn parse_origin_owner_repo(
              instance repository origins only: {err}"
         ))
     };
-    let normalized = fabro_github::normalize_repo_origin_url(origin_url);
+    // The forge check reads the raw origin (`is_forgejo_origin` normalizes
+    // internally), so the GitHub normalizer's sanitized-host rewrite can
+    // never corrupt a port-bearing instance URL before the dispatch.
     if let Some(instance) = forgejo_instance {
-        if fabro_forgejo::is_forgejo_origin(instance, &normalized) {
-            return fabro_forgejo::parse_forgejo_owner_repo(instance, &normalized)
+        if fabro_forgejo::is_forgejo_origin(instance, origin_url) {
+            return fabro_forgejo::parse_forgejo_owner_repo(instance, origin_url)
                 .map_err(unsupported);
         }
     }
+    let normalized = fabro_github::normalize_repo_origin_url(origin_url);
     fabro_github::parse_github_owner_repo(&normalized).map_err(unsupported)
 }
 
@@ -344,11 +347,19 @@ pub(crate) fn decide_clone(
         });
     };
 
-    let origin_url = fabro_github::normalize_repo_origin_url(origin_url);
-    parse_origin_owner_repo(&origin_url, forgejo_instance)?;
-
+    // The forge dispatch reads the raw origin (`is_forgejo_origin`
+    // normalizes internally), so the GitHub normalizer's sanitized-host
+    // rewrite can never corrupt a port-bearing instance URL first. Each
+    // branch then stores its own canonical form; the GitHub branch keeps the
+    // GitHub normalizer exactly as before.
     let is_forge = forgejo_instance
-        .is_some_and(|instance| fabro_forgejo::is_forgejo_origin(instance, &origin_url));
+        .is_some_and(|instance| fabro_forgejo::is_forgejo_origin(instance, origin_url));
+    parse_origin_owner_repo(origin_url, forgejo_instance)?;
+    let origin_url = if is_forge {
+        fabro_forgejo::normalize_forgejo_origin_url(origin_url)
+    } else {
+        fabro_github::normalize_repo_origin_url(origin_url)
+    };
     let branch = clone_branch
         .filter(|branch| !branch.trim().is_empty())
         .map(str::to_string);
@@ -376,10 +387,20 @@ fn normalize_exact_commit_sha(commit_sha: &str) -> crate::Result<String> {
     })
 }
 
-pub(crate) fn clean_clone_origin_for_record(clone_origin_url: Option<&str>) -> Option<String> {
-    clone_origin_url
-        .filter(|url| !url.trim().is_empty())
-        .map(fabro_github::normalize_repo_origin_url)
+/// Canonical origin recorded in persisted sandbox metadata. Origins on the
+/// configured Forgejo instance keep the Forgejo normalizer so an instance
+/// port survives the record; every other origin keeps the GitHub normalizer.
+pub(crate) fn clean_clone_origin_for_record(
+    clone_origin_url: Option<&str>,
+    forgejo_instance: Option<&fabro_forgejo::ForgejoInstance>,
+) -> Option<String> {
+    let origin = clone_origin_url.filter(|url| !url.trim().is_empty())?;
+    Some(match forgejo_instance {
+        Some(instance) if fabro_forgejo::is_forgejo_origin(instance, origin) => {
+            fabro_forgejo::normalize_forgejo_origin_url(origin)
+        }
+        _ => fabro_github::normalize_repo_origin_url(origin),
+    })
 }
 
 pub(crate) fn repo_cloned_for_record(
@@ -978,9 +999,10 @@ mod tests {
     #[test]
     fn record_origin_strips_credentials() {
         assert_eq!(
-            clean_clone_origin_for_record(Some(
-                "https://x-access-token:secret@github.com/acme/widgets.git"
-            )),
+            clean_clone_origin_for_record(
+                Some("https://x-access-token:secret@github.com/acme/widgets.git"),
+                None,
+            ),
             Some("https://github.com/acme/widgets".to_string())
         );
     }
@@ -1035,6 +1057,65 @@ mod tests {
                 tag:        None,
                 commit_sha: None,
             }
+        );
+    }
+
+    #[test]
+    fn forgejo_port_bearing_origin_produces_a_forge_decision() {
+        // Forgejo's own default port is 3000; the GitHub normalizer used to
+        // swallow it into the path before the forge dispatch could run.
+        let instance = fabro_forgejo::ForgejoInstance::new("https://git.example.com:3000").unwrap();
+        assert_eq!(
+            decide_clone(
+                false,
+                Some("ssh://git@git.example.com:3000/acme/widgets.git"),
+                Some("main"),
+                None,
+                None,
+                Some(&instance),
+            )
+            .unwrap(),
+            CloneDecision::Forge {
+                origin_url: "https://git.example.com:3000/acme/widgets".to_string(),
+                branch:     Some("main".to_string()),
+                tag:        None,
+                commit_sha: None,
+            }
+        );
+    }
+
+    #[test]
+    fn forgejo_port_bearing_layout_parses_owner_and_repo() {
+        let instance = fabro_forgejo::ForgejoInstance::new("https://git.example.com:3000").unwrap();
+        let layout = clone_repo_layout(
+            "https://x-access-token:forgejo_pat_123@git.example.com:3000/acme/widgets.git",
+            "/workspace",
+            "/repos",
+            Some(&instance),
+        )
+        .unwrap();
+
+        assert_eq!(layout.owner, "acme");
+        assert_eq!(layout.repo, "widgets");
+    }
+
+    #[test]
+    fn forgejo_port_bearing_record_keeps_the_port() {
+        let instance = fabro_forgejo::ForgejoInstance::new("https://git.example.com:3000").unwrap();
+        assert_eq!(
+            clean_clone_origin_for_record(
+                Some("https://x-access-token:secret@git.example.com:3000/acme/widgets.git"),
+                Some(&instance),
+            ),
+            Some("https://git.example.com:3000/acme/widgets".to_string())
+        );
+        // Other origins keep the GitHub normalizer.
+        assert_eq!(
+            clean_clone_origin_for_record(
+                Some("https://github.com/acme/widgets.git/"),
+                Some(&instance),
+            ),
+            Some("https://github.com/acme/widgets".to_string())
         );
     }
 

@@ -406,7 +406,18 @@ fn normalize_https_host_path(url: &str) -> String {
 
     match rest.split_once(':') {
         Some((host, path)) if !host.contains('/') && !path.starts_with('/') => {
-            format!("https://{host}/{path}")
+            // A numeric first path segment is an instance port
+            // (`host:3000/owner/repo` — Forgejo's own default is 3000) and
+            // must survive normalization untouched. Only the sanitized
+            // scp-like `host:owner/repo` shape is rewritten.
+            let first_segment = path.split('/').next().unwrap_or_default();
+            let is_port = !first_segment.is_empty()
+                && first_segment.bytes().all(|byte| byte.is_ascii_digit());
+            if is_port {
+                url.to_string()
+            } else {
+                format!("https://{host}/{path}")
+            }
         }
         _ => url.to_string(),
     }

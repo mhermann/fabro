@@ -123,6 +123,7 @@ impl SandboxSpec {
                         repo_cloned,
                         clone_origin_url: clone_source::clean_clone_origin_for_record(
                             clone_origin_url.as_deref(),
+                            forgejo.as_ref().map(|config| &config.instance),
                         ),
                         clone_branch: clone_branch.clone(),
                         workspace_root: Some(docker::WORKING_DIRECTORY.to_string()),
@@ -166,6 +167,7 @@ impl SandboxSpec {
                         repo_cloned,
                         clone_origin_url: clone_source::clean_clone_origin_for_record(
                             clone_origin_url.as_deref(),
+                            forgejo.as_ref().map(|config| &config.instance),
                         ),
                         clone_branch: clone_branch.clone(),
                         workspace_root: Some(daytona::WORKING_DIRECTORY.to_string()),

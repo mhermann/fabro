@@ -259,3 +259,34 @@ async fn bad_tokens_are_rejected_with_401() {
 
     server.shutdown().await;
 }
+
+/// Every twin URL is loopback with an explicit port — the instance shape the
+/// origin normalization previously mangled. Prove such a URL survives the
+/// origin helpers end-to-end, including the credential-bearing clone form
+/// the sandbox layer feeds them.
+#[tokio::test]
+async fn port_bearing_instance_url_matches_through_the_origin_helpers() {
+    let mut state = AppState::new();
+    state.add_repository(OWNER, REPO, vec!["main".to_string()], false);
+    let server = TestServer::start(state).await;
+
+    let instance = ForgejoInstance::new_allowing_http(server.url())
+        .expect("twin instance URL should validate");
+    assert!(
+        instance.host().contains(':'),
+        "twin URLs are port-bearing: {}",
+        instance.host()
+    );
+
+    let origin = format!("{}/{}/{}.git", server.url(), OWNER, REPO);
+    assert!(
+        fabro_forgejo::is_forgejo_origin(&instance, &origin),
+        "port-bearing origin must match its instance"
+    );
+    let (owner, repo) = fabro_forgejo::parse_forgejo_owner_repo(&instance, &origin)
+        .expect("port-bearing origin should parse");
+    assert_eq!(owner, OWNER);
+    assert_eq!(repo, REPO);
+
+    server.shutdown().await;
+}

@@ -192,6 +192,80 @@ fn is_forgejo_origin_matches_instance_and_subpaths() {
 }
 
 // ---------------------------------------------------------------------------
+// Port-bearing instances
+// ---------------------------------------------------------------------------
+
+#[test]
+fn port_bearing_instance_keeps_its_port() {
+    let instance = ForgejoInstance::new("https://git.example.com:3000").unwrap();
+    assert_eq!(instance.as_str(), "https://git.example.com:3000");
+    assert_eq!(instance.host(), "git.example.com:3000");
+    assert_eq!(
+        instance.api_base_url(),
+        "https://git.example.com:3000/api/v1"
+    );
+}
+
+#[test]
+fn port_bearing_origin_normalizes_without_swallowing_the_port() {
+    assert_eq!(
+        normalize_forgejo_origin_url("https://git.example.com:3000/acme/widgets.git"),
+        "https://git.example.com:3000/acme/widgets"
+    );
+    assert_eq!(
+        normalize_forgejo_origin_url("ssh://git@git.example.com:3000/acme/widgets.git"),
+        "https://git.example.com:3000/acme/widgets"
+    );
+    assert_eq!(
+        normalize_forgejo_origin_url(
+            "https://x-access-token:forgejo_pat_123@git.example.com:3000/acme/widgets.git",
+        ),
+        "https://git.example.com:3000/acme/widgets"
+    );
+}
+
+#[test]
+fn port_bearing_instance_matches_its_own_origins_only() {
+    let instance = ForgejoInstance::new("https://git.example.com:3000").unwrap();
+    assert!(is_forgejo_origin(
+        &instance,
+        "https://git.example.com:3000/acme/widgets"
+    ));
+    assert!(is_forgejo_origin(
+        &instance,
+        "ssh://git@git.example.com:3000/acme/widgets.git"
+    ));
+    assert!(!is_forgejo_origin(
+        &instance,
+        "https://git.example.com/acme/widgets"
+    ));
+    // Scp-style URLs cannot carry a port, so they legitimately never match a
+    // port-bearing instance.
+    assert!(!is_forgejo_origin(
+        &instance,
+        "git@git.example.com:acme/widgets.git"
+    ));
+}
+
+#[test]
+fn port_bearing_instance_parses_owner_and_repo() {
+    let instance = ForgejoInstance::new("https://git.example.com:3000").unwrap();
+    let (owner, repo) =
+        parse_forgejo_owner_repo(&instance, "https://git.example.com:3000/acme/widgets.git")
+            .unwrap();
+    assert_eq!(owner, "acme");
+    assert_eq!(repo, "widgets");
+
+    let (owner, repo) = parse_forgejo_owner_repo(
+        &instance,
+        "https://x-access-token:forgejo_pat_123@git.example.com:3000/acme/widgets.git",
+    )
+    .unwrap();
+    assert_eq!(owner, "acme");
+    assert_eq!(repo, "widgets");
+}
+
+// ---------------------------------------------------------------------------
 // embed_token_in_url
 // ---------------------------------------------------------------------------
 

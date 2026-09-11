@@ -849,15 +849,16 @@ where
         return true;
     };
 
-    let origin_url = fabro_github::normalize_repo_origin_url(&git.origin_url);
-
-    // An origin on the configured Forgejo instance is verified through the
-    // instance API; every other non-GitHub origin keeps the supported-origins
-    // error.
+    // The forge check reads the raw origin (`is_forgejo_origin` normalizes
+    // internally), so the GitHub normalizer's sanitized-host rewrite can
+    // never corrupt a port-bearing instance URL before the dispatch. Forge
+    // origins report their own normalized form — credential-stripped,
+    // port-preserving — in the check detail.
     if let Some(config) = forgejo
         .as_ref()
-        .filter(|config| fabro_forgejo::is_forgejo_origin(&config.instance, &origin_url))
+        .filter(|config| fabro_forgejo::is_forgejo_origin(&config.instance, &git.origin_url))
     {
+        let origin_url = fabro_forgejo::normalize_forgejo_origin_url(&git.origin_url);
         let details = vec![
             CheckDetail::new(format!("Origin: {origin_url}")),
             CheckDetail::new(format!("Instance: {}", config.instance)),
@@ -888,6 +889,8 @@ where
         };
     }
 
+    // Every other origin keeps the GitHub path exactly as before.
+    let origin_url = fabro_github::normalize_repo_origin_url(&git.origin_url);
     if let Err(err) = fabro_github::parse_github_owner_repo(&origin_url) {
         checks.push(CheckResult {
             name:        "Repository Access".into(),
@@ -2270,6 +2273,58 @@ provider = "local"
                 .as_deref()
                 .unwrap_or_default()
                 .contains("GitHub and the configured Forgejo instance repository origins only")
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_access_check_keeps_port_bearing_forge_origins_on_the_forge_branch() {
+        // A closed loopback port makes the instance-API probe fail instantly,
+        // so the forge branch is observable through its own remediation text.
+        // Before the raw-origin dispatch fix, the GitHub normalizer swallowed
+        // the port and this origin fell through to the supported-origins
+        // error instead.
+        let (prepared, resolved) = prepared_and_resolved_for_sandbox(
+            SandboxProviderKind::Docker,
+            true,
+            Some(git_context("https://127.0.0.1:1/acme/widgets.git", "main")),
+        );
+        let forgejo = Some(fabro_forgejo::ForgejoConfig::new(
+            fabro_forgejo::ForgejoInstance::new("https://127.0.0.1:1").unwrap(),
+            fabro_forgejo::ForgejoCredentials::new("forgejo_pat_123".to_string()),
+        ));
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let calls_for_check = Arc::clone(&calls);
+        let mut checks = Vec::new();
+
+        let ok = run_repository_access_check_with(
+            &mut checks,
+            SandboxProviderKind::Docker,
+            &prepared,
+            &resolved,
+            None,
+            forgejo,
+            move |request, _github_app| {
+                calls_for_check.lock().unwrap().push(request);
+                async { Ok(()) }
+            },
+        )
+        .await;
+
+        assert!(!ok);
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "the forge branch must not run the GitHub remote probe"
+        );
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "Repository Access");
+        assert!(
+            checks[0]
+                .remediation
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Failed to verify repository access on the Forgejo instance"),
+            "a port-bearing origin must dispatch to the Forgejo branch: {:?}",
+            checks[0].remediation
         );
     }
 
