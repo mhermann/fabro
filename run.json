@@ -1161,14 +1161,142 @@
     }
   },
   "web_url": "http://127.0.0.1:32276/runs/01M27HQ4ZCMNF8T64PSGESXABZ",
-  "start": null,
-  "status": {
-    "kind": "starting"
+  "start": {
+    "start_time": "2026-09-11T06:15:51.409661Z",
+    "run_branch": "fabro/run/01M27HQ4ZCMNF8T64PSGESXABZ",
+    "base_sha": "b5700e9ca65867909a93ef4fbdded1b2fd39eadb"
   },
-  "status_updated_at": "2026-09-11T06:15:44.424417Z",
-  "last_event_at": "2026-09-11T06:15:51.389762Z",
+  "status": {
+    "kind": "running"
+  },
+  "status_updated_at": "2026-09-11T06:15:51.409709Z",
+  "last_event_at": "2026-09-11T06:19:28.091782Z",
   "pending_control": null,
-  "checkpoints": [],
+  "checkpoints": [
+    {
+      "seq": 23,
+      "checkpoint": {
+        "timestamp": "2026-09-11T06:15:54.186041Z",
+        "current_node": "start",
+        "completed_nodes": [
+          "start"
+        ],
+        "node_retries": {},
+        "context_values": {
+          "internal.node_visit_count": 1,
+          "internal.work_dir": "/workspace/fabro",
+          "internal.run_id": "01M27HQ4ZCMNF8T64PSGESXABZ",
+          "failure_signature": "",
+          "outcome": "succeeded",
+          "graph.goal": "Add support for forgejo similar to github integration",
+          "failure_class": "",
+          "graph.rankdir": "LR",
+          "internal.fidelity": "compact",
+          "graph.max_node_visits": "32",
+          "internal.retry_count.start": 0,
+          "internal.thread_id": null,
+          "graph.model_stylesheet": "\n            *      { model: glm-5.3; reasoning_effort: high; }\n            .deep  { model: glm-5.3; reasoning_effort: max; }\n            .fast  { model: glm-5.3-flash; }\n        ",
+          "current_node": "start",
+          "graph.on_failure": "exit",
+          "graph.stall_timeout": "7200000ms"
+        },
+        "node_outcomes": {
+          "start": {
+            "status": "succeeded",
+            "usage": null
+          }
+        },
+        "next_node_id": "understand",
+        "node_visits": {
+          "start": 1
+        }
+      },
+      "diff": {}
+    },
+    {
+      "seq": 0,
+      "checkpoint": {
+        "timestamp": "2026-09-11T06:19:28.104250Z",
+        "current_node": "understand",
+        "completed_nodes": [
+          "start",
+          "understand"
+        ],
+        "node_retries": {},
+        "context_values": {
+          "graph.max_node_visits": "32",
+          "internal.node_visit_count": 1,
+          "graph.on_failure": "exit",
+          "graph.stall_timeout": "7200000ms",
+          "current_node": "understand",
+          "internal.thread_id": "build",
+          "internal.work_dir": "/workspace/fabro",
+          "internal.fidelity": "full",
+          "failure_class": "",
+          "thread.build.current_node": "understand",
+          "last_stage": "understand",
+          "response.understand": "Exploration complete. Here is my understanding.\n\n## 1. Repository structure and where the change lands\n\n**Language/tooling:** Rust workspace (crates in `lib/apps`, `lib/components`, `lib/foundation`) + TypeScript/React 19 web app (`apps/fabro-web`, Bun). OpenAPI-first API (`docs/public/api-reference/fabro-api.yaml` → progenitor Rust types, openapi-generator TS client). Mintlify docs in `docs/public`. Tests via `cargo nextest`; strategy docs in `docs/internal/` that must be read before touching events, errors, logging, migrations, secrets, tests, React effects.\n\n**The GitHub integration is not one module — it's a vertical slice through the entire stack:**\n\n| Layer | File(s) | Role |\n|---|---|---|\n| Dedicated crate | `lib/components/fabro-github/` (~4.4k lines: `lib.rs`, `access.rs`, `token_source.rs`) | Credentials (`App` w/ RSA JWT + installation tokens, `Pat`, `Installation`), PR REST calls (create/get/merge/close/auto-merge/find-open), URL parsing (`parse_github_owner_repo`, `normalize_repo_origin_url`, `ssh_url_to_https`), token-embedding clone URLs, secret-free git credential helper, `gh auth token` shell-out, `GitHubRepositoryAccess` (validated repo set + permissions) |\n| Types | `lib/foundation/fabro-types/` | `GitHubRepositorySlug` (hardcodes `https://github.com/{self}`), `GitRunTarget`/`RunTarget` (\"must be a valid GitHub owner/name slug\"), `PullRequestLink` (hardcodes github.com `html_url`), `PullRequestGithubDetail`, `[run.integrations.github]` settings (permissions + `additional_repositories` → minted sandbox `GITHUB_TOKEN`), server settings (`[server.auth.github]`, `[server.integrations.github]` with `token`/`app` strategy, webhook strategy) |\n| Server | `lib/apps/fabro-server/` | Webhook route `/api/v1/webhooks/github` + HMAC verify (currently log-only), Tailscale-funnel webhook URL management, PR handlers (`server/handler/pull_requests.rs`), run manifest/authenticated-clone resolution, git checkout, automation materializer, install-time endpoints, diagnostics |\n| Sandbox | `lib/components/fabro-sandbox/` | Clone-based providers (Docker/Daytona) are **GitHub-origin-only by contract** (`clone_source.rs`: \"Clone-based sandboxes currently support GitHub repository origins only\"); push credentials, exact-commit fetch, token refresh |\n| Workflow | `lib/components/fabro-workflow/` | `run_options.rs` carries `github_app` credentials; PR ops in `handler/command.rs`; `operations/fork.rs` |\n| Tracker | `lib/components/fabro-tracker/` | `Tracker` trait with `GitHubTracker` (Projects V2 **GraphQL**) and `LinearTracker` — an existing multi-provider abstraction |\n| CLI | `lib/apps/fabro-cli/` | `install.rs` (GitHub App manifest flow, PAT via `gh`), `repo/init.rs`, `shared/github.rs` |\n| Config/env | `lib/foundation/fabro-static/` | `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_WEBHOOK_SECRET`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_TOKEN`, `GITHUB_BASE_URL` (registry + secret scrubbing) |\n| Web | `apps/fabro-web/app/` | Install flow, automation form, PR chips, run summaries |\n| OpenAPI/docs | `docs/public/api-reference/fabro-api.yaml`, `docs/public/**` | `/install/github/*` endpoints; setup guides |\n\nThere is **zero existing Forgejo/Gitea code** (case-insensitive search confirms).\n\n## 2. Goal restated in this codebase's terms\n\nBuild a Forgejo (self-hosted, Gitea-descended forge) integration with parity to the GitHub slice: a `fabro-forgejo` component crate with token credentials, REST (not GraphQL) PR/merge/close operations, webhook route, clone-source support in Docker/Daytona sandboxes, run-target/repository identity that can name a Forgejo instance (not just `owner/repo` on github.com), server/CLI install + settings, and web/API/docs surface — so users can point Fabro at a Forgejo instance and get authenticated clones, PR lifecycle, and (optionally) webhook-driven behavior.\n\n## 3. What I know for certain\n\n- The whole pipeline assumes **GitHub is identified implicitly by `github.com`**: `GitHubRepositorySlug` has no host, `https_url()` hardcodes the domain, `parse_github_owner_repo` rejects non-github.com URLs, and `GitRunTarget::validate` requires a GitHub slug. A Forgejo repo cannot round-trip these types today.\n- Auth model on GitHub = App JWT → installation tokens (scoped permissions map, multi-repo), PATs, or installation tokens; refresh logic in `token_source.rs`; `GITHUB_TOKEN` minted into sandboxes per `[run.integrations.github]`.\n- Sandbox clone path is GitHub-only by documented contract (CLAUDE.md + `clone_source.rs` error); auth is via `embed_token_in_url` (`x-access-token:<token>@github.com`) and the env-based credential helper.\n- The webhook endpoint verifies HMAC-SHA256 (`X-Hub-Signature-256`) and only logs the delivery — no run triggering exists yet, so \"webhook integration\" currently means *receive + verify*, not act.\n- Server settings already have an integrations framework (`github`, `slack`) and the tracker layer already demonstrates provider abstraction (GitHub/Linear).\n- `GITHUB_BASE_URL` env override already exists for API-base redirection (GHE-style), but URL parsing/clone paths still pin `github.com`.\n- The repo has strict conventions that this work must follow: strum for enums, OpenAPI-first API changes + `with_replacement` type-unification rules, test-support feature gating, secret registry updates, shell quoting via `shell_quote()`, and reading the relevant `docs/internal/*-strategy.md` before touching those areas.\n- Forgejo, as a Gitea fork: REST API at `<instance>/api/v1` is largely GitHub-shaped but not identical (token auth header form, no GitHub-App model in the same shape — though Forgejo v10 added \"Forgejo Apps\"), no GraphQL (so no Projects V2 tracker equivalent), webhook headers/signatures differ (`X-Forgejo-Event`/`X-Gitea-Event`, `X-Forgejo-Signature`), and it is inherently **multi-instance/self-hosted** — every repository identity needs an instance base URL.\n\n## 4. What is genuinely ambiguous\n\nReasonable engineers would diverge on:\n\n1. **Identity model (the biggest one).** Should Forgejo support be *one configured instance per Fabro server* (simple: settings-level `forgejo.url` + token, reuse `owner/repo` slugs scoped to that instance) or *multi-instance* (requires host-qualified repo identity, i.e., changing/parallel to `GitHubRepositorySlug` and `GitRunTarget`)? This determines whether `fabro-types` gets a forge-aware `GitRunTarget` variant or Forgejo stays a side-channel.\n2. **Which surface is \"the integration\"?** Minimum viable: PAT + clone + PR create/merge/close (unblocks core workflow). Full parity would add: webhook route, run-integrations token minting into sandboxes (`run.integrations.forgejo`?), OAuth login (`server.auth`), tracker (no GraphQL exists — skip or REST-based?), install flow, CLI `repo init`, diagnostics. The instruction \"similar to github integration\" doesn't say how much.\n3. **Auth mechanism.** PAT-only (Forgejo's universal answer) vs. OAuth2 app vs. Forgejo Apps (v10+, scoped, closest to GitHub Apps but a much newer, version-dependent API). GitHub's installation-token machinery largely doesn't map; a naive port would be wrong.\n4. **Architecture: provider abstraction vs. sibling crate.** Extract a shared `Forge` trait (git host interface) that GitHub and Forgejo both implement — a large refactor of `fabro-github` consumers across 7 crates — vs. a parallel `fabro-forgejo` crate with its own call sites and explicit forge dispatch at boundaries. Both are defensible; the abstraction choice shapes diff size and future Gitea/GitLab support.\n5. **Sandbox contract update.** CLAUDE.md documents clone-based providers as GitHub-only with specific branch/SHA semantics. Extending `CloneDecision`/`CloneSource` to Forgejo changes a documented contract; alternatively Forgejo runs could be forced onto `skip_clone`/Local initially.\n6. **Webhook semantics.** Given GitHub webhooks don't trigger anything today, should Forgejo's be receive-and-verify parity only, or the first real event-driven automation? Also: which signature header(s) and event-name mapping to accept (Forgejo can emit GitHub-compatible webhooks when configured — do we rely on that or support native headers?).\n7. **Wire/API compatibility.** Should existing API types (`PullRequestLink`, `PullRequestGithubDetail`, `GitHubRepositorySlug` in the OpenAPI spec) grow a forge/host discriminator (breaking-ish, needs `with_replacement` care per the type-ownership rules), or should Forgejo get distinct DTOs?\n8. **Token/secret plumbing.** New env vars (`FORGEJO_TOKEN`, `FORGEJO_URL`?) vs. reusing `GITHUB_TOKEN`-style naming; secret-registry additions; per-instance credential storage for multi-instance.\n\nI have not written or modified anything — this stage is exploration only.",
+          "graph.rankdir": "LR",
+          "internal.retry_count.understand": 0,
+          "internal.retry_count.start": 0,
+          "outcome": "succeeded",
+          "failure_signature": "",
+          "internal.run_id": "01M27HQ4ZCMNF8T64PSGESXABZ",
+          "last_response": "Exploration complete. Here is my understanding.\n\n## 1. Repository structure and where the change lands\n\n**Language/tooling:** Rust workspace (crates in `lib/apps`, `lib/components`, `lib/foundation`) ",
+          "graph.model_stylesheet": "\n            *      { model: glm-5.3; reasoning_effort: high; }\n            .deep  { model: glm-5.3; reasoning_effort: max; }\n            .fast  { model: glm-5.3-flash; }\n        ",
+          "graph.goal": "Add support for forgejo similar to github integration"
+        },
+        "node_outcomes": {
+          "start": {
+            "status": "succeeded",
+            "usage": null
+          },
+          "understand": {
+            "status": "succeeded",
+            "context_updates": {
+              "last_stage": "understand",
+              "response.understand": "Exploration complete. Here is my understanding.\n\n## 1. Repository structure and where the change lands\n\n**Language/tooling:** Rust workspace (crates in `lib/apps`, `lib/components`, `lib/foundation`) + TypeScript/React 19 web app (`apps/fabro-web`, Bun). OpenAPI-first API (`docs/public/api-reference/fabro-api.yaml` → progenitor Rust types, openapi-generator TS client). Mintlify docs in `docs/public`. Tests via `cargo nextest`; strategy docs in `docs/internal/` that must be read before touching events, errors, logging, migrations, secrets, tests, React effects.\n\n**The GitHub integration is not one module — it's a vertical slice through the entire stack:**\n\n| Layer | File(s) | Role |\n|---|---|---|\n| Dedicated crate | `lib/components/fabro-github/` (~4.4k lines: `lib.rs`, `access.rs`, `token_source.rs`) | Credentials (`App` w/ RSA JWT + installation tokens, `Pat`, `Installation`), PR REST calls (create/get/merge/close/auto-merge/find-open), URL parsing (`parse_github_owner_repo`, `normalize_repo_origin_url`, `ssh_url_to_https`), token-embedding clone URLs, secret-free git credential helper, `gh auth token` shell-out, `GitHubRepositoryAccess` (validated repo set + permissions) |\n| Types | `lib/foundation/fabro-types/` | `GitHubRepositorySlug` (hardcodes `https://github.com/{self}`), `GitRunTarget`/`RunTarget` (\"must be a valid GitHub owner/name slug\"), `PullRequestLink` (hardcodes github.com `html_url`), `PullRequestGithubDetail`, `[run.integrations.github]` settings (permissions + `additional_repositories` → minted sandbox `GITHUB_TOKEN`), server settings (`[server.auth.github]`, `[server.integrations.github]` with `token`/`app` strategy, webhook strategy) |\n| Server | `lib/apps/fabro-server/` | Webhook route `/api/v1/webhooks/github` + HMAC verify (currently log-only), Tailscale-funnel webhook URL management, PR handlers (`server/handler/pull_requests.rs`), run manifest/authenticated-clone resolution, git checkout, automation materializer, install-time endpoints, diagnostics |\n| Sandbox | `lib/components/fabro-sandbox/` | Clone-based providers (Docker/Daytona) are **GitHub-origin-only by contract** (`clone_source.rs`: \"Clone-based sandboxes currently support GitHub repository origins only\"); push credentials, exact-commit fetch, token refresh |\n| Workflow | `lib/components/fabro-workflow/` | `run_options.rs` carries `github_app` credentials; PR ops in `handler/command.rs`; `operations/fork.rs` |\n| Tracker | `lib/components/fabro-tracker/` | `Tracker` trait with `GitHubTracker` (Projects V2 **GraphQL**) and `LinearTracker` — an existing multi-provider abstraction |\n| CLI | `lib/apps/fabro-cli/` | `install.rs` (GitHub App manifest flow, PAT via `gh`), `repo/init.rs`, `shared/github.rs` |\n| Config/env | `lib/foundation/fabro-static/` | `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_WEBHOOK_SECRET`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_TOKEN`, `GITHUB_BASE_URL` (registry + secret scrubbing) |\n| Web | `apps/fabro-web/app/` | Install flow, automation form, PR chips, run summaries |\n| OpenAPI/docs | `docs/public/api-reference/fabro-api.yaml`, `docs/public/**` | `/install/github/*` endpoints; setup guides |\n\nThere is **zero existing Forgejo/Gitea code** (case-insensitive search confirms).\n\n## 2. Goal restated in this codebase's terms\n\nBuild a Forgejo (self-hosted, Gitea-descended forge) integration with parity to the GitHub slice: a `fabro-forgejo` component crate with token credentials, REST (not GraphQL) PR/merge/close operations, webhook route, clone-source support in Docker/Daytona sandboxes, run-target/repository identity that can name a Forgejo instance (not just `owner/repo` on github.com), server/CLI install + settings, and web/API/docs surface — so users can point Fabro at a Forgejo instance and get authenticated clones, PR lifecycle, and (optionally) webhook-driven behavior.\n\n## 3. What I know for certain\n\n- The whole pipeline assumes **GitHub is identified implicitly by `github.com`**: `GitHubRepositorySlug` has no host, `https_url()` hardcodes the domain, `parse_github_owner_repo` rejects non-github.com URLs, and `GitRunTarget::validate` requires a GitHub slug. A Forgejo repo cannot round-trip these types today.\n- Auth model on GitHub = App JWT → installation tokens (scoped permissions map, multi-repo), PATs, or installation tokens; refresh logic in `token_source.rs`; `GITHUB_TOKEN` minted into sandboxes per `[run.integrations.github]`.\n- Sandbox clone path is GitHub-only by documented contract (CLAUDE.md + `clone_source.rs` error); auth is via `embed_token_in_url` (`x-access-token:<token>@github.com`) and the env-based credential helper.\n- The webhook endpoint verifies HMAC-SHA256 (`X-Hub-Signature-256`) and only logs the delivery — no run triggering exists yet, so \"webhook integration\" currently means *receive + verify*, not act.\n- Server settings already have an integrations framework (`github`, `slack`) and the tracker layer already demonstrates provider abstraction (GitHub/Linear).\n- `GITHUB_BASE_URL` env override already exists for API-base redirection (GHE-style), but URL parsing/clone paths still pin `github.com`.\n- The repo has strict conventions that this work must follow: strum for enums, OpenAPI-first API changes + `with_replacement` type-unification rules, test-support feature gating, secret registry updates, shell quoting via `shell_quote()`, and reading the relevant `docs/internal/*-strategy.md` before touching those areas.\n- Forgejo, as a Gitea fork: REST API at `<instance>/api/v1` is largely GitHub-shaped but not identical (token auth header form, no GitHub-App model in the same shape — though Forgejo v10 added \"Forgejo Apps\"), no GraphQL (so no Projects V2 tracker equivalent), webhook headers/signatures differ (`X-Forgejo-Event`/`X-Gitea-Event`, `X-Forgejo-Signature`), and it is inherently **multi-instance/self-hosted** — every repository identity needs an instance base URL.\n\n## 4. What is genuinely ambiguous\n\nReasonable engineers would diverge on:\n\n1. **Identity model (the biggest one).** Should Forgejo support be *one configured instance per Fabro server* (simple: settings-level `forgejo.url` + token, reuse `owner/repo` slugs scoped to that instance) or *multi-instance* (requires host-qualified repo identity, i.e., changing/parallel to `GitHubRepositorySlug` and `GitRunTarget`)? This determines whether `fabro-types` gets a forge-aware `GitRunTarget` variant or Forgejo stays a side-channel.\n2. **Which surface is \"the integration\"?** Minimum viable: PAT + clone + PR create/merge/close (unblocks core workflow). Full parity would add: webhook route, run-integrations token minting into sandboxes (`run.integrations.forgejo`?), OAuth login (`server.auth`), tracker (no GraphQL exists — skip or REST-based?), install flow, CLI `repo init`, diagnostics. The instruction \"similar to github integration\" doesn't say how much.\n3. **Auth mechanism.** PAT-only (Forgejo's universal answer) vs. OAuth2 app vs. Forgejo Apps (v10+, scoped, closest to GitHub Apps but a much newer, version-dependent API). GitHub's installation-token machinery largely doesn't map; a naive port would be wrong.\n4. **Architecture: provider abstraction vs. sibling crate.** Extract a shared `Forge` trait (git host interface) that GitHub and Forgejo both implement — a large refactor of `fabro-github` consumers across 7 crates — vs. a parallel `fabro-forgejo` crate with its own call sites and explicit forge dispatch at boundaries. Both are defensible; the abstraction choice shapes diff size and future Gitea/GitLab support.\n5. **Sandbox contract update.** CLAUDE.md documents clone-based providers as GitHub-only with specific branch/SHA semantics. Extending `CloneDecision`/`CloneSource` to Forgejo changes a documented contract; alternatively Forgejo runs could be forced onto `skip_clone`/Local initially.\n6. **Webhook semantics.** Given GitHub webhooks don't trigger anything today, should Forgejo's be receive-and-verify parity only, or the first real event-driven automation? Also: which signature header(s) and event-name mapping to accept (Forgejo can emit GitHub-compatible webhooks when configured — do we rely on that or support native headers?).\n7. **Wire/API compatibility.** Should existing API types (`PullRequestLink`, `PullRequestGithubDetail`, `GitHubRepositorySlug` in the OpenAPI spec) grow a forge/host discriminator (breaking-ish, needs `with_replacement` care per the type-ownership rules), or should Forgejo get distinct DTOs?\n8. **Token/secret plumbing.** New env vars (`FORGEJO_TOKEN`, `FORGEJO_URL`?) vs. reusing `GITHUB_TOKEN`-style naming; secret-registry additions; per-instance credential storage for multi-instance.\n\nI have not written or modified anything — this stage is exploration only.",
+              "last_response": "Exploration complete. Here is my understanding.\n\n## 1. Repository structure and where the change lands\n\n**Language/tooling:** Rust workspace (crates in `lib/apps`, `lib/components`, `lib/foundation`) "
+            },
+            "notes": "Stage completed: understand",
+            "usage": {
+              "input": {
+                "usage": {
+                  "model": {
+                    "provider": "zai",
+                    "model_id": "glm-5.3"
+                  },
+                  "tokens": {
+                    "input_tokens": 49446,
+                    "output_tokens": 4374,
+                    "reasoning_tokens": 2599,
+                    "cache_read_tokens": 799104,
+                    "cache_write_tokens": 0
+                  }
+                },
+                "facts": {
+                  "algorithm": "openai"
+                }
+              },
+              "total_usd_micros": 307641
+            },
+            "timing": {
+              "wall_time_ms": 0,
+              "inference_time_ms": 210613,
+              "tool_time_ms": 3032,
+              "active_time_ms": 213645
+            }
+          }
+        },
+        "next_node_id": "sweep",
+        "node_visits": {
+          "understand": 1,
+          "start": 1
+        }
+      },
+      "diff": {}
+    }
+  ],
   "conclusion": null,
   "sandbox": {
     "kind": "ready",
@@ -1196,5 +1324,261 @@
   "superseded_by": null,
   "retried_from": "01M268NGXHMS7ET6T4W4Y38G7A",
   "pending_interviews": {},
-  "stages": {}
+  "stages": {
+    "start@1": {
+      "first_event_seq": 20,
+      "prompt": null,
+      "response": null,
+      "completion": {
+        "outcome": "succeeded",
+        "notes": null,
+        "failure_reason": null,
+        "timestamp": "2026-09-11T06:15:54.185899Z"
+      },
+      "provider_used": null,
+      "diff": null,
+      "script_invocation": null,
+      "script_timing": null,
+      "parallel_results": null,
+      "output": null,
+      "started_at": "2026-09-11T06:15:54.181730Z",
+      "handler": "start",
+      "graph_visit": 1,
+      "timing": {
+        "wall_time_ms": 0,
+        "inference_time_ms": 0,
+        "tool_time_ms": 0,
+        "active_time_ms": 0
+      },
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "reasoning_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0
+      },
+      "agent_control": "running",
+      "state": "succeeded"
+    },
+    "understand@1": {
+      "first_event_seq": 24,
+      "prompt": null,
+      "response": null,
+      "completion": null,
+      "provider_used": {
+        "mode": "agent",
+        "provider": "zai",
+        "model": "glm-5.3",
+        "reasoning_effort": "high"
+      },
+      "diff": null,
+      "script_invocation": null,
+      "script_timing": null,
+      "parallel_results": null,
+      "output": null,
+      "started_at": "2026-09-11T06:15:54.188616Z",
+      "handler": "agent",
+      "graph_visit": 1,
+      "live_inference_ms": 210617,
+      "live_tool_ms": 3007,
+      "usage": {
+        "input_tokens": 49446,
+        "output_tokens": 4374,
+        "total_tokens": 855523,
+        "reasoning_tokens": 2599,
+        "cache_read_tokens": 799104,
+        "cache_write_tokens": 0,
+        "total_usd_micros": 307641
+      },
+      "model": {
+        "provider": "zai",
+        "model_id": "glm-5.3"
+      },
+      "skills": {
+        "available": [
+          {
+            "name": "rust-style-guide",
+            "description": "Apply this Rust style guide when writing, reviewing, refactoring, or configuring Rust code for this project. Covers Rust 2024/MSRV, library vs application conventions, public API design, errors, panics, ownership and cloning, async/Tokio/concurrency, tracing, rustfmt/Clippy, testing with nextest, and unsafe/macro policy. Also use when setting up new Rust projects, investigating Rust performance, verifying library releases, or reviewing Rust code changes."
+          }
+        ],
+        "activated": []
+      },
+      "permission_level": "full",
+      "agent_tools": [
+        {
+          "name": "close_agent",
+          "description": "Close a running or completed subagent that is no longer needed.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "subagent",
+          "invoked": false
+        },
+        {
+          "name": "edit_file",
+          "description": "Edit a file by replacing an exact string. The old_string must be an exact match and unique unless replace_all is true; include surrounding context when needed. Read the file first and preserve existing indentation.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "write",
+          "invoked": false
+        },
+        {
+          "name": "glob",
+          "description": "Find files by search-root-relative path using a glob pattern. Use path to choose the search root. `*` stays within one path segment and `**` searches recursively. Prefer this over shell find or ls when locating repository files.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "read",
+          "invoked": true
+        },
+        {
+          "name": "grep",
+          "description": "Search file contents with a regex pattern. Use path to choose the search root, glob_filter to limit matching files, case_insensitive for case folding, and max_results to cap output.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "read",
+          "invoked": true
+        },
+        {
+          "name": "read_file",
+          "description": "Read files before editing them. Returns line-numbered text and supports offset/limit for large files. Use this instead of shell cat, head, tail, or sed when inspecting repository files.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "read",
+          "invoked": true
+        },
+        {
+          "name": "request_user_input",
+          "description": "Ask the human one or more questions and wait for their answers before continuing this stage.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "other",
+          "invoked": false
+        },
+        {
+          "name": "send_input",
+          "description": "Send a follow-up message to a subagent. A running agent receives it at a safe turn boundary. A completed agent starts another turn in the same session with its existing history.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "subagent",
+          "invoked": false
+        },
+        {
+          "name": "shell",
+          "description": "Execute Bash commands for terminal operations, package managers, tests and builds. Use dedicated tools for file reads, file edits, filename searches, and content searches. Provide timeout_ms for long-running commands.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "shell",
+          "invoked": true
+        },
+        {
+          "name": "spawn_agent",
+          "description": "Spawn a subagent for independent work or context isolation. Use it for tasks that can proceed separately, and avoid duplicating the same work in the parent session.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "subagent",
+          "invoked": false
+        },
+        {
+          "name": "update_plan",
+          "description": "Update the multi-step plan for the current task. Submit the entire plan; existing steps are reconciled by exact step text.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "other",
+          "invoked": false
+        },
+        {
+          "name": "use_skill",
+          "description": "Load a skill's instructions by name. Call this when the user's request matches an available skill.",
+          "source": {
+            "kind": "skill"
+          },
+          "category": "other",
+          "invoked": false
+        },
+        {
+          "name": "wait",
+          "description": "Wait for a subagent to complete, then use the result to synthesize the outcome for the user.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "subagent",
+          "invoked": false
+        },
+        {
+          "name": "web_fetch",
+          "description": "Fetch content from a URL that starts with http:// or https://. Pass a prompt to extract specific information or summarize the page; omit prompt to return the page content.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "other",
+          "invoked": false
+        },
+        {
+          "name": "write_file",
+          "description": "Create new files, or overwrite an existing file only when replacement is explicitly intended. Prefer edit_file for targeted changes to existing files because write_file overwrites the full file content.",
+          "source": {
+            "kind": "native"
+          },
+          "category": "write",
+          "invoked": false
+        }
+      ],
+      "context_window": {
+        "provider": "zai",
+        "model": "glm-5.3",
+        "context_window_tokens": 1048576,
+        "input_tokens": 48576,
+        "usage_percent": 4.632568359375,
+        "count_method": "response_usage_scaled_breakdown",
+        "staleness": "live",
+        "generated_at": "2026-09-11T06:19:28.091300Z",
+        "event_seq": 218,
+        "breakdown": [
+          {
+            "category": "system_prompt",
+            "tokens": 1116,
+            "usage_percent": 0.1064300537109375
+          },
+          {
+            "category": "tools",
+            "tokens": 1528,
+            "usage_percent": 0.145721435546875
+          },
+          {
+            "category": "skills",
+            "tokens": 219,
+            "usage_percent": 0.020885467529296875
+          },
+          {
+            "category": "memory",
+            "tokens": 4314,
+            "usage_percent": 0.41141510009765625
+          },
+          {
+            "category": "conversation",
+            "tokens": 41392,
+            "usage_percent": 3.94744873046875
+          },
+          {
+            "category": "other",
+            "tokens": 7,
+            "usage_percent": 0.000667572021484375
+          }
+        ],
+        "warnings": []
+      },
+      "agent_control": "running",
+      "state": "running"
+    }
+  }
 }
