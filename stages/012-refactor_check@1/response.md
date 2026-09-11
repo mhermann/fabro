@@ -1,0 +1,16 @@
+No refactoring stage has run in this workflow, so this is a genuine first decision, and I made it by reading the seams the plan will actually write into — most of them across this session, the rest re-checked now.
+
+**What I looked at and found:**
+
+- **The dispatch design fits seams the repo already has.** The plan's `ScmTarget` enum lands in pipeline types that already carry parallel per-integration fields (`pipeline/types.rs:254,416` holds `github_integration` and `github_app: Option<GitHubCredentials>` side by side) — adding `forgejo` alongside is the same shape, not a workaround. The sandbox credential seam is real and reusable as-is (`docker.rs:187/219` takes credentials as runtime init parameters; `sandbox_spec.rs:112` scrubs recorded origins), so no restructuring is needed to keep the token out of persisted models.
+- **The "flag threaded through call sites" cases are small and intrinsic.** `validate_with_scm` ripples through ~4 validators; the forgejo URL threads through the manifest entry point at 2–3 callers. That is the cost of the addressing decision the human made (provider tag), not structure in the way. Pre-refactoring those call sites would mean touching the same ground twice — once in the refactor, once in the feature — with no reduction in total work.
+- **Duplication stays at two copies, by decision.** The `HttpClient` trait gets a second minimal copy in `fabro-forgejo`; that was examined and accepted across two critique rounds as the repo's own parallel-crate convention (`fabro-slack` beside `fabro-github`). Triplication isn't happening.
+- **Testability has no structural blocker.** Every verification step in the plan uses an existing pattern: the mock `HttpClient` (fabro-github's `tests_mock`), httpmock server tests, the mock resolver in `automation_materializer.rs:546–584`, and the mock-vault doctor conventions.
+- **Long units grow by branch points, not restructure-worthy ones.** `pipeline/pull_request.rs` (2,046 lines) and `install.rs` (3,828) are already large, but the change adds dispatch branches to the former and nothing to the latter; the `ScmTarget` design was chosen in the plan specifically so those files don't need splitting.
+- **The one refactor that would collapse the most code — a shared SCM provider trait unifying `fabro-github`/`fabro-forgejo` — fails the bar in the other direction.** It is large, destabilizes the working GitHub path, and the human's addressing answer (single instance + provider tag, coexistence) was effectively a decision for the additive model over the abstraction. It should not be smuggled in as a prerequisite.
+
+**On record as worth doing but unrelated to this change** (not gateways, and tempting for a future agent): extracting a provider-neutral `RepositorySlug` once `GitHubRepositorySlug`'s name starts lying in forgejo call paths; unifying the SCM client trait into `fabro-http` if a third provider ever appears; splitting `pipeline/pull_request.rs`. Each is its own piece of work.
+
+The implementation is not meaningfully harder, larger, or riskier against the current shape; the plan was explicitly designed around it over three critique rounds.
+
+{"preferred_next_label": "none"}
