@@ -242,8 +242,18 @@ pub struct ServerLoggingSettings {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerIntegrationsSettings {
-    pub github: GithubIntegrationSettings,
-    pub slack:  SlackIntegrationSettings,
+    pub github:  GithubIntegrationSettings,
+    pub forgejo: ForgejoIntegrationSettings,
+    pub slack:   SlackIntegrationSettings,
+}
+
+/// `[server.integrations.forgejo]` — a single self-hosted Forgejo instance.
+/// The access token lives in the secret vault (`FORGEJO_TOKEN`), never in
+/// settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForgejoIntegrationSettings {
+    pub enabled: bool,
+    pub url:     Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

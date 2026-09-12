@@ -27,6 +27,40 @@ import { BASE_PATH, COLLECTION_FORMATS, type RequestArgs, BaseAPI, RequiredError
 export const IntegrationsApiAxiosParamCreator = function (configuration?: Configuration) {
     return {
         /**
+         * Receives Forgejo webhook deliveries. Requests are authenticated by `X-Forgejo-Signature` (or the `X-Gitea-Signature` / `X-Hub-Signature-256` spellings), not API bearer auth. Deliveries are verified and logged; nothing is triggered.
+         * @summary Receive Forgejo Webhook
+         * @param {{ [key: string]: any; }} requestBody
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        receiveForgejoWebhook: async (requestBody: { [key: string]: any; }, options: RawAxiosRequestConfig = {}): Promise<RequestArgs> => {
+            // verify required parameter 'requestBody' is not null or undefined
+            assertParamExists('receiveForgejoWebhook', 'requestBody', requestBody)
+            const localVarPath = `/api/v1/webhooks/forgejo`;
+            // use dummy base URL string because the URL constructor only accepts absolute URLs.
+            const localVarUrlObj = new URL(localVarPath, DUMMY_BASE_URL);
+            let baseOptions;
+            if (configuration) {
+                baseOptions = configuration.baseOptions;
+            }
+
+            const localVarRequestOptions = { method: 'POST', ...baseOptions, ...options};
+            const localVarHeaderParameter = {} as any;
+            const localVarQueryParameter = {} as any;
+
+            localVarHeaderParameter['Content-Type'] = 'application/json';
+
+            setSearchParams(localVarUrlObj, localVarQueryParameter);
+            let headersFromBaseOptions = baseOptions && baseOptions.headers ? baseOptions.headers : {};
+            localVarRequestOptions.headers = {...localVarHeaderParameter, ...headersFromBaseOptions, ...options.headers};
+            localVarRequestOptions.data = serializeDataIfNeeded(requestBody, localVarRequestOptions, configuration)
+
+            return {
+                url: toPathString(localVarUrlObj),
+                options: localVarRequestOptions,
+            };
+        },
+        /**
          * Receives GitHub App webhook deliveries. Requests are authenticated by `X-Hub-Signature-256`, not API bearer auth.
          * @summary Receive GitHub Webhook
          * @param {{ [key: string]: any; }} requestBody
@@ -70,6 +104,19 @@ export const IntegrationsApiFp = function(configuration?: Configuration) {
     const localVarAxiosParamCreator = IntegrationsApiAxiosParamCreator(configuration)
     return {
         /**
+         * Receives Forgejo webhook deliveries. Requests are authenticated by `X-Forgejo-Signature` (or the `X-Gitea-Signature` / `X-Hub-Signature-256` spellings), not API bearer auth. Deliveries are verified and logged; nothing is triggered.
+         * @summary Receive Forgejo Webhook
+         * @param {{ [key: string]: any; }} requestBody
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        async receiveForgejoWebhook(requestBody: { [key: string]: any; }, options?: RawAxiosRequestConfig): Promise<(axios?: AxiosInstance, basePath?: string) => AxiosPromise<void>> {
+            const localVarAxiosArgs = await localVarAxiosParamCreator.receiveForgejoWebhook(requestBody, options);
+            const localVarOperationServerIndex = configuration?.serverIndex ?? 0;
+            const localVarOperationServerBasePath = operationServerMap['IntegrationsApi.receiveForgejoWebhook']?.[localVarOperationServerIndex]?.url;
+            return (axios, basePath) => createRequestFunction(localVarAxiosArgs, globalAxios, BASE_PATH, configuration)(axios, localVarOperationServerBasePath || basePath);
+        },
+        /**
          * Receives GitHub App webhook deliveries. Requests are authenticated by `X-Hub-Signature-256`, not API bearer auth.
          * @summary Receive GitHub Webhook
          * @param {{ [key: string]: any; }} requestBody
@@ -92,6 +139,16 @@ export const IntegrationsApiFactory = function (configuration?: Configuration, b
     const localVarFp = IntegrationsApiFp(configuration)
     return {
         /**
+         * Receives Forgejo webhook deliveries. Requests are authenticated by `X-Forgejo-Signature` (or the `X-Gitea-Signature` / `X-Hub-Signature-256` spellings), not API bearer auth. Deliveries are verified and logged; nothing is triggered.
+         * @summary Receive Forgejo Webhook
+         * @param {{ [key: string]: any; }} requestBody
+         * @param {*} [options] Override http request option.
+         * @throws {RequiredError}
+         */
+        receiveForgejoWebhook(requestBody: { [key: string]: any; }, options?: RawAxiosRequestConfig): AxiosPromise<void> {
+            return localVarFp.receiveForgejoWebhook(requestBody, options).then((request) => request(axios, basePath));
+        },
+        /**
          * Receives GitHub App webhook deliveries. Requests are authenticated by `X-Hub-Signature-256`, not API bearer auth.
          * @summary Receive GitHub Webhook
          * @param {{ [key: string]: any; }} requestBody
@@ -108,6 +165,17 @@ export const IntegrationsApiFactory = function (configuration?: Configuration, b
  * IntegrationsApi - object-oriented interface
  */
 export class IntegrationsApi extends BaseAPI {
+    /**
+     * Receives Forgejo webhook deliveries. Requests are authenticated by `X-Forgejo-Signature` (or the `X-Gitea-Signature` / `X-Hub-Signature-256` spellings), not API bearer auth. Deliveries are verified and logged; nothing is triggered.
+     * @summary Receive Forgejo Webhook
+     * @param {{ [key: string]: any; }} requestBody
+     * @param {*} [options] Override http request option.
+     * @throws {RequiredError}
+     */
+    public receiveForgejoWebhook(requestBody: { [key: string]: any; }, options?: RawAxiosRequestConfig) {
+        return IntegrationsApiFp(this.configuration).receiveForgejoWebhook(requestBody, options).then((request) => request(this.axios, this.basePath));
+    }
+
     /**
      * Receives GitHub App webhook deliveries. Requests are authenticated by `X-Hub-Signature-256`, not API bearer auth.
      * @summary Receive GitHub Webhook

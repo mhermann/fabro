@@ -88,7 +88,8 @@ use fabro_types::BlockedReason;
 use fabro_types::settings::RunNamespace;
 use fabro_types::settings::run::{NotificationRouteSettings, RunMode};
 use fabro_types::settings::server::{
-    GithubIntegrationSettings, GithubIntegrationStrategy, LogDestination,
+    ForgejoIntegrationSettings, GithubIntegrationSettings, GithubIntegrationStrategy,
+    LogDestination,
 };
 use fabro_types::{
     AgentBackend, AskFabro, AskFabroUnavailableReason, BilledTokenCounts, BlobHash, EventBody,
@@ -143,6 +144,7 @@ use crate::automation_materializer::{
 };
 use crate::canonical_origin::{canonical_origin_from_effective_web_url, effective_web_url};
 use crate::error::ApiError;
+use crate::forgejo_webhooks::{FORGEJO_WEBHOOK_SECRET_ENV, forgejo_webhook_routes};
 use crate::git_checkout::GitRepoCache;
 use crate::github_webhooks::{
     WEBHOOK_ROUTE, WEBHOOK_SECRET_ENV, parse_event_metadata, verify_signature,
@@ -1144,6 +1146,9 @@ pub struct AppState {
     slack_service: Option<Arc<SlackService>>,
     slack_started: AtomicBool,
     github_webhook_secret: Option<String>,
+    /// The configured Forgejo instance and PAT, resolved at startup.
+    pub(crate) forgejo: Option<fabro_forgejo::ForgejoConfig>,
+    forgejo_webhook_secret: Option<String>,
 }
 
 pub(crate) struct AppStores {
@@ -1617,6 +1622,42 @@ impl AppState {
         }
     }
 
+    /// Resolve the configured Forgejo instance and PAT from settings plus the
+    /// vault. `Ok(None)` when the integration is disabled or no instance URL
+    /// is configured; an error only when a configured token cannot be read.
+    pub(crate) async fn forgejo_config(
+        &self,
+        settings: &ForgejoIntegrationSettings,
+    ) -> anyhow::Result<Option<fabro_forgejo::ForgejoConfig>> {
+        if !settings.enabled {
+            return Ok(None);
+        }
+        let Some(url) = settings
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+        else {
+            return Ok(None);
+        };
+        let instance = fabro_forgejo::ForgejoInstance::new(url).map_err(anyhow::Error::new)?;
+        let token = self
+            .vault_secret(EnvVars::FORGEJO_TOKEN)
+            .await
+            .map_err(anyhow::Error::new)?
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string);
+        let Some(token) = token else {
+            return Ok(None);
+        };
+        Ok(Some(fabro_forgejo::ForgejoConfig::new(
+            instance,
+            fabro_forgejo::ForgejoCredentials::new(token),
+        )))
+    }
+
     fn begin_shutdown(&self) {
         self.shutting_down.store(true, Ordering::Relaxed);
         self.scheduler_notify.notify_waiters();
@@ -1808,6 +1849,7 @@ pub fn build_router_with_options(
     let github_endpoints =
         github_endpoints.unwrap_or_else(|| Arc::new(GithubEndpoints::production_defaults()));
     let webhook_secret = state.github_webhook_secret.clone();
+    let forgejo_webhook_secret = state.forgejo_webhook_secret.clone();
     let principal_layer = middleware::from_fn_with_state(Arc::clone(&state), principal_middleware);
     let api_common = if web_enabled {
         Router::new()
@@ -1899,6 +1941,10 @@ pub fn build_router_with_options(
     if let Some(secret) = webhook_secret {
         let secret: Arc<[u8]> = Arc::from(secret.into_bytes().into_boxed_slice());
         router = github_webhook_routes(secret).merge(router);
+    }
+    if let Some(secret) = forgejo_webhook_secret {
+        let secret: Arc<[u8]> = Arc::from(secret.into_bytes().into_boxed_slice());
+        router = forgejo_webhook_routes(secret).merge(router);
     }
 
     router
@@ -2464,6 +2510,14 @@ pub(crate) fn build_app_state(config: AppStateConfig) -> anyhow::Result<Arc<AppS
     // Read vault secrets needed for synchronous setup before we wrap the vault in
     // an async lock for the rest of AppState.
     let daytona_api_key = vault.get(EnvVars::DAYTONA_API_KEY).map(str::to_string);
+    let forgejo = resolve_startup_forgejo(
+        &resolved_settings
+            .server_settings
+            .server
+            .integrations
+            .forgejo,
+        &vault,
+    );
     let llm_source: Arc<dyn CredentialProvider> = Arc::new(SqlVaultCredentialSource::vault_only(
         Arc::clone(&secret_store),
     ));
@@ -2603,10 +2657,46 @@ pub(crate) fn build_app_state(config: AppStateConfig) -> anyhow::Result<Arc<AppS
         // Startup snapshot for the sync router build; rotating the webhook
         // secret requires a server restart.
         github_webhook_secret: vault.get(WEBHOOK_SECRET_ENV).map(str::to_string),
+        forgejo,
+        // Same startup snapshot contract as the GitHub webhook secret.
+        forgejo_webhook_secret: vault.get(FORGEJO_WEBHOOK_SECRET_ENV).map(str::to_string),
     }))
 }
 
 const MAX_PAGE_OFFSET: u32 = 1_000_000;
+
+/// Resolve the Forgejo integration from startup settings and the vault
+/// snapshot. Mirrors [`AppState::forgejo_config`] but synchronous: the
+/// sandbox spec and worker run options are built from this startup value.
+fn resolve_startup_forgejo(
+    settings: &ForgejoIntegrationSettings,
+    vault: &Vault,
+) -> Option<fabro_forgejo::ForgejoConfig> {
+    if !settings.enabled {
+        return None;
+    }
+    let url = settings
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())?;
+    let instance = match fabro_forgejo::ForgejoInstance::new(url) {
+        Ok(instance) => instance,
+        Err(err) => {
+            warn!(error = %err, "Ignoring invalid server.integrations.forgejo.url");
+            return None;
+        }
+    };
+    let token = vault
+        .get(EnvVars::FORGEJO_TOKEN)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)?;
+    Some(fabro_forgejo::ForgejoConfig::new(
+        instance,
+        fabro_forgejo::ForgejoCredentials::new(token),
+    ))
+}
 
 enum DeleteRunOutcome {
     Deleted,
@@ -4175,6 +4265,7 @@ async fn execute_run_in_process(state: Arc<AppState>, run_id: RunId) {
         artifact_sink: Some(ArtifactSink::Store(state.artifact_store.clone())),
         run_control: None,
         github_app,
+        forgejo: state.forgejo.clone(),
         github_integration,
         vault: Arc::new(AsyncRwLock::new(vault.into_vault())),
         catalog: state.catalog(),

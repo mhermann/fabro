@@ -44,6 +44,7 @@ struct BuiltSandboxEnv {
     /// Present only in App mode or when additional repositories are
     /// declared; drives the eager access validation at initialization.
     github_access: Option<fabro_github::GitHubRepositoryAccess>,
+    forgejo_token: Option<fabro_forgejo::ForgejoCredentials>,
 }
 
 async fn run_hooks(
@@ -94,13 +95,22 @@ async fn configure_sandbox_git_identity(
 fn build_sandbox_env(
     spec: &SandboxEnvSpec,
     github_app: Option<&fabro_github::GitHubCredentials>,
+    forgejo: Option<&fabro_forgejo::ForgejoConfig>,
 ) -> Result<BuiltSandboxEnv, Error> {
     let mut env = spec.toml_env.clone();
+
+    let forgejo_token = resolve_forgejo_token(spec, forgejo)?;
+    if let (Some(config), Some(origin_url)) = (forgejo, spec.origin_url.as_deref()) {
+        if forgejo_token.is_some() {
+            git_bridge::merge_forgejo_bridge_env(&mut env, &config.instance, origin_url)?;
+        }
+    }
 
     let no_token = |env| BuiltSandboxEnv {
         env,
         github_token: None,
         github_access: None,
+        forgejo_token: forgejo_token.clone(),
     };
     let Some(integration) = spec
         .github_integration
@@ -170,7 +180,49 @@ fn build_sandbox_env(
         env,
         github_token,
         github_access,
+        forgejo_token,
     })
+}
+
+/// Resolve the `FORGEJO_TOKEN` sandbox env when the run asks for it.
+///
+/// The token is only exposed when the run origin lives on the configured
+/// instance; requesting it without a configured instance (or from a run
+/// whose origin is elsewhere) fails the same way GitHub token requests do,
+/// so misconfiguration surfaces before any stage executes.
+fn resolve_forgejo_token(
+    spec: &SandboxEnvSpec,
+    forgejo: Option<&fabro_forgejo::ForgejoConfig>,
+) -> Result<Option<fabro_forgejo::ForgejoCredentials>, Error> {
+    if !spec.forgejo_requested {
+        return Ok(None);
+    }
+    let Some(config) = forgejo else {
+        return Err(Error::Precondition(
+            "run.integrations.forgejo.token requires a configured Forgejo instance, \
+             but none is configured"
+                .to_string(),
+        ));
+    };
+    let Some(origin_url) = spec
+        .origin_url
+        .as_deref()
+        .filter(|origin| !origin.trim().is_empty())
+    else {
+        return Err(Error::Precondition(
+            "run.integrations.forgejo.token requires a run origin on the configured \
+             Forgejo instance"
+                .to_string(),
+        ));
+    };
+    if !fabro_forgejo::is_forgejo_origin(&config.instance, origin_url) {
+        return Err(Error::Precondition(
+            "run.integrations.forgejo.token requires a run origin on the configured \
+             Forgejo instance"
+                .to_string(),
+        ));
+    }
+    Ok(Some(config.token.clone()))
 }
 
 /// When additional repositories are declared, resolve their token before the
@@ -511,16 +563,19 @@ pub async fn initialize(
     let built_env = build_sandbox_env(
         &options.sandbox_env,
         options.run_options.github_app.as_ref(),
+        options.run_options.forgejo.as_ref(),
     )?;
     resolve_declared_repository_token(&built_env).await?;
     let BuiltSandboxEnv {
         env: base_env,
         github_token,
         github_access: _,
+        forgejo_token,
     } = built_env;
     let tool_env_provider = Arc::new(WorkflowToolEnvProvider {
-        base_env:     base_env.clone(),
-        github_token: github_token.clone(),
+        base_env:      base_env.clone(),
+        github_token:  github_token.clone(),
+        forgejo_token: forgejo_token.clone(),
     });
     let github_token_refresh_managed = github_token
         .as_deref()
@@ -704,6 +759,7 @@ pub async fn initialize(
         interviewer: Arc::clone(&options.interviewer),
         base_env,
         github_token,
+        forgejo_token,
         inputs: options.run_options.settings.run.inputs.clone(),
         dry_run: options.dry_run,
         workflow_path: options.workflow_path.clone(),
@@ -881,6 +937,7 @@ mod tests {
             labels:           HashMap::new(),
             workflow_slug:    None,
             github_app:       None,
+            forgejo:          None,
             pre_run_git:      None,
             fork_source_ref:  None,
             base_branch:      None,
@@ -922,6 +979,7 @@ mod tests {
             sandbox_env: SandboxEnvSpec {
                 toml_env:           HashMap::new(),
                 github_integration: None,
+                forgejo_requested:  false,
                 origin_url:         None,
             },
             vault: auth_test_support::empty_vault(),
@@ -1053,6 +1111,7 @@ mod tests {
             sandbox_env: SandboxEnvSpec {
                 toml_env:           HashMap::from([("TEST_KEY".to_string(), "value".to_string())]),
                 github_integration: None,
+                forgejo_requested:  false,
                 origin_url:         None,
             },
             ..test_init_options(
@@ -1212,8 +1271,9 @@ mod tests {
 
         let test_emitter = Arc::new(crate::event::Emitter::new(test_run_id()));
         let tool_env_provider = Arc::new(WorkflowToolEnvProvider {
-            base_env:     HashMap::new(),
-            github_token: None,
+            base_env:      HashMap::new(),
+            forgejo_token: None,
+            github_token:  None,
         });
         let (_registry, effective_dry_run) = build_registry(
             &LlmSpec {
@@ -1365,6 +1425,7 @@ mod tests {
             sandbox_env: SandboxEnvSpec {
                 toml_env:           HashMap::new(),
                 github_integration: None,
+                forgejo_requested:  false,
                 origin_url:         None,
             },
             vault,
@@ -1468,6 +1529,7 @@ mod tests {
             sandbox_env:       SandboxEnvSpec {
                 toml_env:           HashMap::new(),
                 github_integration: None,
+                forgejo_requested:  false,
                 origin_url:         None,
             },
             vault:             auth_test_support::empty_vault(),
@@ -1610,6 +1672,7 @@ mod tests {
             sandbox_env: SandboxEnvSpec {
                 toml_env:           HashMap::new(),
                 github_integration: None,
+                forgejo_requested:  false,
                 origin_url:         None,
             },
             vault: auth_test_support::empty_vault(),
@@ -1656,10 +1719,12 @@ mod tests {
         fn spec(
             origin: Option<&str>,
             github_integration: Option<ResolvedGithubIntegration>,
+            forgejo_requested: bool,
         ) -> SandboxEnvSpec {
             SandboxEnvSpec {
                 toml_env: HashMap::new(),
                 github_integration,
+                forgejo_requested,
                 origin_url: origin.map(str::to_string),
             }
         }
@@ -1669,8 +1734,9 @@ mod tests {
             let spec = spec(
                 Some("https://github.com/fabro-sh/fabro"),
                 Some(integration(&["fabro-sh/keystone"])),
+                false,
             );
-            let Err(err) = build_sandbox_env(&spec, None) else {
+            let Err(err) = build_sandbox_env(&spec, None, None) else {
                 panic!("declared additional repositories without credentials must fail");
             };
             assert!(
@@ -1681,9 +1747,9 @@ mod tests {
 
         #[test]
         fn declared_additional_repositories_require_an_origin() {
-            let spec = spec(None, Some(integration(&["fabro-sh/keystone"])));
+            let spec = spec(None, Some(integration(&["fabro-sh/keystone"])), false);
             let creds = GitHubCredentials::Pat("ghp_x".to_string());
-            let Err(err) = build_sandbox_env(&spec, Some(&creds)) else {
+            let Err(err) = build_sandbox_env(&spec, Some(&creds), None) else {
                 panic!("declared additional repositories without an origin must fail");
             };
             assert!(
@@ -1697,9 +1763,10 @@ mod tests {
             let spec = spec(
                 Some("https://github.com/fabro-sh/fabro"),
                 Some(integration(&["fabro-sh/keystone"])),
+                false,
             );
             let creds = GitHubCredentials::Pat("ghp_x".to_string());
-            let built = build_sandbox_env(&spec, Some(&creds)).unwrap();
+            let built = build_sandbox_env(&spec, Some(&creds), None).unwrap();
 
             assert!(built.github_token.is_some());
             let access = built.github_access.expect("access should be constructed");
@@ -1726,8 +1793,9 @@ mod tests {
             let no_creds = spec(
                 Some("https://github.com/fabro-sh/fabro"),
                 Some(integration(&[])),
+                false,
             );
-            let built = build_sandbox_env(&no_creds, None).unwrap();
+            let built = build_sandbox_env(&no_creds, None, None).unwrap();
             assert!(built.github_token.is_none());
             assert!(!built.env.contains_key("GIT_CONFIG_COUNT"));
 
@@ -1737,8 +1805,8 @@ mod tests {
                 private_key_pem: "unused".to_string(),
                 slug:            None,
             });
-            let no_origin = spec(None, Some(integration(&[])));
-            let built = build_sandbox_env(&no_origin, Some(&creds)).unwrap();
+            let no_origin = spec(None, Some(integration(&[])), false);
+            let built = build_sandbox_env(&no_origin, Some(&creds), None).unwrap();
             assert!(built.github_token.is_none());
             assert!(built.github_access.is_none());
         }
@@ -1767,6 +1835,7 @@ mod tests {
                     Arc::new(FailingMinter),
                 )),
                 github_access: access,
+                forgejo_token: None,
             };
 
             let err = resolve_declared_repository_token(&built).await.unwrap_err();
@@ -1783,6 +1852,7 @@ mod tests {
                     Arc::new(FailingMinter),
                 )),
                 github_access: None,
+                forgejo_token: None,
             };
 
             resolve_declared_repository_token(&built)

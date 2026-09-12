@@ -205,9 +205,22 @@ pub struct ServerLoggingLayer {
 #[serde(deny_unknown_fields)]
 pub struct ServerIntegrationsLayer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub github: Option<GithubIntegrationLayer>,
+    pub github:  Option<GithubIntegrationLayer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub slack:  Option<SlackIntegrationLayer>,
+    pub forgejo: Option<ForgejoIntegrationLayer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack:   Option<SlackIntegrationLayer>,
+}
+
+/// `[server.integrations.forgejo]` — a single self-hosted Forgejo instance.
+/// The access token lives in the secret vault, never in settings.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, fabro_macros::Combine)]
+#[serde(deny_unknown_fields)]
+pub struct ForgejoIntegrationLayer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url:     Option<String>,
 }
 
 /// `[server.integrations.github]` — GitHub App, credentials, and inbound

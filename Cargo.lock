@@ -2492,6 +2492,7 @@ dependencies = [
  "fabro-config",
  "fabro-dump",
  "fabro-environment",
+ "fabro-forgejo",
  "fabro-github",
  "fabro-graphviz",
  "fabro-hooks",
@@ -2703,6 +2704,23 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "toml_edit",
+ "tracing",
+]
+
+[[package]]
+name = "fabro-forgejo"
+version = "0.348.0-nightly.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "fabro-http",
+ "fabro-redact",
+ "fabro-static",
+ "fabro-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
@@ -3009,6 +3027,7 @@ dependencies = [
  "daytona-api-client",
  "daytona-sdk",
  "fabro-config",
+ "fabro-forgejo",
  "fabro-github",
  "fabro-http",
  "fabro-proc",
@@ -3069,6 +3088,7 @@ dependencies = [
  "fabro-config",
  "fabro-db",
  "fabro-environment",
+ "fabro-forgejo",
  "fabro-github",
  "fabro-graphviz",
  "fabro-hooks",
@@ -3266,6 +3286,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.8.23",
+ "twin-forgejo",
  "twin-github",
  "twin-openai",
 ]
@@ -3420,6 +3441,7 @@ dependencies = [
  "fabro-core",
  "fabro-dump",
  "fabro-environment",
+ "fabro-forgejo",
  "fabro-github",
  "fabro-graphviz",
  "fabro-hooks",
@@ -9016,6 +9038,26 @@ dependencies = [
  "futures-util",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "twin-forgejo"
+version = "0.348.0-nightly.0"
+dependencies = [
+ "axum",
+ "base64",
+ "chrono",
+ "fabro-forgejo",
+ "fabro-http",
+ "fabro-types",
+ "hex",
+ "hmac 0.12.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "tokio",
  "tracing",
 ]

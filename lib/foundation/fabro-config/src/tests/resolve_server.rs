@@ -123,6 +123,10 @@ fn resolved_server_integrations_disable_slack_when_config_is_absent() {
                 "slug": null,
                 "webhooks": null,
             },
+            "forgejo": {
+                "enabled": false,
+                "url": null,
+            },
             "slack": {
                 "enabled": false,
                 "default_channel": null,

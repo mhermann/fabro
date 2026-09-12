@@ -15,14 +15,18 @@
 
 
 /**
- * Minimal GitHub pull request link associated with a run.
+ * Minimal pull request link associated with a run. GitHub links are the default; a `forge` base URL marks a pull request on a self-hosted Forgejo instance.
  */
 export interface PullRequestLink {
     'owner': string;
     'repo': string;
     'number': number;
     /**
-     * Computed GitHub web URL for the pull request.
+     * Computed web URL for the pull request.
      */
     'html_url': string;
+    /**
+     * Instance base URL when the pull request lives on a configured Forgejo instance; omitted for GitHub.
+     */
+    'forge'?: string;
 }

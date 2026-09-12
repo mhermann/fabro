@@ -388,6 +388,7 @@ impl RunProjectionReducer for RunProjection {
                     owner:  props.owner.clone(),
                     repo:   props.repo.clone(),
                     number: props.pr_number,
+                    forge:  props.forge.clone(),
                 };
                 self.pull_request = Some(pull_request.clone());
                 if let Some(creation) = self
@@ -4942,6 +4943,7 @@ mod tests {
                     head_sha:    Some("final-sha".to_string()),
                     title:       "Add run PR chip".to_string(),
                     draft:       false,
+                    forge:       None,
                 }),
                 None,
             ))
@@ -5038,6 +5040,7 @@ mod tests {
                     head_sha:    Some("final-sha".to_string()),
                     title:       "Create asynchronously".to_string(),
                     draft:       true,
+                    forge:       None,
                 }),
                 None,
             ))
@@ -5060,11 +5063,13 @@ mod tests {
             owner:  "fabro-sh".to_string(),
             repo:   "fabro".to_string(),
             number: 123,
+            forge:  None,
         };
         let replacement_pull_request = PullRequestLink {
             owner:  "acme".to_string(),
             repo:   "widgets".to_string(),
             number: 42,
+            forge:  None,
         };
 
         state
@@ -5080,6 +5085,7 @@ mod tests {
                     head_sha:    Some("final-sha".to_string()),
                     title:       "Add run PR chip".to_string(),
                     draft:       false,
+                    forge:       None,
                 }),
                 None,
             ))

@@ -106,6 +106,9 @@ fn run_integrations_settings_round_trips() {
             "permissions": {
                 "issues": "read",
             }
+        },
+        "forgejo": {
+            "token": true,
         }
     });
 
@@ -115,5 +118,24 @@ fn run_integrations_settings_round_trips() {
         serde_json::from_value(json_value.clone()).expect("canonical wrapper should parse");
 
     assert_eq!(serde_json::to_value(&api).unwrap(), json_value);
+    assert_eq!(serde_json::to_value(&canonical).unwrap(), json_value);
+}
+
+/// `forgejo.token` is omitted when false so settings serialized by this
+/// release stay byte-identical to earlier releases for runs without the
+/// flag.
+#[test]
+fn run_integrations_settings_omits_a_false_forgejo_token() {
+    let json_value = json!({
+        "github": {
+            "permissions": {
+                "issues": "read",
+            }
+        }
+    });
+
+    let canonical: RunIntegrationsSettings =
+        serde_json::from_value(json_value.clone()).expect("canonical wrapper should parse");
+    assert!(!canonical.forgejo.is_token_requested());
     assert_eq!(serde_json::to_value(&canonical).unwrap(), json_value);
 }

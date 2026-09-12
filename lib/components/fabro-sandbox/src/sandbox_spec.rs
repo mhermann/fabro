@@ -24,6 +24,13 @@ use crate::kubernetes::{
 use crate::local::LocalSandbox;
 use crate::{Sandbox, SandboxEventCallback};
 
+/// The configured Forgejo instance and its access token, threaded into
+/// clone-based sandbox specs beside the GitHub credentials. Clone and push
+/// embed this static PAT directly; there is no token source because PATs do
+/// not expire.
+#[cfg(any(feature = "docker", feature = "daytona"))]
+pub type ForgejoSandboxConfig = fabro_forgejo::ForgejoConfig;
+
 /// Options for sandbox initialization and construction.
 pub enum SandboxSpec {
     Local {
@@ -33,6 +40,7 @@ pub enum SandboxSpec {
     Docker {
         config:           DockerSandboxOptions,
         github_app:       Option<GitHubCredentials>,
+        forgejo:          Option<ForgejoSandboxConfig>,
         run_id:           Option<RunId>,
         clone_origin_url: Option<String>,
         clone_branch:     Option<String>,
@@ -43,6 +51,7 @@ pub enum SandboxSpec {
     Daytona {
         config:           Box<DaytonaConfig>,
         github_app:       Option<GitHubCredentials>,
+        forgejo:          Option<ForgejoSandboxConfig>,
         run_id:           Option<RunId>,
         clone_origin_url: Option<String>,
         clone_branch:     Option<String>,
@@ -104,6 +113,7 @@ impl SandboxSpec {
             #[cfg(feature = "docker")]
             Self::Docker {
                 config,
+                forgejo,
                 clone_origin_url,
                 clone_branch,
                 ..
@@ -111,12 +121,14 @@ impl SandboxSpec {
                 let repo_cloned = clone_source::repo_cloned_for_record(
                     config.skip_clone,
                     clone_origin_url.as_deref(),
+                    forgejo.as_ref().map(|config| &config.instance),
                 );
                 let layout = runtime_layout_metadata(
                     repo_cloned,
                     clone_origin_url.as_deref(),
                     docker::WORKING_DIRECTORY,
                     docker::REPOS_ROOT,
+                    forgejo.as_ref().map(|config| &config.instance),
                 );
                 RunSandboxInstance {
                     provider: self.provider(),
@@ -128,6 +140,7 @@ impl SandboxSpec {
                         repo_cloned,
                         clone_origin_url: clone_source::clean_clone_origin_for_record(
                             clone_origin_url.as_deref(),
+                            forgejo.as_ref().map(|config| &config.instance),
                         ),
                         clone_branch: clone_branch.clone(),
                         workspace_root: Some(docker::WORKING_DIRECTORY.to_string()),
@@ -144,6 +157,7 @@ impl SandboxSpec {
             #[cfg(feature = "daytona")]
             Self::Daytona {
                 config,
+                forgejo,
                 clone_origin_url,
                 clone_branch,
                 ..
@@ -151,12 +165,14 @@ impl SandboxSpec {
                 let repo_cloned = clone_source::repo_cloned_for_record(
                     config.skip_clone,
                     clone_origin_url.as_deref(),
+                    forgejo.as_ref().map(|config| &config.instance),
                 );
                 let layout = runtime_layout_metadata(
                     repo_cloned,
                     clone_origin_url.as_deref(),
                     daytona::WORKING_DIRECTORY,
                     daytona::REPOS_ROOT,
+                    forgejo.as_ref().map(|config| &config.instance),
                 );
                 RunSandboxInstance {
                     provider: self.provider(),
@@ -168,6 +184,7 @@ impl SandboxSpec {
                         repo_cloned,
                         clone_origin_url: clone_source::clean_clone_origin_for_record(
                             clone_origin_url.as_deref(),
+                            forgejo.as_ref().map(|config| &config.instance),
                         ),
                         clone_branch: clone_branch.clone(),
                         workspace_root: Some(daytona::WORKING_DIRECTORY.to_string()),
@@ -188,15 +205,19 @@ impl SandboxSpec {
                 clone_branch,
                 ..
             } => {
+                // The Kubernetes provider is GitHub-only; it has no Forgejo
+                // instance to resolve origins against.
                 let repo_cloned = clone_source::repo_cloned_for_record(
                     config.skip_clone,
                     clone_origin_url.as_deref(),
+                    None,
                 );
                 let layout = runtime_layout_metadata(
                     repo_cloned,
                     clone_origin_url.as_deref(),
                     WORKING_DIRECTORY,
                     REPOS_ROOT,
+                    None,
                 );
                 RunSandboxInstance {
                     provider: self.provider(),
@@ -208,6 +229,7 @@ impl SandboxSpec {
                         repo_cloned,
                         clone_origin_url: clone_source::clean_clone_origin_for_record(
                             clone_origin_url.as_deref(),
+                            None,
                         ),
                         clone_branch: clone_branch.clone(),
                         workspace_root: Some(WORKING_DIRECTORY.to_string()),
@@ -260,6 +282,7 @@ impl SandboxSpec {
             Self::Docker {
                 config,
                 github_app,
+                forgejo,
                 run_id,
                 clone_origin_url,
                 clone_branch,
@@ -269,6 +292,7 @@ impl SandboxSpec {
                 let mut sandbox = DockerSandbox::new(
                     config.clone(),
                     github_app.as_ref(),
+                    forgejo.as_ref(),
                     *run_id,
                     clone_origin_url.clone(),
                     clone_branch.clone(),
@@ -285,6 +309,7 @@ impl SandboxSpec {
             Self::Daytona {
                 config,
                 github_app,
+                forgejo,
                 run_id,
                 clone_origin_url,
                 clone_branch,
@@ -295,6 +320,7 @@ impl SandboxSpec {
                 let mut sandbox = DaytonaSandbox::new(
                     config.as_ref().clone(),
                     github_app.clone(),
+                    forgejo.clone(),
                     *run_id,
                     clone_origin_url.clone(),
                     clone_branch.clone(),
@@ -346,11 +372,18 @@ fn runtime_layout_metadata(
     clone_origin_url: Option<&str>,
     workspace_root: &str,
     repos_root: &str,
-) -> Option<clone_source::GitHubRepoLayout> {
+    forgejo_instance: Option<&fabro_forgejo::ForgejoInstance>,
+) -> Option<clone_source::CloneRepoLayout> {
     if repo_cloned != Some(true) {
         return None;
     }
-    clone_source::github_repo_layout(clone_origin_url?, workspace_root, repos_root).ok()
+    clone_source::clone_repo_layout(
+        clone_origin_url?,
+        workspace_root,
+        repos_root,
+        forgejo_instance,
+    )
+    .ok()
 }
 
 #[cfg(test)]
@@ -369,6 +402,7 @@ mod tests {
         let spec = SandboxSpec::Docker {
             config:           DockerSandboxOptions::default(),
             github_app:       None,
+            forgejo:          None,
             run_id:           None,
             clone_origin_url: Some("git@github.com:brynary/rack-test.git".to_string()),
             clone_branch:     Some("main".to_string()),
@@ -408,6 +442,7 @@ mod tests {
         let spec = SandboxSpec::Docker {
             config:           DockerSandboxOptions::default(),
             github_app:       None,
+            forgejo:          None,
             run_id:           None,
             clone_origin_url: Some("https://github.com/acme/widgets".to_string()),
             clone_branch:     Some("main".to_string()),
@@ -438,6 +473,7 @@ mod tests {
                 ..DockerSandboxOptions::default()
             },
             github_app:       None,
+            forgejo:          None,
             run_id:           None,
             clone_origin_url: Some("https://gitlab.com/acme/widgets".to_string()),
             clone_branch:     None,

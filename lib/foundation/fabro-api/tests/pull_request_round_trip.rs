@@ -103,6 +103,48 @@ fn pull_request_link_json_matches_openapi_shape() {
     assert_eq!(serde_json::to_value(domain_record).unwrap(), fixture);
 }
 
+/// The `forge` field (instance base URL for Forgejo pull requests) must be
+/// accepted with the same type identity and serialize with the instance web
+/// URL, matching the OpenAPI `PullRequestLink.forge` property.
+#[test]
+fn forgejo_pull_request_link_matches_openapi_shape() {
+    let fixture = json!({
+        "owner": "acme",
+        "repo": "widgets",
+        "number": 7,
+        "html_url": "https://git.example.com/acme/widgets/pulls/7",
+        "forge": "https://git.example.com"
+    });
+
+    let link: PullRequestLink =
+        serde_json::from_value(fixture.clone()).expect("link should deserialize");
+
+    assert_eq!(
+        TypeId::of::<PullRequestLink>(),
+        TypeId::of::<fabro_types::PullRequestLink>()
+    );
+    assert_eq!(serde_json::to_value(link).unwrap(), fixture);
+
+    // GitHub links stay forge-free: the field is omitted, not null.
+    let github = json!({
+        "owner": "fabro-sh",
+        "repo": "fabro",
+        "number": 123,
+        "html_url": "https://github.com/fabro-sh/fabro/pull/123"
+    });
+    let link: PullRequestLink =
+        serde_json::from_value(github).expect("github link should deserialize");
+    assert_eq!(
+        serde_json::to_value(link).unwrap(),
+        json!({
+            "owner": "fabro-sh",
+            "repo": "fabro",
+            "number": 123,
+            "html_url": "https://github.com/fabro-sh/fabro/pull/123"
+        })
+    );
+}
+
 #[test]
 fn pull_request_response_json_matches_openapi_shape() {
     let fixture = json!({

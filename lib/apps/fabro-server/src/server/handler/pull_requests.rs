@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::{HeaderValue, header};
+use fabro_types::settings::run::MergeStrategy;
 
 use super::super::{
     ApiError, AppState, CloseRunPullRequestResponse, CreateRunPullRequestRequest, IntoResponse,
@@ -65,9 +66,20 @@ fn parse_github_owner_repo_from_url(url: &str, kind: &str) -> Result<(String, St
 }
 
 fn pull_request_record_from_link_request(
+    state: &AppState,
     body: &LinkRunPullRequestRequest,
 ) -> Result<PullRequestLink, ApiError> {
-    PullRequestLink::from_github_url(body.html_url.trim()).map_err(|err| {
+    let html_url = body.html_url.trim();
+    // A URL on the configured Forgejo instance links as a Forgejo-scoped
+    // record; everything else keeps the GitHub parse.
+    if let Some(config) = state.forgejo.as_ref() {
+        if fabro_forgejo::is_forgejo_origin(&config.instance, html_url) {
+            return PullRequestLink::from_forgejo_url(config.instance.as_str(), html_url).map_err(
+                |err| ApiError::with_code(StatusCode::BAD_REQUEST, err, "invalid_pull_request_url"),
+            );
+        }
+    }
+    PullRequestLink::from_github_url(html_url).map_err(|err| {
         let code = if err.contains("GitHub pull request URL") {
             "unsupported_pull_request_provider"
         } else {
@@ -139,12 +151,15 @@ fn pull_request_exists_error(record: &PullRequestLink) -> ApiError {
     )
 }
 
-struct PullRequestGithubContext {
+struct PullRequestRecordContext {
     record: PullRequestLink,
     owner:  String,
     repo:   String,
     number: u64,
-    creds:  fabro_github::GitHubCredentials,
+    /// `None` when the record targets the configured Forgejo instance (a
+    /// `forge` base URL on the link), which authenticates with the instance
+    /// PAT resolved during host preparation instead of GitHub credentials.
+    creds:  Option<fabro_github::GitHubCredentials>,
 }
 
 async fn load_pull_request_record(
@@ -165,20 +180,169 @@ fn github_coordinates_for_record(record: &PullRequestLink) -> (String, String, u
     (record.owner.clone(), record.repo.clone(), record.number)
 }
 
-async fn load_pull_request_github_context(
-    state: &Arc<AppState>,
-    id: &RunId,
-) -> Result<PullRequestGithubContext, ApiError> {
-    let record = load_pull_request_record(state, id).await?;
-    let (owner, repo, number) = github_coordinates_for_record(&record);
-    let creds = load_server_github_credentials(state.as_ref()).await?;
-    Ok(PullRequestGithubContext {
-        record,
+async fn pull_request_context_for_record(
+    state: &AppState,
+    record: &PullRequestLink,
+) -> Result<PullRequestRecordContext, ApiError> {
+    let (owner, repo, number) = github_coordinates_for_record(record);
+    // Forgejo-scoped records authenticate with the instance PAT, so GitHub
+    // credentials are neither loaded nor required for them.
+    let creds = if record.forge.is_some() {
+        None
+    } else {
+        Some(load_server_github_credentials(state).await?)
+    };
+    Ok(PullRequestRecordContext {
+        record: record.clone(),
         owner,
         repo,
         number,
         creds,
     })
+}
+
+async fn load_pull_request_context(
+    state: &Arc<AppState>,
+    id: &RunId,
+) -> Result<PullRequestRecordContext, ApiError> {
+    let record = load_pull_request_record(state, id).await?;
+    pull_request_context_for_record(state.as_ref(), &record).await
+}
+
+/// A stored pull request's host with everything needed to call it prepared:
+/// resolved credentials plus a working HTTP client. Preparation is the single
+/// point that maps "this forge is not usable right now" to the
+/// `integration_unavailable` error shape.
+enum PreparedPullRequestHost<'a> {
+    GitHub(fabro_github::GitHubContext<'a>),
+    Forgejo {
+        context: fabro_forgejo::ForgejoContext<'a>,
+        client:  fabro_http::HttpClient,
+    },
+}
+
+fn forgejo_http_client() -> Result<fabro_http::HttpClient, ApiError> {
+    fabro_http::http_client().map_err(|err| {
+        ApiError::with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Forgejo integration unavailable on server: {err}"),
+            "integration_unavailable",
+        )
+    })
+}
+
+fn prepare_pull_request_host<'a>(
+    state: &'a AppState,
+    ctx: &'a PullRequestRecordContext,
+) -> Result<PreparedPullRequestHost<'a>, ApiError> {
+    let Some(forge) = ctx.record.forge.as_deref() else {
+        let creds = ctx
+            .creds
+            .as_ref()
+            .expect("records without a forge base URL always load GitHub credentials");
+        return server_github_context(state, creds).map(PreparedPullRequestHost::GitHub);
+    };
+    let config = state
+        .forgejo
+        .as_ref()
+        .filter(|config| config.instance.as_str() == forge)
+        .ok_or_else(|| {
+            warn!(forge = %forge, "Forgejo integration unavailable on server for stored pull request");
+            ApiError::with_code(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Forgejo integration unavailable on server.",
+                "integration_unavailable",
+            )
+        })?;
+    Ok(PreparedPullRequestHost::Forgejo {
+        context: fabro_forgejo::ForgejoContext::new(&config.token, &config.instance),
+        client:  forgejo_http_client()?,
+    })
+}
+
+/// The `fabro_github` and `fabro_forgejo` pull-request error enums share the
+/// same shape (`NotFound` plus everything else), so handlers branch once on
+/// this normalized form instead of once per forge.
+enum PullRequestOpError {
+    NotFound,
+    Other(anyhow::Error),
+}
+
+impl From<fabro_github::PullRequestApiError> for PullRequestOpError {
+    fn from(err: fabro_github::PullRequestApiError) -> Self {
+        match err {
+            fabro_github::PullRequestApiError::NotFound { .. } => Self::NotFound,
+            fabro_github::PullRequestApiError::Other(err) => Self::Other(err),
+        }
+    }
+}
+
+impl From<fabro_forgejo::PullRequestApiError> for PullRequestOpError {
+    fn from(err: fabro_forgejo::PullRequestApiError) -> Self {
+        match err {
+            fabro_forgejo::PullRequestApiError::NotFound { .. } => Self::NotFound,
+            fabro_forgejo::PullRequestApiError::Other(err) => Self::Other(err),
+        }
+    }
+}
+
+impl PreparedPullRequestHost<'_> {
+    async fn get_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<fabro_types::PullRequestGithubDetail, PullRequestOpError> {
+        match self {
+            Self::GitHub(github) => fabro_github::get_pull_request(github, owner, repo, number)
+                .await
+                .map_err(PullRequestOpError::from),
+            Self::Forgejo { context, client } => {
+                fabro_forgejo::get_pull_request(client, context, owner, repo, number)
+                    .await
+                    .map_err(PullRequestOpError::from)
+            }
+        }
+    }
+
+    async fn merge_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        method: MergeStrategy,
+    ) -> Result<(), PullRequestOpError> {
+        match self {
+            Self::GitHub(github) => {
+                fabro_github::merge_pull_request(github, owner, repo, number, method)
+                    .await
+                    .map_err(PullRequestOpError::from)
+            }
+            Self::Forgejo { context, client } => {
+                fabro_forgejo::merge_pull_request(client, context, owner, repo, number, method)
+                    .await
+                    .map_err(PullRequestOpError::from)
+            }
+        }
+    }
+
+    async fn close_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<(), PullRequestOpError> {
+        match self {
+            Self::GitHub(github) => fabro_github::close_pull_request(github, owner, repo, number)
+                .await
+                .map_err(PullRequestOpError::from),
+            Self::Forgejo { context, client } => {
+                fabro_forgejo::close_pull_request(client, context, owner, repo, number)
+                    .await
+                    .map_err(PullRequestOpError::from)
+            }
+        }
+    }
 }
 
 pub(in crate::server) struct RunPrInputs<'a> {
@@ -451,7 +615,7 @@ async fn link_run_pull_request(
     Json(body): Json<LinkRunPullRequestRequest>,
 ) -> Response {
     let _create_guard = state.pull_request_create_locks.lock(id).await;
-    let pull_request = match pull_request_record_from_link_request(&body) {
+    let pull_request = match pull_request_record_from_link_request(&state, &body) {
         Ok(record) => record,
         Err(err) => return err.into_response(),
     };
@@ -506,11 +670,10 @@ async fn get_run_pull_request(
         Ok(record) => record,
         Err(err) => return err.into_response(),
     };
-    let (owner, repo, number) = github_coordinates_for_record(&record);
-    let creds = match load_server_github_credentials(state.as_ref()).await {
-        Ok(creds) => creds,
+    let ctx = match pull_request_context_for_record(state.as_ref(), &record).await {
+        Ok(ctx) => ctx,
         Err(err) => {
-            warn!(error = ?err, "Returning stored pull request without live GitHub details");
+            warn!(error = ?err, "Returning stored pull request without live forge details");
             return Json(unavailable_pull_request_response(
                 record,
                 fabro_types::PullRequestDetailsUnavailableReason::IntegrationUnavailable,
@@ -518,10 +681,10 @@ async fn get_run_pull_request(
             .into_response();
         }
     };
-    let github = match server_github_context(state.as_ref(), &creds) {
-        Ok(github) => github,
+    let host = match prepare_pull_request_host(state.as_ref(), &ctx) {
+        Ok(host) => host,
         Err(err) => {
-            warn!(error = ?err, "Returning stored pull request without live GitHub details");
+            warn!(error = ?err, "Returning stored pull request without live forge details");
             return Json(unavailable_pull_request_response(
                 record,
                 fabro_types::PullRequestDetailsUnavailableReason::IntegrationUnavailable,
@@ -530,18 +693,23 @@ async fn get_run_pull_request(
         }
     };
 
-    match fabro_github::get_pull_request(&github, &owner, &repo, number).await {
-        Ok(github) => Json(available_pull_request_response(record, github.into())).into_response(),
-        Err(fabro_github::PullRequestApiError::NotFound { .. }) => {
-            warn!("Returning stored pull request because GitHub no longer has the PR");
+    match host
+        .get_pull_request(&ctx.owner, &ctx.repo, ctx.number)
+        .await
+    {
+        Ok(details) => {
+            Json(available_pull_request_response(record, details.into())).into_response()
+        }
+        Err(PullRequestOpError::NotFound) => {
+            warn!("Returning stored pull request because the forge no longer has the PR");
             Json(unavailable_pull_request_response(
                 record,
                 fabro_types::PullRequestDetailsUnavailableReason::NotFound,
             ))
             .into_response()
         }
-        Err(err) => {
-            warn!(error = %err, "Returning stored pull request without live GitHub details");
+        Err(PullRequestOpError::Other(err)) => {
+            warn!(error = %err, "Returning stored pull request without live forge details");
             Json(unavailable_pull_request_response(
                 record,
                 fabro_types::PullRequestDetailsUnavailableReason::FetchFailed,
@@ -556,16 +724,17 @@ async fn merge_run_pull_request(
     State(state): State<Arc<AppState>>,
     Json(body): Json<MergeRunPullRequestRequest>,
 ) -> Response {
-    let ctx = match load_pull_request_github_context(&state, &id).await {
+    let ctx = match load_pull_request_context(&state, &id).await {
         Ok(ctx) => ctx,
         Err(err) => return err.into_response(),
     };
-    let github = match server_github_context(state.as_ref(), &ctx.creds) {
-        Ok(github) => github,
+    let host = match prepare_pull_request_host(state.as_ref(), &ctx) {
+        Ok(host) => host,
         Err(err) => return err.into_response(),
     };
 
-    match fabro_github::merge_pull_request(&github, &ctx.owner, &ctx.repo, ctx.number, body.method)
+    match host
+        .merge_pull_request(&ctx.owner, &ctx.repo, ctx.number, body.method)
         .await
     {
         Ok(()) => Json(MergeRunPullRequestResponse {
@@ -575,10 +744,12 @@ async fn merge_run_pull_request(
             method:   body.method,
         })
         .into_response(),
-        Err(fabro_github::PullRequestApiError::NotFound { .. }) => {
+        Err(PullRequestOpError::NotFound) => {
             github_pull_request_not_found_error(ctx.number).into_response()
         }
-        Err(err) => ApiError::new(StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+        Err(PullRequestOpError::Other(err)) => {
+            ApiError::new(StatusCode::BAD_GATEWAY, err.to_string()).into_response()
+        }
     }
 }
 
@@ -586,25 +757,30 @@ async fn close_run_pull_request(
     RequireRunScoped(id): RequireRunScoped,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    let ctx = match load_pull_request_github_context(&state, &id).await {
+    let ctx = match load_pull_request_context(&state, &id).await {
         Ok(ctx) => ctx,
         Err(err) => return err.into_response(),
     };
-    let github = match server_github_context(state.as_ref(), &ctx.creds) {
-        Ok(github) => github,
+    let host = match prepare_pull_request_host(state.as_ref(), &ctx) {
+        Ok(host) => host,
         Err(err) => return err.into_response(),
     };
 
-    match fabro_github::close_pull_request(&github, &ctx.owner, &ctx.repo, ctx.number).await {
+    match host
+        .close_pull_request(&ctx.owner, &ctx.repo, ctx.number)
+        .await
+    {
         Ok(()) => Json(CloseRunPullRequestResponse {
             number:   i64::try_from(ctx.number)
                 .expect("stored pull request number should fit in i64"),
             html_url: ctx.record.html_url(),
         })
         .into_response(),
-        Err(fabro_github::PullRequestApiError::NotFound { .. }) => {
+        Err(PullRequestOpError::NotFound) => {
             github_pull_request_not_found_error(ctx.number).into_response()
         }
-        Err(err) => ApiError::new(StatusCode::BAD_GATEWAY, err.to_string()).into_response(),
+        Err(PullRequestOpError::Other(err)) => {
+            ApiError::new(StatusCode::BAD_GATEWAY, err.to_string()).into_response()
+        }
     }
 }

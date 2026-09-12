@@ -72,7 +72,10 @@ impl EnvVars {
     pub const POOLSIDE_API_KEY: &'static str = "POOLSIDE_API_KEY";
     pub const ZAI_API_KEY: &'static str = "ZAI_API_KEY";
 
-    // GitHub, OAuth, and Slack
+    // GitHub, Forgejo, OAuth, and Slack
+    pub const FORGEJO_TOKEN: &'static str = "FORGEJO_TOKEN";
+    pub const FORGEJO_WEBHOOK_SECRET: &'static str = "FORGEJO_WEBHOOK_SECRET";
+    pub const FORGEJO_URL: &'static str = "FORGEJO_URL";
     pub const GH_TOKEN: &'static str = "GH_TOKEN";
     pub const GITHUB_APP_CLIENT_SECRET: &'static str = "GITHUB_APP_CLIENT_SECRET";
     pub const GITHUB_APP_PRIVATE_KEY: &'static str = "GITHUB_APP_PRIVATE_KEY";
@@ -224,6 +227,9 @@ mod tests {
             EnvVars::POOLSIDE_API_KEY,
             EnvVars::ZAI_API_KEY,
             EnvVars::GH_TOKEN,
+            EnvVars::FORGEJO_TOKEN,
+            EnvVars::FORGEJO_URL,
+            EnvVars::FORGEJO_WEBHOOK_SECRET,
             EnvVars::GITHUB_APP_CLIENT_SECRET,
             EnvVars::GITHUB_APP_PRIVATE_KEY,
             EnvVars::GITHUB_APP_WEBHOOK_SECRET,

@@ -4,6 +4,7 @@ members = [
     "lib/components/*",
     "lib/foundation/*",
     "test/twin/github",
+    "test/twin/forgejo",
 ]
 default-members = ["lib/apps/fabro-cli"]
 resolver = "2"
@@ -99,6 +100,7 @@ lithos-llm = { git = "https://github.com/lithoscomputer/lithos-llm", rev = "a1e3
 # lithos-llm verifies its codecs against.
 twin-openai = { git = "https://github.com/lithoscomputer/twins", rev = "ca45f0e50a6716d716aa2f638ca3cf767e88f613" }
 twin-github = { path = "test/twin/github" }
+twin-forgejo = { path = "test/twin/forgejo" }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 daytona-sdk = { git = "https://github.com/brynary/daytona-sdk-rust", rev = "be2c7b7272740d47c023cac8abc9f63c1a51a511", package = "daytona-sdk" }

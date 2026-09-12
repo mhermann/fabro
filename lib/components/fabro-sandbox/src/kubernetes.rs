@@ -375,6 +375,8 @@ impl KubernetesSandbox {
                 clone_branch.as_deref(),
                 clone_tag.as_deref(),
                 clone_commit_sha.as_deref(),
+                // GitHub-only provider: no Forgejo instance to dispatch on.
+                None,
             )?;
         }
         let (client, namespace) = connect().await?;
@@ -1135,7 +1137,8 @@ impl KubernetesSandbox {
         commit_sha: Option<String>,
     ) -> crate::Result<()> {
         self.verify_git_available().await?;
-        let layout = clone_source::github_repo_layout(&origin_url, WORKING_DIRECTORY, REPOS_ROOT)?;
+        let layout =
+            clone_source::clone_repo_layout(&origin_url, WORKING_DIRECTORY, REPOS_ROOT, None)?;
         // The clone mints its own token (never a warm-cache reuse) and seeds
         // the shared source, so the first refresh compares against the clone
         // token instead of believing nothing was ever embedded.
@@ -2018,6 +2021,8 @@ impl Sandbox for KubernetesSandbox {
             self.clone_branch.as_deref(),
             self.clone_tag.as_deref(),
             self.clone_commit_sha.as_deref(),
+            // GitHub-only provider: no Forgejo instance to dispatch on.
+            None,
         )
         .map_err(|e| self.fail_init(init_start, e))?;
 
@@ -2047,6 +2052,16 @@ impl Sandbox for KubernetesSandbox {
                 {
                     return Err(self.fail_init(init_start, e));
                 }
+            }
+            // Unreachable: this provider passes no Forgejo instance to
+            // `decide_clone`, so the forge branch is never selected.
+            CloneDecision::Forge { .. } => {
+                return Err(self.fail_init(
+                    init_start,
+                    crate::Error::message(
+                        "Forgejo repository origins are not supported by the Kubernetes sandbox                          provider",
+                    ),
+                ));
             }
         }
 

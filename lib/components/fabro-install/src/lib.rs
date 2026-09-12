@@ -206,6 +206,22 @@ fn github_integration_table(doc: &mut toml::Value) -> Result<&mut toml::Table> {
         .context("settings.toml [server.integrations.github] is not a table")
 }
 
+/// Write `[server.integrations.forgejo]` with `enabled = true` and the
+/// instance URL. The access token never lands in settings.toml; it is
+/// persisted as the `FORGEJO_TOKEN` vault secret by the caller.
+pub fn write_forgejo_settings(doc: &mut toml::Value, instance_url: &str) -> Result<()> {
+    let root = root_table_mut(doc)?;
+    let server = ensure_table(root, "server")?;
+    let integrations = ensure_table(server, "integrations")?;
+    let forgejo = ensure_table(integrations, "forgejo")?;
+    forgejo.insert("enabled".to_string(), toml::Value::Boolean(true));
+    forgejo.insert(
+        "url".to_string(),
+        toml::Value::String(instance_url.to_string()),
+    );
+    Ok(())
+}
+
 fn set_server_listen(doc: &mut toml::Value, listen_config: &InstallListenConfig) -> Result<()> {
     let root = root_table_mut(doc)?;
     let server = ensure_table(root, "server")?;

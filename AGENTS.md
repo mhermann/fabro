@@ -30,7 +30,7 @@ macOS note: if `cargo nextest run` fails with `Too many open files (os error 24)
 ### Docker sandbox provider
 - Docker is the default runtime sandbox provider from `defaults.toml`. The Fabro process must have a working Docker client environment (`DOCKER_HOST`, socket access, Docker Desktop behavior, TLS settings, groups/permissions, and any remote daemon policy are operator responsibilities).
 - The packaged compose service mounts `/var/run/docker.sock` so the server can create sibling run containers on the host daemon. This is host-root-equivalent under Docker's security model; only use it in the trusted, single-tenant deployment model described by the sandbox code/docs.
-- Docker and Daytona are clone-based providers. When a run manifest has a GitHub origin, they clone it into the provider workspace. Present non-GitHub origins fail unless the provider has `skip_clone = true`; absent origins or `skip_clone = true` create an empty workspace without repository files. For an exact commit, the submitted branch names the working branch and the syntactically valid SHA is requested directly. No layer proves branch/SHA ancestry: a fetchable commit is checked out, an unavailable commit fails setup, and branch HEAD is never substituted.
+- Docker and Daytona are clone-based providers. When a run manifest has a GitHub or configured Forgejo instance origin, they clone it into the provider workspace. Present other origins fail unless the provider has `skip_clone = true`; absent origins or `skip_clone = true` create an empty workspace without repository files. For an exact commit, the submitted branch names the working branch and the syntactically valid SHA is requested directly. No layer proves branch/SHA ancestry: a fetchable commit is checked out, an unavailable commit fails setup, and branch HEAD is never substituted.
 - The sandbox layer also accepts an optional exact commit for future admitted
   runs. An exact commit always requires a non-empty branch. Docker initializes
   an empty repository, shallow-fetches the SHA at the same depth as a branch
@@ -123,11 +123,12 @@ Fabro is an AI-powered workflow orchestration platform. Workflows are defined as
 - **fabro-cli** — CLI entry point. Commands: `run`, `exec`, `serve`, `validate`, `parse`, `cp`, `model`, `doctor`, `install`, `ps`, `system prune`
 - **fabro-workflow** — Core workflow engine. Parses Graphviz graphs, runs stages, manages checkpoints/resume, hooks, and human-in-the-loop interactions
 - **fabro-agent** — AI coding agent with tool use (Bash, Read, Write, Edit, Glob, Grep, WebFetch). `Sandbox` trait abstracts execution environments
-- **fabro-sandbox** — Local, Docker, and Daytona sandbox providers. Docker is the default runtime provider and creates clone-based `/workspace` containers through the operator's Docker daemon; Daytona uses the same GitHub-only clone-source contract. Docker daemon access is host-root-equivalent and assumes trusted callers/payloads.
+- **fabro-sandbox** — Local, Docker, and Daytona sandbox providers. Docker is the default runtime provider and creates clone-based `/workspace` containers through the operator's Docker daemon; Daytona uses the same GitHub-and-Forgejo clone-source contract. Docker daemon access is host-root-equivalent and assumes trusted callers/payloads.
 - **fabro-server** — Axum HTTP server. Routes for runs, sessions, models, completions, usage. SSE event streaming. Demo mode via header
 - **fabro-llm** — Unified LLM client with providers: Anthropic, OpenAI, Gemini, OpenAI-compatible, plus retry/middleware/streaming
 - **fabro-api** — Auto-generated Rust types and reqwest HTTP client from OpenAPI spec (build.rs + progenitor)
 - **fabro-github** — GitHub App auth (JWT signing, installation tokens, PR creation)
+- **fabro-forgejo** — Forgejo (Gitea-lineage) API client and origin helpers
 - **fabro-mcp** — Model Context Protocol client/server
 - **fabro-slack** — Slack integration (socket mode, blocks API)
 - **fabro-checkpoint** — Git-based checkpoint storage with branch store and metadata branches
@@ -139,7 +140,7 @@ Fabro is an AI-powered workflow orchestration platform. Workflows are defined as
 - **lib/packages/fabro-api-client** — Auto-generated TypeScript Axios client from OpenAPI spec
 
 ### Key design patterns
-- **Sandbox trait** — Uniform interface for local, Docker, and Daytona execution environments. Clone-based providers use run-spec GitHub origin metadata rather than worker process cwd detection.
+- **Sandbox trait** — Uniform interface for local, Docker, and Daytona execution environments. Clone-based providers use run-spec GitHub and Forgejo origin metadata rather than worker process cwd detection.
 - **Graphviz graph workflows** — Stages and transitions defined as Graphviz graph attributes
 - **OpenAPI-first** — `fabro-api.yaml` drives Rust type + client generation (progenitor) and TypeScript client generation (openapi-generator)
 - **Checkpoint/resume** — Workflows can be paused, checkpointed, and resumed

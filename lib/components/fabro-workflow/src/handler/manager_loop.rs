@@ -207,6 +207,7 @@ impl Handler for SubWorkflowHandler {
             labels:           HashMap::new(),
             workflow_slug:    None,
             github_app:       None,
+            forgejo:          None,
             pre_run_git:      None,
             fork_source_ref:  None,
             base_branch:      None,
@@ -230,6 +231,7 @@ impl Handler for SubWorkflowHandler {
         let interviewer = Arc::clone(&services.interviewer);
         let base_env = services.base_env.clone();
         let github_token = services.github_token.clone();
+        let forgejo_token = services.forgejo_token.clone();
         let inputs = services.inputs.clone();
         let dry_run = services.dry_run;
         let workflow_bundle = services.workflow_bundle.clone();
@@ -259,6 +261,7 @@ impl Handler for SubWorkflowHandler {
                     interviewer,
                     base_env,
                     github_token,
+                    forgejo_token,
                     inputs,
                     dry_run,
                     workflow_path: child_workflow_path,

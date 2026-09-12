@@ -1912,6 +1912,7 @@ mod tests {
                     owner:  "acme".to_string(),
                     repo:   "widgets".to_string(),
                     number: 42,
+                    forge:  None,
                 },
             }),
         };
@@ -1949,6 +1950,7 @@ mod tests {
                     owner:  "acme".to_string(),
                     repo:   "widgets".to_string(),
                     number: 42,
+                    forge:  None,
                 },
             }),
         };

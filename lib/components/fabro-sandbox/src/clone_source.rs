@@ -11,10 +11,19 @@ pub(crate) enum CloneDecision {
         tag:        Option<String>,
         commit_sha: Option<String>,
     },
+    /// A repository on the configured Forgejo instance. The clone sequence is
+    /// identical to the GitHub one; only origin parsing and the authenticated
+    /// clone URL differ.
+    Forge {
+        origin_url: String,
+        branch:     Option<String>,
+        tag:        Option<String>,
+        commit_sha: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct GitHubRepoLayout {
+pub(crate) struct CloneRepoLayout {
     pub(crate) owner:               String,
     pub(crate) repo:                String,
     pub(crate) repos_owner_path:    String,
@@ -23,17 +32,13 @@ pub(crate) struct GitHubRepoLayout {
     pub(crate) execution_directory: String,
 }
 
-pub(crate) fn github_repo_layout(
+pub(crate) fn clone_repo_layout(
     origin_url: &str,
     workspace_root: &str,
     repos_root: &str,
-) -> crate::Result<GitHubRepoLayout> {
-    let origin_url = fabro_github::normalize_repo_origin_url(origin_url);
-    let (owner, repo) = fabro_github::parse_github_owner_repo(&origin_url).map_err(|err| {
-        crate::Error::message(format!(
-            "Clone-based sandboxes currently support GitHub repository origins only: {err}"
-        ))
-    })?;
+    forgejo_instance: Option<&fabro_forgejo::ForgejoInstance>,
+) -> crate::Result<CloneRepoLayout> {
+    let (owner, repo) = parse_origin_owner_repo(origin_url, forgejo_instance)?;
     validate_path_component("owner", &owner)?;
     validate_path_component("repository", &repo)?;
     let workspace_root = trim_root(workspace_root);
@@ -42,7 +47,7 @@ pub(crate) fn github_repo_layout(
     let primary_repo_path = sandbox::join_sandbox_path(&repos_owner_path, &repo);
     let primary_repo_link = sandbox::join_sandbox_path(workspace_root, &repo);
 
-    Ok(GitHubRepoLayout {
+    Ok(CloneRepoLayout {
         owner,
         repo,
         repos_owner_path,
@@ -50,6 +55,32 @@ pub(crate) fn github_repo_layout(
         execution_directory: primary_repo_link.clone(),
         primary_repo_link,
     })
+}
+
+/// Parse `owner/repo` from a normalized origin, dispatching on which forge
+/// the origin belongs to. The error names the supported origins so a
+/// misconfigured run fails with guidance instead of a parse detail.
+pub(crate) fn parse_origin_owner_repo(
+    origin_url: &str,
+    forgejo_instance: Option<&fabro_forgejo::ForgejoInstance>,
+) -> crate::Result<(String, String)> {
+    let unsupported = |err: anyhow::Error| {
+        crate::Error::message(format!(
+            "Clone-based sandboxes currently support GitHub and the configured Forgejo \
+             instance repository origins only: {err}"
+        ))
+    };
+    // The forge check reads the raw origin (`is_forgejo_origin` normalizes
+    // internally), so the GitHub normalizer's sanitized-host rewrite can
+    // never corrupt a port-bearing instance URL before the dispatch.
+    if let Some(instance) = forgejo_instance {
+        if fabro_forgejo::is_forgejo_origin(instance, origin_url) {
+            return fabro_forgejo::parse_forgejo_owner_repo(instance, origin_url)
+                .map_err(unsupported);
+        }
+    }
+    let normalized = fabro_github::normalize_repo_origin_url(origin_url);
+    fabro_github::parse_github_owner_repo(&normalized).map_err(unsupported)
 }
 
 fn validate_path_component(label: &str, component: &str) -> crate::Result<()> {
@@ -65,7 +96,7 @@ fn validate_path_component(label: &str, component: &str) -> crate::Result<()> {
     Ok(())
 }
 
-pub(crate) fn repo_symlink_command(layout: &GitHubRepoLayout) -> String {
+pub(crate) fn repo_symlink_command(layout: &CloneRepoLayout) -> String {
     format!(
         "ln -s {} {}",
         sandbox::shell_quote(&layout.primary_repo_path),
@@ -269,6 +300,7 @@ pub(crate) fn decide_clone(
     clone_branch: Option<&str>,
     clone_tag: Option<&str>,
     clone_commit_sha: Option<&str>,
+    forgejo_instance: Option<&fabro_forgejo::ForgejoInstance>,
 ) -> crate::Result<CloneDecision> {
     if clone_tag.is_some_and(|tag| tag.trim().is_empty()) {
         return Err(crate::Error::message(
@@ -315,21 +347,38 @@ pub(crate) fn decide_clone(
         });
     };
 
-    let origin_url = fabro_github::normalize_repo_origin_url(origin_url);
-    if let Err(err) = fabro_github::parse_github_owner_repo(&origin_url) {
-        return Err(crate::Error::message(format!(
-            "Clone-based sandboxes currently support GitHub repository origins only: {err}"
-        )));
-    }
-
-    Ok(CloneDecision::GitHub {
-        origin_url,
-        branch: clone_branch
-            .filter(|branch| !branch.trim().is_empty())
-            .map(str::to_string),
-        tag,
-        commit_sha,
-    })
+    // The forge dispatch reads the raw origin (`is_forgejo_origin`
+    // normalizes internally), so the GitHub normalizer's sanitized-host
+    // rewrite can never corrupt a port-bearing instance URL first. Each
+    // branch then stores its own canonical form; the GitHub branch keeps the
+    // GitHub normalizer exactly as before.
+    let is_forge = forgejo_instance
+        .is_some_and(|instance| fabro_forgejo::is_forgejo_origin(instance, origin_url));
+    parse_origin_owner_repo(origin_url, forgejo_instance)?;
+    let origin_url = if is_forge {
+        fabro_forgejo::normalize_forgejo_origin_url(origin_url)
+    } else {
+        fabro_github::normalize_repo_origin_url(origin_url)
+    };
+    let branch = clone_branch
+        .filter(|branch| !branch.trim().is_empty())
+        .map(str::to_string);
+    let decision = if is_forge {
+        CloneDecision::Forge {
+            origin_url,
+            branch,
+            tag,
+            commit_sha,
+        }
+    } else {
+        CloneDecision::GitHub {
+            origin_url,
+            branch,
+            tag,
+            commit_sha,
+        }
+    };
+    Ok(decision)
 }
 
 fn normalize_exact_commit_sha(commit_sha: &str) -> crate::Result<String> {
@@ -338,19 +387,38 @@ fn normalize_exact_commit_sha(commit_sha: &str) -> crate::Result<String> {
     })
 }
 
-pub(crate) fn clean_clone_origin_for_record(clone_origin_url: Option<&str>) -> Option<String> {
-    clone_origin_url
-        .filter(|url| !url.trim().is_empty())
-        .map(fabro_github::normalize_repo_origin_url)
+/// Canonical origin recorded in persisted sandbox metadata. Origins on the
+/// configured Forgejo instance keep the Forgejo normalizer so an instance
+/// port survives the record; every other origin keeps the GitHub normalizer.
+pub(crate) fn clean_clone_origin_for_record(
+    clone_origin_url: Option<&str>,
+    forgejo_instance: Option<&fabro_forgejo::ForgejoInstance>,
+) -> Option<String> {
+    let origin = clone_origin_url.filter(|url| !url.trim().is_empty())?;
+    Some(match forgejo_instance {
+        Some(instance) if fabro_forgejo::is_forgejo_origin(instance, origin) => {
+            fabro_forgejo::normalize_forgejo_origin_url(origin)
+        }
+        _ => fabro_github::normalize_repo_origin_url(origin),
+    })
 }
 
 pub(crate) fn repo_cloned_for_record(
     skip_clone: bool,
     clone_origin_url: Option<&str>,
+    forgejo_instance: Option<&fabro_forgejo::ForgejoInstance>,
 ) -> Option<bool> {
     Some(matches!(
-        decide_clone(skip_clone, clone_origin_url, None, None, None).ok()?,
-        CloneDecision::GitHub { .. }
+        decide_clone(
+            skip_clone,
+            clone_origin_url,
+            None,
+            None,
+            None,
+            forgejo_instance
+        )
+        .ok()?,
+        CloneDecision::GitHub { .. } | CloneDecision::Forge { .. }
     ))
 }
 
@@ -421,6 +489,7 @@ mod tests {
                 Some("main"),
                 None,
                 None,
+                None
             )
             .unwrap(),
             CloneDecision::EmptyWorkspace {
@@ -432,7 +501,7 @@ mod tests {
     #[test]
     fn missing_origin_creates_empty_workspace() {
         assert_eq!(
-            decide_clone(false, None, None, None, None).unwrap(),
+            decide_clone(false, None, None, None, None, None).unwrap(),
             CloneDecision::EmptyWorkspace {
                 reason: EmptyWorkspaceReason::MissingOrigin,
             }
@@ -448,6 +517,7 @@ mod tests {
                 Some("feature/work"),
                 None,
                 None,
+                None
             )
             .unwrap(),
             CloneDecision::GitHub {
@@ -468,6 +538,7 @@ mod tests {
                 Some("release"),
                 Some("v1.2.3"),
                 None,
+                None
             )
             .unwrap(),
             CloneDecision::GitHub {
@@ -512,9 +583,14 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect_err("non-GitHub origins should fail");
-        assert!(error.to_string().contains("GitHub repository origins only"));
+        assert!(
+            error
+                .to_string()
+                .contains("GitHub and the configured Forgejo instance repository origins only")
+        );
     }
 
     #[test]
@@ -529,6 +605,7 @@ mod tests {
                 Some("moving-branch"),
                 Some("release"),
                 Some(lowercase),
+                None
             )
             .unwrap(),
             CloneDecision::GitHub {
@@ -545,6 +622,7 @@ mod tests {
                 Some("main"),
                 None,
                 Some(uppercase),
+                None
             )
             .unwrap(),
             CloneDecision::GitHub {
@@ -573,6 +651,7 @@ mod tests {
                 None,
                 None,
                 Some(sha),
+                None,
             )
             .expect_err("invalid exact commit SHA should fail");
             assert!(
@@ -592,12 +671,13 @@ mod tests {
                 Some("main"),
                 tag,
                 commit_sha,
+                None,
             )
             .expect_err("pinned checkout with skip-clone should fail");
             assert!(skip_error.to_string().contains("requires cloning"));
 
             for origin in [None, Some(""), Some("   ")] {
-                let error = decide_clone(false, origin, Some("main"), tag, commit_sha)
+                let error = decide_clone(false, origin, Some("main"), tag, commit_sha, None)
                     .expect_err("pinned checkout without an origin should fail");
                 assert!(error.to_string().contains("requires a repository origin"));
             }
@@ -609,6 +689,7 @@ mod tests {
                     branch,
                     tag,
                     commit_sha,
+                    None,
                 )
                 .expect_err("pinned checkout without a branch should fail");
                 assert!(error.to_string().contains("requires a repository branch"));
@@ -623,6 +704,7 @@ mod tests {
             Some("https://github.com/acme/widgets"),
             Some("main"),
             Some(""),
+            None,
             None,
         )
         .expect_err("empty tags should fail");
@@ -848,10 +930,11 @@ mod tests {
 
     #[test]
     fn github_layout_maps_ssh_origin_to_repos_checkout_and_workspace_link() {
-        let layout = github_repo_layout(
+        let layout = clone_repo_layout(
             "git@github.com:brynary/rack-test.git",
             "/workspace",
             "/repos",
+            None,
         )
         .unwrap();
 
@@ -865,10 +948,11 @@ mod tests {
 
     #[test]
     fn github_layout_normalizes_https_origin_and_trims_roots() {
-        let layout = github_repo_layout(
+        let layout = clone_repo_layout(
             "https://github.com/fabro-sh/fabro.git/",
             "/workspace/",
             "/repos/",
+            None,
         )
         .unwrap();
 
@@ -887,7 +971,7 @@ mod tests {
             "https://github.com/acme/..",
             "https://github.com/%2e%2e/widgets",
         ] {
-            let error = github_repo_layout(origin, "/workspace", "/repos")
+            let error = clone_repo_layout(origin, "/workspace", "/repos", None)
                 .expect_err("unsafe path component should fail");
             assert!(
                 error.to_string().contains("safe repository path component"),
@@ -898,10 +982,11 @@ mod tests {
 
     #[test]
     fn repo_symlink_command_quotes_both_paths() {
-        let layout = github_repo_layout(
+        let layout = clone_repo_layout(
             "https://github.com/fabro-sh/fabro",
             "/work space",
             "/repo root",
+            None,
         )
         .unwrap();
 
@@ -914,10 +999,228 @@ mod tests {
     #[test]
     fn record_origin_strips_credentials() {
         assert_eq!(
-            clean_clone_origin_for_record(Some(
-                "https://x-access-token:secret@github.com/acme/widgets.git"
-            )),
+            clean_clone_origin_for_record(
+                Some("https://x-access-token:secret@github.com/acme/widgets.git"),
+                None,
+            ),
             Some("https://github.com/acme/widgets".to_string())
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Forgejo origins
+    // -----------------------------------------------------------------------
+
+    fn forgejo_instance() -> fabro_forgejo::ForgejoInstance {
+        fabro_forgejo::ForgejoInstance::new("https://git.example.com").unwrap()
+    }
+
+    #[test]
+    fn forgejo_origin_produces_a_forge_decision() {
+        let instance = forgejo_instance();
+        assert_eq!(
+            decide_clone(
+                false,
+                Some("git@git.example.com:acme/widgets.git"),
+                Some("feature/work"),
+                None,
+                None,
+                Some(&instance),
+            )
+            .unwrap(),
+            CloneDecision::Forge {
+                origin_url: "https://git.example.com/acme/widgets".to_string(),
+                branch:     Some("feature/work".to_string()),
+                tag:        None,
+                commit_sha: None,
+            }
+        );
+    }
+
+    #[test]
+    fn forgejo_subpath_origin_produces_a_forge_decision() {
+        let instance =
+            fabro_forgejo::ForgejoInstance::new("https://git.example.com/forge").unwrap();
+        assert_eq!(
+            decide_clone(
+                false,
+                Some("https://git.example.com/forge/acme/widgets.git"),
+                Some("main"),
+                None,
+                None,
+                Some(&instance),
+            )
+            .unwrap(),
+            CloneDecision::Forge {
+                origin_url: "https://git.example.com/forge/acme/widgets".to_string(),
+                branch:     Some("main".to_string()),
+                tag:        None,
+                commit_sha: None,
+            }
+        );
+    }
+
+    #[test]
+    fn forgejo_port_bearing_origin_produces_a_forge_decision() {
+        // Forgejo's own default port is 3000; the GitHub normalizer used to
+        // swallow it into the path before the forge dispatch could run.
+        let instance = fabro_forgejo::ForgejoInstance::new("https://git.example.com:3000").unwrap();
+        assert_eq!(
+            decide_clone(
+                false,
+                Some("ssh://git@git.example.com:3000/acme/widgets.git"),
+                Some("main"),
+                None,
+                None,
+                Some(&instance),
+            )
+            .unwrap(),
+            CloneDecision::Forge {
+                origin_url: "https://git.example.com:3000/acme/widgets".to_string(),
+                branch:     Some("main".to_string()),
+                tag:        None,
+                commit_sha: None,
+            }
+        );
+    }
+
+    #[test]
+    fn forgejo_port_bearing_layout_parses_owner_and_repo() {
+        let instance = fabro_forgejo::ForgejoInstance::new("https://git.example.com:3000").unwrap();
+        let layout = clone_repo_layout(
+            "https://x-access-token:forgejo_pat_123@git.example.com:3000/acme/widgets.git",
+            "/workspace",
+            "/repos",
+            Some(&instance),
+        )
+        .unwrap();
+
+        assert_eq!(layout.owner, "acme");
+        assert_eq!(layout.repo, "widgets");
+    }
+
+    #[test]
+    fn forgejo_port_bearing_record_keeps_the_port() {
+        let instance = fabro_forgejo::ForgejoInstance::new("https://git.example.com:3000").unwrap();
+        assert_eq!(
+            clean_clone_origin_for_record(
+                Some("https://x-access-token:secret@git.example.com:3000/acme/widgets.git"),
+                Some(&instance),
+            ),
+            Some("https://git.example.com:3000/acme/widgets".to_string())
+        );
+        // Other origins keep the GitHub normalizer.
+        assert_eq!(
+            clean_clone_origin_for_record(
+                Some("https://github.com/acme/widgets.git/"),
+                Some(&instance),
+            ),
+            Some("https://github.com/acme/widgets".to_string())
+        );
+    }
+
+    #[test]
+    fn github_origins_stay_github_even_with_a_forgejo_instance_configured() {
+        let instance = forgejo_instance();
+        assert_eq!(
+            decide_clone(
+                false,
+                Some("git@github.com:acme/widgets.git"),
+                Some("main"),
+                None,
+                None,
+                Some(&instance),
+            )
+            .unwrap(),
+            CloneDecision::GitHub {
+                origin_url: "https://github.com/acme/widgets".to_string(),
+                branch:     Some("main".to_string()),
+                tag:        None,
+                commit_sha: None,
+            }
+        );
+    }
+
+    #[test]
+    fn forge_origins_fail_without_a_configured_instance() {
+        let error = decide_clone(
+            false,
+            Some("https://git.example.com/acme/widgets.git"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("forge origins without a configured instance should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("GitHub and the configured Forgejo instance repository origins only"),
+            "got: {error}"
+        );
+
+        // A different Forgejo host is not this instance.
+        let instance = forgejo_instance();
+        let error = decide_clone(
+            false,
+            Some("https://other.example.com/acme/widgets"),
+            None,
+            None,
+            None,
+            Some(&instance),
+        )
+        .expect_err("other hosts must not claim this instance");
+        assert!(
+            error
+                .to_string()
+                .contains("GitHub and the configured Forgejo instance repository origins only"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn forge_layout_matches_the_github_layout_math() {
+        let instance = forgejo_instance();
+        let layout = clone_repo_layout(
+            "git@git.example.com:acme/widgets.git",
+            "/workspace",
+            "/repos",
+            Some(&instance),
+        )
+        .unwrap();
+
+        assert_eq!(layout.owner, "acme");
+        assert_eq!(layout.repo, "widgets");
+        assert_eq!(layout.repos_owner_path, "/repos/acme");
+        assert_eq!(layout.primary_repo_path, "/repos/acme/widgets");
+        assert_eq!(layout.primary_repo_link, "/workspace/widgets");
+        assert_eq!(layout.execution_directory, "/workspace/widgets");
+    }
+
+    #[test]
+    fn records_count_forge_clones_as_cloned() {
+        let instance = forgejo_instance();
+        assert_eq!(
+            repo_cloned_for_record(
+                false,
+                Some("https://git.example.com/acme/widgets"),
+                Some(&instance)
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            repo_cloned_for_record(false, Some("https://git.example.com/acme/widgets"), None),
+            None,
+            "a forge origin without a configured instance cannot be classified"
+        );
+        // Unsupported origins are not clone records at all (`None`).
+        assert_eq!(
+            repo_cloned_for_record(
+                false,
+                Some("https://gitlab.com/acme/widgets"),
+                Some(&instance)
+            ),
+            None
         );
     }
 }

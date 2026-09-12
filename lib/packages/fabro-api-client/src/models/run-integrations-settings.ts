@@ -15,8 +15,12 @@
 
 // May contain unused imports in some cases
 // @ts-ignore
+import type { RunIntegrationsForgejoSettings } from './run-integrations-forgejo-settings';
+// May contain unused imports in some cases
+// @ts-ignore
 import type { RunIntegrationsGithubSettings } from './run-integrations-github-settings';
 
 export interface RunIntegrationsSettings {
     'github': RunIntegrationsGithubSettings;
+    'forgejo'?: RunIntegrationsForgejoSettings;
 }

@@ -350,6 +350,7 @@ mod tests {
         .unwrap();
         event::append_event(&source_store, &source_run_id, &Event::PullRequestLinked {
             pull_request: PullRequestLink {
+                forge:  None,
                 owner:  "fabro-sh".to_string(),
                 repo:   "fabro".to_string(),
                 number: 42,

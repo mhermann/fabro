@@ -24,6 +24,7 @@ fabro-environment = { path = "../../components/fabro-environment" }
 fabro-llm = { path = "../../components/fabro-llm" }
 fabro-oauth = { path = "../../foundation/fabro-oauth" }
 fabro-github = { path = "../../components/fabro-github" }
+fabro-forgejo = { path = "../../components/fabro-forgejo" }
 fabro-agent = { path = "../../components/fabro-agent" }
 fabro-dump = { path = "../../components/fabro-dump" }
 fabro-hooks = { path = "../../components/fabro-hooks" }

@@ -16,13 +16,14 @@ use base64::engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_P
 use fabro_config::Storage;
 use fabro_config::bind::{Bind, BindRequest};
 use fabro_config::envfile::{EnvFileRemoval, EnvFileUpdate};
+use fabro_forgejo::ForgejoInstance;
 use fabro_install::{
     GITHUB_APP_VAULT_KEYS, GITHUB_INSTALL_SECRET_KEYS, InstallListenConfig, InstallPersistencePlan,
     InstallSandboxSelection, OBJECT_STORE_ACCESS_KEY_ID_ENV, OBJECT_STORE_SECRET_ACCESS_KEY_ENV,
     PendingSettingsWrite, SecretStoreWrite, merge_server_settings,
     prepare_dev_token_write_for_install, seed_default_environment_in_storage,
-    write_github_app_settings, write_object_store_settings, write_sandbox_settings,
-    write_token_settings,
+    write_forgejo_settings, write_github_app_settings, write_object_store_settings,
+    write_sandbox_settings, write_token_settings,
 };
 use fabro_llm::lithos_catalog::{Catalog, CatalogProvider};
 use fabro_llm::probe::{self, ApiKeyProbeError, ModelTestStatus};
@@ -242,6 +243,7 @@ struct PendingInstall {
     sandbox:            Option<InstallSandboxState>,
     github:             Option<GithubInstallState>,
     pending_github_app: Option<PendingGithubApp>,
+    forgejo:            Option<ForgejoInstallState>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -517,6 +519,28 @@ struct GithubTokenTestInput {
     token: String,
 }
 
+/// `[server.integrations.forgejo]` step input: the instance URL and PAT.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ForgejoTokenInput {
+    url:   String,
+    token: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ForgejoTokenTestInput {
+    url:   String,
+    token: String,
+}
+
+/// Pending Forgejo configuration between the PUT step and install finish.
+/// The token lives only in the pending session and the vault write; the URL
+/// is the only part that lands in settings.toml.
+#[derive(Clone, Debug)]
+struct ForgejoInstallState {
+    url:   String,
+    token: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct GithubAppManifestInput {
     owner:            GithubAppOwnerInput,
@@ -633,6 +657,11 @@ pub fn build_install_router(state: InstallAppState) -> Router {
             post(post_install_github_token_test),
         )
         .route("/install/github/token", put(put_install_github_token))
+        .route(
+            "/install/forgejo/token/test",
+            post(post_install_forgejo_token_test),
+        )
+        .route("/install/forgejo/token", put(put_install_forgejo_token))
         .route(
             "/install/github/app/manifest",
             post(post_install_github_app_manifest),
@@ -1385,6 +1414,74 @@ async fn put_install_github_token(
     StatusCode::NO_CONTENT.into_response()
 }
 
+async fn post_install_forgejo_token_test(
+    State(state): State<InstallAppState>,
+    headers: HeaderMap,
+    Query(query): Query<InstallTokenQuery>,
+    Json(input): Json<ForgejoTokenTestInput>,
+) -> Response {
+    if let Some(response) = require_valid_token(&state, &headers, query.token.as_deref()) {
+        return response;
+    }
+    observe_operator(&state, &headers);
+
+    if input.token.trim().is_empty() {
+        return install_error_response(StatusCode::UNPROCESSABLE_ENTITY, "token is required");
+    }
+    let instance = match ForgejoInstance::new(&input.url) {
+        Ok(instance) => instance,
+        Err(err) => {
+            return install_error_response(StatusCode::UNPROCESSABLE_ENTITY, err.to_string());
+        }
+    };
+
+    match validate_forgejo_token(instance.as_str(), input.token.trim()).await {
+        Ok(username) => Json(serde_json::json!({ "username": username })).into_response(),
+        Err(err) => {
+            warn!(error = ?err, "install Forgejo token validation failed");
+            install_error_response(StatusCode::UNPROCESSABLE_ENTITY, err.to_string())
+        }
+    }
+}
+
+async fn put_install_forgejo_token(
+    State(state): State<InstallAppState>,
+    headers: HeaderMap,
+    Query(query): Query<InstallTokenQuery>,
+    Json(input): Json<ForgejoTokenInput>,
+) -> Response {
+    if let Some(response) = require_valid_token(&state, &headers, query.token.as_deref()) {
+        return response;
+    }
+    observe_operator(&state, &headers);
+
+    let instance = match ForgejoInstance::new(&input.url) {
+        Ok(instance) => instance,
+        Err(err) => {
+            return install_error_response(StatusCode::UNPROCESSABLE_ENTITY, err.to_string());
+        }
+    };
+    if input.token.trim().is_empty() {
+        return install_error_response(StatusCode::UNPROCESSABLE_ENTITY, "token is required");
+    }
+
+    match validate_forgejo_token(instance.as_str(), input.token.trim()).await {
+        Ok(_) => {}
+        Err(err) => {
+            warn!(error = ?err, "install Forgejo token validation failed");
+            return install_error_response(StatusCode::UNPROCESSABLE_ENTITY, err.to_string());
+        }
+    }
+
+    lock_unpoisoned(&state.pending_install, "install session").forgejo =
+        Some(ForgejoInstallState {
+            url:   instance.as_str().to_string(),
+            token: input.token.trim().to_string(),
+        });
+    info!(step = "forgejo_token", "install step completed");
+    StatusCode::NO_CONTENT.into_response()
+}
+
 async fn post_install_github_app_manifest(
     State(state): State<InstallAppState>,
     headers: HeaderMap,
@@ -1543,6 +1640,8 @@ async fn post_install_finish(
     let Some(github) = pending_install.github else {
         return missing_step_response("github");
     };
+    // Forgejo is an optional step: an absent entry simply skips the section.
+    let forgejo = pending_install.forgejo.clone();
 
     let mut settings_doc = toml::Value::Table(toml::Table::default());
     let install_listen = state.install_listen_config();
@@ -1572,6 +1671,17 @@ async fn post_install_finish(
         vault_secrets.push(SecretStoreWrite {
             name:        EnvVars::DAYTONA_API_KEY.to_string(),
             value:       api_key.expose_secret().to_string(),
+            secret_type: VaultSecretType::Token,
+            description: None,
+        });
+    }
+    if let Some(forgejo) = &forgejo {
+        if let Err(err) = write_forgejo_settings(&mut settings_doc, &forgejo.url) {
+            return install_error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+        }
+        vault_secrets.push(SecretStoreWrite {
+            name:        EnvVars::FORGEJO_TOKEN.to_string(),
+            value:       forgejo.token.clone(),
             secret_type: VaultSecretType::Token,
             description: None,
         });
@@ -1968,6 +2078,9 @@ fn completed_steps(pending_install: &PendingInstall) -> Vec<&'static str> {
     if pending_install.github.is_some() {
         steps.push("github");
     }
+    if pending_install.forgejo.is_some() {
+        steps.push("forgejo");
+    }
     steps
 }
 
@@ -2199,6 +2312,30 @@ fn provider_base_url_override(state: &InstallAppState, provider: &CatalogProvide
         .get(provider.id())
         .cloned()
         .unwrap_or_else(|| provider.base_url().to_string())
+}
+
+/// Validate a Forgejo PAT against `{instance}/api/v1/user`, mirroring
+/// [`validate_github_token`] for the Gitea-lineage `Authorization: token`
+/// scheme.
+async fn validate_forgejo_token(instance_url: &str, token: &str) -> anyhow::Result<String> {
+    let endpoint = format!("{instance_url}/api/v1/user");
+    let client = install_http_client_for_url(instance_url)?;
+    let response = client
+        .get(endpoint)
+        .header("Authorization", format!("token {token}"))
+        .header("Accept", "application/json")
+        .header("User-Agent", "fabro-server")
+        .send()
+        .await
+        .map_err(anyhow::Error::new)?;
+    if !response.status().is_success() {
+        bail!("Forgejo returned {}", response.status());
+    }
+    let body: GithubUserResponse = response
+        .json()
+        .await
+        .context("Failed to parse Forgejo user response")?;
+    Ok(body.login)
 }
 
 async fn validate_github_token(state: &InstallAppState, token: &str) -> anyhow::Result<String> {

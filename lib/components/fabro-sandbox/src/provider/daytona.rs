@@ -109,6 +109,7 @@ impl SandboxProvider for DaytonaSandboxProvider {
         let SandboxCreateSpec::Daytona {
             config,
             github_app,
+            forgejo,
             run_id,
             clone_origin_url,
             clone_branch,
@@ -126,6 +127,7 @@ impl SandboxProvider for DaytonaSandboxProvider {
         let sandbox = DaytonaSandbox::new(
             config.as_ref().clone(),
             github_app,
+            forgejo,
             run_id,
             clone_origin_url,
             clone_branch,

@@ -286,6 +286,7 @@ async fn initialized(
                 interviewer:     Arc::new(AutoApproveInterviewer::engine()),
                 base_env:        options.env,
                 github_token:    None,
+                forgejo_token:   None,
                 inputs:          run_options.settings.run.inputs.clone(),
                 dry_run:         run_options.dry_run_enabled(),
                 workflow_path:   None,

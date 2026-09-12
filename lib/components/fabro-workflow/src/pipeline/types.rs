@@ -253,6 +253,9 @@ pub struct SandboxEnvSpec {
     /// plus declared additional repositories). `None` when the run requests
     /// no `GITHUB_TOKEN`.
     pub github_integration: Option<ResolvedGithubIntegration>,
+    /// Whether `[run.integrations.forgejo]` asks for the instance token in
+    /// the sandbox env (`FORGEJO_TOKEN`).
+    pub forgejo_requested:  bool,
     pub origin_url:         Option<String>,
 }
 
@@ -415,6 +418,9 @@ pub struct FinalizeOptions {
 pub struct PublishOptions {
     pub pr_config:  Option<PullRequestSettings>,
     pub github_app: Option<fabro_github::GitHubCredentials>,
+    /// The configured Forgejo instance and PAT. Pull request creation uses it
+    /// when the run origin lives on the instance.
+    pub forgejo:    Option<fabro_forgejo::ForgejoConfig>,
     pub origin_url: Option<String>,
     pub model:      String,
 }

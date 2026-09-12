@@ -94,9 +94,19 @@ fn validate_session_secret(value: &str) -> Result<(), String> {
 }
 
 pub async fn run_all(state: &AppState) -> DiagnosticsReport {
-    let (llm, github, docker_sandbox, cloud_sandbox, kubernetes_sandbox, web_search, crypto) = tokio::join!(
+    let (
+        llm,
+        github,
+        forgejo,
+        docker_sandbox,
+        cloud_sandbox,
+        kubernetes_sandbox,
+        web_search,
+        crypto,
+    ) = tokio::join!(
         check_llm_providers(state),
         check_github_app(state),
+        check_forgejo(state),
         check_docker_sandbox(state),
         check_cloud_sandbox(state),
         check_kubernetes_sandbox(state),
@@ -112,6 +122,7 @@ pub async fn run_all(state: &AppState) -> DiagnosticsReport {
                 checks: vec![
                     llm,
                     github,
+                    forgejo,
                     docker_sandbox,
                     cloud_sandbox,
                     kubernetes_sandbox,
@@ -123,6 +134,76 @@ pub async fn run_all(state: &AppState) -> DiagnosticsReport {
                 checks: vec![crypto, check_storage_dir(state)],
             },
         ],
+    }
+}
+
+/// Forgejo connectivity check: validates the configured PAT against the
+/// instance's authenticated-user endpoint. Skipped when no instance and
+/// token are configured.
+async fn check_forgejo(state: &AppState) -> CheckResult {
+    let settings = state.server_settings();
+    let config = match state
+        .forgejo_config(&settings.server.integrations.forgejo)
+        .await
+    {
+        Ok(config) => config,
+        Err(err) => {
+            return CheckResult {
+                name:        "Forgejo".to_string(),
+                status:      CheckStatus::Error,
+                summary:     "failed to load credentials".to_string(),
+                details:     vec![CheckDetail::new(format!("{err:#}"))],
+                remediation: Some(format!("Check the vault {} secret", EnvVars::FORGEJO_TOKEN)),
+            };
+        }
+    };
+    let Some(config) = config else {
+        return CheckResult {
+            name:        "Forgejo".to_string(),
+            status:      CheckStatus::Warning,
+            summary:     "not configured".to_string(),
+            details:     Vec::new(),
+            remediation: Some(
+                "Set server.integrations.forgejo.{enabled,url} and the vault FORGEJO_TOKEN"
+                    .to_string(),
+            ),
+        };
+    };
+
+    let client = match fabro_http::test_http_client() {
+        Ok(client) => client,
+        Err(err) => {
+            return CheckResult {
+                name:        "Forgejo".to_string(),
+                status:      CheckStatus::Error,
+                summary:     "failed to build HTTP client".to_string(),
+                details:     vec![CheckDetail::new(format!("{err}"))],
+                remediation: Some("Check network/proxy settings".to_string()),
+            };
+        }
+    };
+    let ctx = fabro_forgejo::ForgejoContext::new(&config.token, &config.instance);
+    match fabro_forgejo::get_authenticated_user(&client, &ctx).await {
+        Ok(user) => CheckResult {
+            name:        "Forgejo".to_string(),
+            status:      CheckStatus::Pass,
+            summary:     format!("connected as {}", user.login),
+            details:     vec![CheckDetail::new(format!(
+                "Instance: {config_instance}",
+                config_instance = config.instance
+            ))],
+            remediation: None,
+        },
+        Err(err) => CheckResult {
+            name:        "Forgejo".to_string(),
+            status:      CheckStatus::Error,
+            summary:     "token validation failed".to_string(),
+            details:     vec![CheckDetail::new(format!("{err:#}"))],
+            remediation: Some(format!(
+                "Check the instance URL and the vault {} secret",
+                EnvVars::FORGEJO_TOKEN
+            )),
+        },
     }
 }
 

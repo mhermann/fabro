@@ -82,11 +82,13 @@ struct RunSession {
     artifact_sink:     Option<ArtifactSink>,
     git:               Option<GitCheckpointOptions>,
     github_app:        Option<fabro_github::GitHubCredentials>,
+    forgejo:           Option<fabro_forgejo::ForgejoConfig>,
     registry_override: Option<Arc<HandlerRegistry>>,
     preserve_sandbox:  bool,
     stop_on_terminal:  bool,
     pr_config:         Option<PullRequestSettings>,
     pr_github_app:     Option<fabro_github::GitHubCredentials>,
+    pr_forgejo:        Option<fabro_forgejo::ForgejoConfig>,
     pr_origin_url:     Option<String>,
     pr_model:          String,
     workflow_path:     Option<ManifestPath>,
@@ -114,6 +116,9 @@ pub struct StartServices {
     pub artifact_sink:      Option<ArtifactSink>,
     pub run_control:        Option<Arc<RunControlState>>,
     pub github_app:         Option<fabro_github::GitHubCredentials>,
+    /// The configured Forgejo instance and PAT, when the run origin lives on
+    /// that instance.
+    pub forgejo:            Option<fabro_forgejo::ForgejoConfig>,
     /// The resolved GitHub integration request (interpolated permissions
     /// plus declared additional repositories) to inject into the sandbox
     /// env. Empty when the github integration requests no token.
@@ -537,6 +542,7 @@ impl RunSession {
                 SandboxSpec::Docker {
                     config,
                     github_app: services.github_app.clone(),
+                    forgejo: services.forgejo.clone(),
                     run_id: Some(record.run_id),
                     clone_origin_url: clone_source.origin_url,
                     clone_branch: clone_source.branch,
@@ -553,6 +559,7 @@ impl RunSession {
                 SandboxSpec::Daytona {
                     config: Box::new(config),
                     github_app: services.github_app.clone(),
+                    forgejo: services.forgejo.clone(),
                     run_id: Some(record.run_id),
                     clone_origin_url: clone_source.origin_url,
                     clone_branch: clone_source.branch,
@@ -587,6 +594,7 @@ impl RunSession {
         let sandbox_env = SandboxEnvSpec {
             toml_env,
             github_integration,
+            forgejo_requested: resolved.integrations.forgejo.is_token_requested(),
             origin_url: runtime_origin_url.clone(),
         };
 
@@ -632,11 +640,13 @@ impl RunSession {
             artifact_sink: services.artifact_sink,
             git,
             github_app: services.github_app.clone(),
+            forgejo: services.forgejo.clone(),
             registry_override: services.registry_override,
             preserve_sandbox: resolved.environment.lifecycle.preserve,
             stop_on_terminal: resolved.environment.lifecycle.stop_on_terminal,
             pr_config,
             pr_github_app: services.github_app,
+            pr_forgejo: services.forgejo,
             pr_origin_url: runtime_origin_url,
             pr_model: llm.model,
             workflow_path,
@@ -945,6 +955,7 @@ impl RunSession {
             labels:           record.labels.clone(),
             workflow_slug:    record.workflow_slug.clone(),
             github_app:       self.github_app.clone(),
+            forgejo:          self.forgejo.clone(),
             pre_run_git:      record.git.clone(),
             fork_source_ref:  record.fork_source_ref.clone(),
             base_branch:      record.base_branch().map(str::to_string),
@@ -1083,6 +1094,7 @@ impl RunSession {
         let publish_opts = PublishOptions {
             pr_config:  self.pr_config,
             github_app: self.pr_github_app,
+            forgejo:    self.pr_forgejo,
             origin_url: self.pr_origin_url,
             model:      self.pr_model,
         };
@@ -2561,6 +2573,7 @@ mod tests {
             run_control: None,
             github_app: None,
             github_integration: ResolvedGithubIntegration::default(),
+            forgejo: None,
             vault: Arc::new(AsyncRwLock::new(start_vault(&[]))),
             catalog: test_catalog(),
             on_node: None,

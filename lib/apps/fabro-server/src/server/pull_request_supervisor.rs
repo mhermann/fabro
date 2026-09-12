@@ -184,8 +184,21 @@ async fn attempt_pull_request_creation(
     };
     let catalog = state.catalog();
     let run_store_handle = run_store.clone().into();
+    // The supervisor path serves GitHub-linked runs; a Forgejo run creates
+    // its pull request inline in the publish stage with the instance PAT.
+    let forgejo = state.forgejo.clone();
+    let host = if let Some(config) = forgejo.as_ref().filter(|config| {
+        fabro_forgejo::is_forgejo_origin(&config.instance, &inputs.normalized_origin)
+    }) {
+        pull_request::PullRequestHost::Forgejo(fabro_forgejo::ForgejoContext::new(
+            &config.token,
+            &config.instance,
+        ))
+    } else {
+        pull_request::PullRequestHost::GitHub(github)
+    };
     let request = pull_request::OpenPullRequestRequest {
-        github,
+        host,
         origin_url: &inputs.normalized_origin,
         base_branch: inputs.base_branch,
         head_branch: inputs.run_branch,

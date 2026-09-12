@@ -49,6 +49,7 @@ tar = { workspace = true, optional = true }
 # daytona
 fabro-config = { path = "../../foundation/fabro-config", optional = true }
 fabro-github = { path = "../fabro-github" }
+fabro-forgejo = { path = "../fabro-forgejo" }
 fabro-types = { path = "../../foundation/fabro-types" }
 
 chrono = { workspace = true }

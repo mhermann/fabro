@@ -1,0 +1,88 @@
+---
+title: "Forgejo"
+description: "Run Fabro workflows against a self-hosted Forgejo instance for pull requests and repository clones"
+---
+
+Fabro integrates with self-hosted [Forgejo](https://forgejo.org) instances (Gitea-lineage) for the pull-request lifecycle and repository cloning. When a run's origin points at the configured instance, Fabro creates, merges, and closes pull requests through the Forgejo REST v1 API, and Docker and Daytona sandboxes clone the repository from the instance the same way they clone GitHub repositories.
+
+## What it does
+
+| Capability | How it's used |
+|---|---|
+| **Pull requests** | Create a PR from the run's working branch after a successful run, close it, or merge it (merge, squash, or rebase) — from the web UI or the CLI |
+| **Auto-merge** | Enable auto-merge so the PR merges as soon as required checks pass |
+| **PR reconciliation** | Recover an existing PR by matching the head branch and commit SHA after a stopped run |
+| **Repository clones** | Docker and Daytona sandboxes clone the run's repository from the instance over HTTPS with token auth |
+| **Run token injection** | Expose the instance PAT to the sandbox as `FORGEJO_TOKEN` for git operations inside the run |
+
+Forgejo integration covers pull requests and clones only. It does not replace GitHub App features like browser OAuth login, check reporting, or projects.
+
+## Setup
+
+### 1. Create an access token
+
+Create a personal access token (PAT) on your Forgejo instance with **repository read and write** scopes. Forgejo scopes are fixed at token creation — a token cannot be re-scoped later, so include everything Fabro needs up front:
+
+- Repository read (branches, pull requests)
+- Repository write (create, close, and merge pull requests)
+
+### 2. Configure the instance
+
+Add the instance to server settings:
+
+```toml
+[server.integrations.forgejo]
+enabled = true
+url = "https://git.example.com"
+```
+
+Fabro supports a **single Forgejo instance** per server; `owner/repo` slugs are scoped to it.
+
+### 3. Store the token
+
+Store the PAT in the server vault under `FORGEJO_TOKEN` — it never belongs in settings files:
+
+```bash
+fabro secret set FORGEJO_TOKEN
+```
+
+### Or use `fabro install`
+
+The install flow includes a Forgejo step that collects the instance URL and PAT, validates the token against the instance, writes the URL to settings, and stores the token in the vault:
+
+```bash
+fabro install
+```
+
+### Local runs without server settings
+
+For local CLI runs you can skip settings and use environment variables instead: `FORGEJO_URL` for the instance and `FORGEJO_TOKEN` for the token. Settings take precedence when both are present.
+
+## Sandbox token injection
+
+By default the sandbox has no Forgejo credentials. To let the run's agents and commands perform authenticated git operations against the instance, opt the run in:
+
+```toml
+[run.integrations.forgejo]
+token = true
+```
+
+When enabled, Fabro injects the vault `FORGEJO_TOKEN` into the sandbox environment. Forgejo PAT scopes are fixed at token creation, so — unlike GitHub's per-run permission minting — this flag only decides whether the token is exposed at all.
+
+## Webhooks
+
+Fabro exposes an inert webhook endpoint at `/api/v1/webhooks/forgejo`. Deliveries are verified with an HMAC-SHA256 signature and logged; nothing is triggered by them yet.
+
+Sign the instance's webhook with the vault `FORGEJO_WEBHOOK_SECRET`. Fabro accepts any of these signature headers:
+
+- `X-Forgejo-Signature`
+- `X-Gitea-Signature`
+- `X-Hub-Signature-256` (with a `sha256=` prefix)
+
+## Limitations
+
+- **Single instance** — one Forgejo instance per Fabro server; multiple instances are not supported.
+- **No OAuth login** — Forgejo does not provide browser sign-in for the web UI; authentication stays GitHub App (or token) based.
+- **No automations** — Forgejo events cannot trigger automations.
+- **No tracker** — issues on the Forgejo instance are not read or written.
+- **GitHub-only extras** — `run.integrations.github.additional_repositories` stays GitHub-only; additional repositories beyond the run origin cannot be pulled from Forgejo.
